@@ -63,7 +63,7 @@ It's possible, detail instruction coming soon
 ```
 
 - Configuration file path is ${DATA_DIRECTORY}/{$NETWORK_NAME}/bcnode.conf (example for BTC/Linux: /home/user/.bcnodebtc/main/bcnode.conf)
-- Template of configuration file: doc/bcnode.conf
+- Template of configuration file: https://github.com/eXtremal-ik7/bcnode/blob/master/doc/bcnode.conf
 
 ###### Functionality
 
