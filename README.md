@@ -24,10 +24,10 @@ git clone https://github.com/eXtremal-ik7/libp2p -b version/0.5
 git clone https://github.com/BrianGladman/mpir
 ```
 
-###### How to build on Linux
+###### How to build on Linux (Debian-based)
 
 ```
-sudo apt-get install cmake libssl-dev
+sudo apt-get install cmake libssl-dev yasm texinfo
 
 cd YOUR_BUILD_DIRECTORY/config4cpp
 make -j5
@@ -39,7 +39,8 @@ cmake ../src
 make -j5
 
 cd YOUR_BUILD_DIRECTORY/mpir
-./configure
+./autogen.sh
+./configure --enable-cxx
 make -j5
 sudo make install
 
@@ -58,6 +59,7 @@ It's possible, detail instruction coming soon
 
 ```
 ./bcnodeXXX --help
+./bcnodeXXX --watchlog (for view log in terminal)
 ```
 
 - Configuration file path is ${DATA_DIRECTORY}/{$NETWORK_NAME}/bcnode.conf (example for BTC/Linux: /home/user/.bcnodebtc/main/bcnode.conf)
