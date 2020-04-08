@@ -17,10 +17,12 @@ BCNode: universal blockchain constructor project (prototype)
 
 ###### Download sources
 
+```
 cd YOUR_BUILD_DIRECTORY
 git clone https://github.com/eXtremal-ik7/config4cpp
 git clone https://github.com/eXtremal-ik7/libp2p -b version/0.5
 git clone https://github.com/BrianGladman/mpir
+```
 
 ###### How to build on Linux
 
