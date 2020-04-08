@@ -799,7 +799,9 @@ void Node::AddPeer(const HostAddress &address, const char *name, aioObject *obje
 
   PeerPtr peer = new  Peer(Context_, this, Base, ThreadsNum_, WorkerThreadsNum_, address, object, name);
   if (!ptr->compare_and_exchange(nullptr, peer.get())) {
-    RemovePeer(peer.get());
+    deleteUserEvent(peer.get()->blockDownloadEvent);
+    deleteUserEvent(peer.get()->pingEvent);
+    btcSocketDelete(peer.get()->Socket);
     return;
   }
 
