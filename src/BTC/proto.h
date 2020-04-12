@@ -22,6 +22,8 @@ struct NetworkAddress {
     uint8_t u8[16];
     uint32_t u32[4];
   } ipv6;
+
+  // Port (network byte order)
   uint16_t port;
 
   static constexpr uint8_t ipv4mask[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};

@@ -92,9 +92,9 @@ public:
       if (address.getIpv4(&ipv4)) {
         struct in_addr inaddr;
         inaddr.s_addr = ipv4;
-        write("address: %s:%u, services: %" PRIu64 "\n", inet_ntoa(inaddr), static_cast<unsigned>(address.port), address.services);
+        write("address: %s:%hu, services: %" PRIu64 "\n", inet_ntoa(inaddr), xbetoh(address.port), address.services);
       } else {
-        write("address: ?ipv6:%u, services: %" PRIu64 "\n", static_cast<unsigned>(address.port), address.services);
+        write("address: ?ipv6:%hu, services: %" PRIu64 "\n", xbetoh(address.port), address.services);
       }
     }
 
