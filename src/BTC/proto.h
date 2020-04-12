@@ -18,18 +18,21 @@ public:
 struct NetworkAddress {
   uint32_t time;
   uint64_t services;
-  uint8_t ipv6[16];
+  union {
+    uint8_t u8[16];
+    uint32_t u32[4];
+  } ipv6;
   uint16_t port;
 
   static constexpr uint8_t ipv4mask[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
 
   void reset() {
-    memset(ipv6, 0, sizeof(ipv6));
+    memset(ipv6.u8, 0, sizeof(ipv6));
   }
 
-  bool getIpv4(uint32_t *ipv4) {
-    if (memcmp(ipv6, ipv4mask, sizeof(ipv4mask)) == 0) {
-      *ipv4 = *reinterpret_cast<uint32_t*>(ipv6+12);
+  bool getIpv4(uint32_t *ipv4) const {
+    if (memcmp(ipv6.u8, ipv4mask, sizeof(ipv4mask)) == 0) {
+      *ipv4 = ipv6.u32[3];
       return true;
     } else {
       return false;
@@ -37,8 +40,8 @@ struct NetworkAddress {
   }
 
   void setIpv4(uint32_t ipv4) {
-    memcpy(ipv6, ipv4mask, sizeof(ipv4mask));
-    *reinterpret_cast<uint32_t*>(ipv6+12) = ipv4;
+    memcpy(ipv6.u8, ipv4mask, sizeof(ipv4mask));
+    ipv6.u32[3] = ipv4;
   }
 };
 

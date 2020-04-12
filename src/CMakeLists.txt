@@ -1,18 +1,24 @@
+include("cmake/HunterGate.cmake")
+HunterGate(
+    URL "https://github.com/cpp-pm/hunter/archive/v0.23.253.tar.gz"
+    SHA1 "88ea6d37c897a81a080eb9ae0f69d7807bbb3c73"
+)
+
 cmake_minimum_required(VERSION 3.10)
 project(bcnode)
 
 set (CMAKE_CXX_STANDARD 17)
 option(SANITIZER_ENABLED "Build with address sanitizer" OFF)
-option(GPROF_ENABLED "Build with GNU profiler (use gprof ./exename -p > out.txt)" OFF)
+option(PROFILE_ENABLED "Build for profiling" OFF)
 
 if (SANITIZER_ENABLED)
   set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
 endif()
 
-if (GPROF_ENABLED)
-  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pg")
-  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pg")
+if (PROFILE_ENABLED)
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -fno-inline -fno-omit-frame-pointer")
+  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-inline -fno-omit-frame-pointer")
 endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -43,17 +49,29 @@ else(MSVC)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcx16")
 endif(MSVC)
 
-find_package(OpenSSL REQUIRED)
-find_package(libp2p REQUIRED)
-find_package(config4cpp REQUIRED)
-find_package(mpir REQUIRED)
-
+# TODO: don't use this code, it depends on unstable api https://api.github.com
 set(_tbb_cmake_module_path ${CMAKE_SOURCE_DIR}/cmake)
 include(${_tbb_cmake_module_path}/TBBGet.cmake)
 include(${_tbb_cmake_module_path}/TBBBuild.cmake)
 tbb_get(TBB_ROOT tbb_root SOURCE_CODE)
 tbb_build(TBB_ROOT ${tbb_root} CONFIG_DIR TBB_DIR)
 find_package(TBB REQUIRED tbb)
+
+hunter_add_package(OpenSSL)
+include(${CMAKE_SOURCE_DIR}/cmake/ProjectConfig4cpp.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/ProjectLibp2p.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/ProjectMPIR.cmake)
+find_package(OpenSSL REQUIRED)
+
+
+include_directories(
+  ${CMAKE_SOURCE_DIR}
+  ${ASYNCIO_INCLUDE_DIR}
+  ${CONFIG4CPP_INCLUDE_DIR}
+  ${MPIR_INCLUDE_DIR}
+  ${OPENSSL_INCLUDE_DIR}
+)
+
 
 add_library(bcnodecommon STATIC
   loguru.cpp
@@ -63,8 +81,20 @@ add_library(bcnodecommon STATIC
   common/uint256.cpp
 )
 
+target_include_directories(bcnodecommon PUBLIC
+  ${OPENSSL_INCLUDE_DIR}
+)
+
+add_dependencies(bcnodecommon
+  config4cpp libp2p mpir
+)
+
 add_library(bcnodecrypto STATIC
   crypto/scrypt.cpp
+)
+
+target_include_directories(bcnodecrypto PUBLIC
+  ${OPENSSL_INCLUDE_DIR}
 )
 
 set(BASE_SOURCES
@@ -77,7 +107,7 @@ set(BASE_SOURCES
 )
 
 if (MSVC)
-  set(BASE_SOURCES ${BASE_SOURCES}
+  set(EXTRA_SOURCES
     ${CMAKE_SOURCE_DIR}/msvc/getopt.c
     ${CMAKE_SOURCE_DIR}/msvc/getopt1.c
   )
@@ -87,10 +117,11 @@ endif()
 
 set (COMMON_LIBRARIES
   bcnodecommon
-  ${OPENSSL_LIBRARIES}
   ${ASYNCIO_LIBRARY}
   ${ASYNCIO_EXTRAS_LIBRARY}
   ${P2PUTILS_LIBRARY}
+  OpenSSL::SSL
+  OpenSSL::Crypto
   ${CONFIG4CPP_LIBRARY}
   ${MPIR_LIBRARY}
   ${MPIR_CXX_LIBRARY}
@@ -104,7 +135,7 @@ if (WIN32)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # Add dynamic libraries support
   # Use custom allocator "jemalloc"
-  set(COMMON_LIBRARIES ${COMMON_LIBRARIES} dl jemalloc)
+  set(COMMON_LIBRARIES ${COMMON_LIBRARIES} dl jemalloc rt)
 endif()
 
 # Compiler-specific configuration
@@ -117,17 +148,11 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   )
 endif()
 
-include_directories(
-  ${CMAKE_SOURCE_DIR}
-  ${ASYNCIO_INCLUDE_DIR}
-  ${CONFIG4CPP_INCLUDE_DIR}
-  ${MPIR_INCLUDE_DIR}
-)
-
 macro(prepare_bc_env NAME)
   make_directory(${CMAKE_BINARY_DIR}/${NAME}/BC)
 
   list(APPEND BC_FILES
+    "connection.h"
     "http.h"
     "nativeApi.h"
     "network.h"
@@ -156,38 +181,75 @@ set(BTC_SOURCES
 )
 
 add_executable(bcnode-btc
+  ${EXTRA_SOURCES}
   ${BASE_SOURCES}
   ${BTC_SOURCES}
   BTC/btc.cpp
+)
+
+add_executable(bcterminal-btc
+  ${EXTRA_SOURCES}
+  bcterminal.cpp
+  BTC/proto.cpp
+  common/merkleTree.cpp
 )
 
 target_include_directories(bcnode-btc PUBLIC ${CMAKE_BINARY_DIR}/BTC)
 target_compile_definitions(bcnode-btc PUBLIC -DBC=BTC)
 target_link_libraries(bcnode-btc ${COMMON_LIBRARIES})
 
+target_include_directories(bcterminal-btc PUBLIC ${CMAKE_BINARY_DIR}/BTC)
+target_compile_definitions(bcterminal-btc PUBLIC -DBC=BTC)
+target_link_libraries(bcterminal-btc ${COMMON_LIBRARIES})
+
 # LTC
 prepare_bc_env(LTC)
 
 add_executable(bcnode-ltc
+  ${EXTRA_SOURCES}
   ${BASE_SOURCES}
   ${BTC_SOURCES}
   LTC/ltc.cpp
+)
+
+add_executable(bcterminal-ltc
+  ${EXTRA_SOURCES}
+  bcterminal.cpp
+  BTC/proto.cpp
+  common/merkleTree.cpp
 )
 
 target_include_directories(bcnode-ltc PUBLIC ${CMAKE_BINARY_DIR}/LTC)
 target_compile_definitions(bcnode-ltc PUBLIC -DBC=LTC)
 target_link_libraries(bcnode-ltc ${COMMON_LIBRARIES} bcnodecrypto)
 
+target_include_directories(bcterminal-ltc PUBLIC ${CMAKE_BINARY_DIR}/LTC)
+target_compile_definitions(bcterminal-ltc PUBLIC -DBC=LTC)
+target_link_libraries(bcterminal-ltc ${COMMON_LIBRARIES})
+
 # XPM
 prepare_bc_env(XPM)
 
 add_executable(bcnode-xpm
+  ${EXTRA_SOURCES}
   ${BASE_SOURCES}
   ${BTC_SOURCES}
   XPM/xpm.cpp
   XPM/proto.cpp
 )
 
+add_executable(bcterminal-xpm
+  ${EXTRA_SOURCES}
+  bcterminal.cpp
+  BTC/proto.cpp
+  XPM/proto.cpp
+  common/merkleTree.cpp
+)
+
 target_include_directories(bcnode-xpm PUBLIC ${CMAKE_BINARY_DIR}/XPM ${MPIR_INCLUDE_DIR})
 target_compile_definitions(bcnode-xpm PUBLIC -DBC=XPM)
 target_link_libraries(bcnode-xpm ${COMMON_LIBRARIES})
+
+target_include_directories(bcterminal-xpm PUBLIC ${CMAKE_BINARY_DIR}/XPM)
+target_compile_definitions(bcterminal-xpm PUBLIC -DBC=XPM)
+target_link_libraries(bcterminal-xpm ${COMMON_LIBRARIES})

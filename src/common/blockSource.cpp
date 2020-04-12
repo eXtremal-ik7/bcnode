@@ -53,7 +53,8 @@ void BlockSource::processTask(Task *task)
     return;
   }
 
-  if (!LastKnownIndex_ || LastKnownIndex_ == task->Prev) {
+  BC::Common::BlockIndex *first = task->Indexes.front();
+  if ((!LastKnownIndex_ && first->Prev && first->Prev->OnChain) || LastKnownIndex_ == task->Prev) {
     DownloadQueue_.enqueue(task->Indexes);
     LastKnownIndex_ = task->Indexes.back();
 
@@ -86,8 +87,10 @@ void BlockSource::processTask(TaskHP *task)
     auto now = std::chrono::steady_clock::now();
     std::vector<BC::Common::BlockIndex*> stalledBlocks;
     while (index && !index->OnChain) {
-      if (index->IndexState != BSBlock && std::chrono::duration_cast<std::chrono::seconds>(now-index->DownloadingStartTime).count() >= 8)
+      if (index->IndexState != BSBlock && std::chrono::duration_cast<std::chrono::seconds>(now-index->DownloadingStartTime).count() >= 8) {
+        index->DownloadingStartTime = now;
         stalledBlocks.push_back(index);
+      }
       index = index->Prev;
     }
 
@@ -172,21 +175,6 @@ intrusive_ptr<BlockSource> BlockSourceList::head(unsigned threadsNum, bool creat
 {
   return BlockSource::getOrCreateBlockSource(Head_, threadsNum, createNew, newSourceCreated);
 }
-
-//intrusive_ptr<BlockSource> BlockSourceList::newExclusiveBlockSource(unsigned threadsNum)
-//{
-//  if (!Head_.get()) {
-//    intrusive_ptr<BlockSource> oldValue = nullptr;
-//    BlockSource *newValue = BlockSource::create(threadsNum);
-//    if (Head_.compare_and_exchange(nullptr, newValue)) {
-//      return intrusive_ptr<BlockSource>(newValue);
-//    } else {
-//      delete newValue;
-//    }
-//  }
-
-//  return intrusive_ptr<BlockSource>(nullptr);
-//}
 
 void BlockSourceList::releaseBlockSource(BlockSource *source)
 {

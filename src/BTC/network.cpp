@@ -1268,7 +1268,7 @@ bool Node::scheduleBlocksDownload(Peer *slave)
   else
     slave->scheduleBlocksDownload(1*1000000);
 
-  //  LOG_F(WARNING, "Requested %zu blocks from %s ([%s(%u), %s(%u)]", hashes.size(), slave->Name.c_str(), hashes.front().ToString().c_str(), indexes.front()->Height, hashes.back().ToString().c_str(), indexes.back()->Height);
+//  LOG_F(WARNING, "Requested %zu blocks from %s ([%s(%u), %s(%u)]", hashes.size(), slave->Name.c_str(), hashes.front().ToString().c_str(), indexes.front()->Height, hashes.back().ToString().c_str(), indexes.back()->Height);
   return true;
 }
 

@@ -12,29 +12,30 @@ void Io<Proto::NetworkAddress>::serialize(xmstream &dst, const BTC::Proto::Netwo
 {
   BTC::serialize(dst, data.time);
   BTC::serialize(dst, data.services);
-  dst.write(data.ipv6, sizeof(data.ipv6));
-  BTC::serialize(dst, data.port);
+  dst.write(data.ipv6.u8, sizeof(data.ipv6.u8));
+  BTC::serialize(dst, xhtobe(data.port));
 }
 
 void Io<Proto::NetworkAddress>::unserialize(xmstream &src, BTC::Proto::NetworkAddress &data)
 {
   BTC::unserialize(src, data.time);
   BTC::unserialize(src, data.services);
-  src.read(data.ipv6, sizeof(data.ipv6));
+  src.read(data.ipv6.u8, sizeof(data.ipv6.u8));
   BTC::unserialize(src, data.port);
+  data.port = xbetoh(data.port);
 }
 
 void Io<Proto::NetworkAddressWithoutTime>::serialize(xmstream &dst, const BTC::Proto::NetworkAddressWithoutTime &data)
 {
   BTC::serialize(dst, data.services);
-  dst.write(data.ipv6, sizeof(data.ipv6));
+  dst.write(data.ipv6.u8, sizeof(data.ipv6.u8));
   BTC::serialize(dst, data.port);
 }
 
 void Io<Proto::NetworkAddressWithoutTime>::unserialize(xmstream &src, BTC::Proto::NetworkAddressWithoutTime &data)
 {
   BTC::unserialize(src, data.services);
-  src.read(data.ipv6, sizeof(data.ipv6));
+  src.read(data.ipv6.u8, sizeof(data.ipv6.u8));
   BTC::unserialize(src, data.port);
 }
 
