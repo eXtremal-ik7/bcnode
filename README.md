@@ -11,6 +11,8 @@ BCNode: universal blockchain constructor project (prototype)
 - Compiler with full C++17 support (gcc: 8.0 or higher; clang 7 or higher; msvc 19.14/Visual Studio 2019)
 - CMake build system
 - OpenSSL
+- libsecp256k1
+- RocksDB
 - Intel® Threading Building Blocks
 - mpir (https://github.com/BrianGladman/mpir)
 - libp2p (https://github.com/eXtremal-ik7/libp2p) version 0.5

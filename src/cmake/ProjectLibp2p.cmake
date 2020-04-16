@@ -1,7 +1,7 @@
 include(ExternalProject)
 
-set(LIBP2P_SOURCE_DIRECTORY "${CMAKE_BINARY_DIR}/dependencies/libp2p")
-set(LIBP2P_BUILD_DIRECTORY "${CMAKE_BINARY_DIR}/dependencies/libp2p-build")
+set(LIBP2P_SOURCE_DIRECTORY "${CMAKE_SOURCE_DIR}/../dependencies/libp2p")
+set(LIBP2P_BUILD_DIRECTORY "${CMAKE_SOURCE_DIR}/../dependencies/libp2p-${CMAKE_SYSTEM_PROCESSOR}-${CMAKE_SYSTEM_NAME}")
 set(LIBP2P_VERSION "0.5")
 
 file(MAKE_DIRECTORY ${LIBP2P_BUILD_DIRECTORY})

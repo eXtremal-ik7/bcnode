@@ -1,6 +1,6 @@
 include(ExternalProject)
 
-set(CONFIG4CPP_DIRECTORY "${CMAKE_BINARY_DIR}/dependencies/config4cpp")
+set(CONFIG4CPP_DIRECTORY "${CMAKE_SOURCE_DIR}/../dependencies/config4cpp")
 
 if (NOT MSVC)
   ExternalProject_Add(config4cpp

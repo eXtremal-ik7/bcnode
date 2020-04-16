@@ -1,7 +1,7 @@
 include(ExternalProject)
 
-set(MPIR_DIRECTORY "${CMAKE_BINARY_DIR}/dependencies/mpir")
-set(MPIR_INSTALL_DIRECTORY "${CMAKE_BINARY_DIR}/dependencies/mpir/install")
+set(MPIR_DIRECTORY "${CMAKE_SOURCE_DIR}/../dependencies/mpir")
+set(MPIR_INSTALL_DIRECTORY "${CMAKE_SOURCE_DIR}/../dependencies/install")
 
 if (NOT MSVC)
   ExternalProject_Add(mpir

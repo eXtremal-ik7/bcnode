@@ -58,11 +58,13 @@ tbb_build(TBB_ROOT ${tbb_root} CONFIG_DIR TBB_DIR)
 find_package(TBB REQUIRED tbb)
 
 hunter_add_package(OpenSSL)
+hunter_add_package(rocksdb)
+find_package(OpenSSL REQUIRED)
+find_package(RocksDB CONFIG REQUIRED)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectConfig4cpp.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectLibp2p.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectMPIR.cmake)
-find_package(OpenSSL REQUIRED)
-
+include(${CMAKE_SOURCE_DIR}/cmake/ProjectSecp256k1.cmake)
 
 include_directories(
   ${CMAKE_SOURCE_DIR}
@@ -86,7 +88,7 @@ target_include_directories(bcnodecommon PUBLIC
 )
 
 add_dependencies(bcnodecommon
-  config4cpp libp2p mpir
+  config4cpp libp2p mpir secp256k1
 )
 
 add_library(bcnodecrypto STATIC
