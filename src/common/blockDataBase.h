@@ -48,7 +48,7 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
                                  uint32_t fileOffset=std::numeric_limits<uint32_t>::max());
 
 bool loadingBlockIndex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir);
-bool reindex(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage);
+bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage);
 
 
 class BlockInMemoryIndex {
@@ -111,9 +111,7 @@ private:
   std::function<void(void*, size_t)> Handler_;
   std::function<void()> ErrorHandler_;
   std::vector<uint32_t> ExpectedBlockSizes_;
-  size_t ExpectedBlockSizesIndex_ = 0;
 
-  void *next(size_t *size);
   void fetchPending();
 
 public:

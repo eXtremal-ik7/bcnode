@@ -598,22 +598,26 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex, std::filesystem::path &da
   return true;
 }
 
-bool reindex(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage)
+bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage)
 {
   size_t bufferSize = 0;
   std::unique_ptr<uint8_t[]> data;
   char blockFileName[64];
   unsigned blkFileIndex = 0;
-  std::filesystem::path indexPath = storage.blockDb().dataDir() / "index";
-  std::filesystem::path blocksPath = storage.blockDb().dataDir() / "blocks";
+  std::filesystem::path indexPath = dataDir / "index";
+  std::filesystem::path blocksPath = dataDir / "blocks";
   size_t totalBlockCount = 0;
 
   std::vector<BlockPosition> blockOffsets;
   unsigned threadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
 
   // Cleanup index directory
-  for (std::filesystem::directory_iterator I(indexPath), IE; I != IE; ++I)
-    std::filesystem::remove_all(I->path());
+  {
+    std::error_code errc;
+    std::filesystem::create_directories(indexPath, errc);
+    for (std::filesystem::directory_iterator I(indexPath), IE; I != IE; ++I)
+      std::filesystem::remove_all(I->path());
+  }
 
   // Initialize local index storage
   LinearDataWriter indexStorageWriter;
@@ -630,6 +634,9 @@ bool reindex(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParam
 
       if (!task.Index)
         break;
+
+      if (task.Type != BC::DB::WriteData)
+        continue;
 
       std::pair<uint32_t, uint32_t> position;
 
@@ -795,9 +802,6 @@ BlockSearcher::BlockSearcher(BlockInMemoryIndex &blockIndex, uint32_t magic, Blo
 BlockSearcher::~BlockSearcher()
 {
   fetchPending();
-  size_t serializedBlockSize = 0;
-  while (void *data = next(&serializedBlockSize))
-    Handler_(data, serializedBlockSize);
 }
 
 BC::Common::BlockIndex *BlockSearcher::add(const BC::Proto::BlockHashTy &hash)
@@ -812,20 +816,11 @@ BC::Common::BlockIndex *BlockSearcher::add(const BC::Proto::BlockHashTy &hash)
 
 BC::Common::BlockIndex *BlockSearcher::add(BC::Common::BlockIndex *index)
 {
-  ExpectedBlockSizes_.push_back(index->SerializedBlockSize);
-
   intrusive_ptr<const SerializedDataObject> serializedPtr(index->Serialized);
   if (const SerializedDataObject *serialized = serializedPtr.get()) {
+    fetchPending();
     fileNo = std::numeric_limits<uint32_t>::max();
-    stream.reset();
-    // Serialize block using storage format:
-    //   <magic>:4 <blockSize>:4 <block>
-    // TODO: remove memory copying from here
-    BC::serialize(stream, Magic_);
-    BC::serialize(stream, static_cast<uint32_t>(0));
-    stream.write(serialized->data(), serialized->size());
-    stream.data<uint32_t>()[1] = static_cast<uint32_t>(stream.sizeOf()) - 8;
-    stream.seekSet(0);
+    Handler_(serialized->data(), serialized->size());
   } else if (index->FileNo != std::numeric_limits<uint32_t>::max() &&
              index->FileOffset != std::numeric_limits<uint32_t>::max() &&
              index->SerializedBlockSize != std::numeric_limits<uint32_t>::max()) {
@@ -842,55 +837,13 @@ BC::Common::BlockIndex *BlockSearcher::add(BC::Common::BlockIndex *index)
       fileOffsetBegin = index->FileOffset;
       fileOffsetCurrent = fileOffsetBegin + index->SerializedBlockSize + 8;
     }
+
+    ExpectedBlockSizes_.push_back(index->SerializedBlockSize);
   } else {
     return nullptr;
   }
 
-  if (stream.remaining()) {
-    size_t serializedBlockSize = 0;
-    while (void *data = next(&serializedBlockSize))
-      Handler_(data, serializedBlockSize);
-
-    ExpectedBlockSizesIndex_ = 0;
-    ExpectedBlockSizes_.clear();
-    ExpectedBlockSizes_.push_back(index->SerializedBlockSize);
-  }
-
   return index;
-}
-
-void *BlockSearcher::next(size_t *size)
-{
-  if (!stream.remaining()) {
-    return nullptr;
-  }
-
-  uint32_t magic;
-  uint32_t blockSize;
-  BC::unserialize(stream, magic);
-  BC::unserialize(stream, blockSize);
-  void *data = stream.seek<uint8_t>(blockSize);
-  if (magic != Magic_ || stream.eof()) {
-    char fileName[64];
-    snprintf(fileName, sizeof(fileName), "blk%05u.dat", fileNo);
-    std::filesystem::path path = blocksDirectory / fileName;
-    LOG_F(ERROR, "Invalid block data in file %s", path.c_str());
-    ErrorHandler_();
-    return nullptr;
-  }
-
-  if (blockSize != ExpectedBlockSizes_[ExpectedBlockSizesIndex_]) {
-    char fileName[64];
-    snprintf(fileName, sizeof(fileName), "blk%05u.dat", fileNo);
-    std::filesystem::path path = blocksDirectory / fileName;
-    LOG_F(ERROR, "Invalid block data in file %s: mismatch block size in index(%u) and data file(%u)", path.c_str(), ExpectedBlockSizes_[ExpectedBlockSizesIndex_], blockSize);
-    ErrorHandler_();
-    return nullptr;
-  }
-
-  ExpectedBlockSizesIndex_++;
-  *size = blockSize;
-  return data;
 }
 
 void BlockSearcher::fetchPending()
@@ -901,5 +854,36 @@ void BlockSearcher::fetchPending()
     LOG_F(ERROR, "Can't read data from %s (offset = %u, size = %u)", BlockDb_->blockReader().getFilePath(fileNo).c_str(), fileOffsetBegin, size);
     ErrorHandler_();
   }
+
   stream.seekSet(0);
+  unsigned expectedIndex = 0;
+  while (stream.remaining()) {
+    uint32_t magic;
+    uint32_t blockSize;
+    BC::unserialize(stream, magic);
+    BC::unserialize(stream, blockSize);
+    void *data = stream.seek<uint8_t>(blockSize);
+    if (magic != Magic_ || stream.eof()) {
+      char fileName[64];
+      snprintf(fileName, sizeof(fileName), "blk%05u.dat", fileNo);
+      std::filesystem::path path = blocksDirectory / fileName;
+      LOG_F(ERROR, "Invalid block data in file %s", path.c_str());
+      ErrorHandler_();
+      return;
+    }
+
+    if (blockSize != ExpectedBlockSizes_[expectedIndex]) {
+      char fileName[64];
+      snprintf(fileName, sizeof(fileName), "blk%05u.dat", fileNo);
+      std::filesystem::path path = blocksDirectory / fileName;
+      LOG_F(ERROR, "Invalid block data in file %s: mismatch block size in index(%u) and data file(%u)", path.c_str(), ExpectedBlockSizes_[expectedIndex], blockSize);
+      ErrorHandler_();
+      return;
+    }
+
+    expectedIndex++;
+    Handler_(data, blockSize);
+  }
+
+  ExpectedBlockSizes_.clear();
 }

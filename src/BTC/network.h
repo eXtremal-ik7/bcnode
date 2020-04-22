@@ -10,6 +10,7 @@
 #include <asyncioextras/btc.h>
 
 #include <p2putils/xmstream.h>
+#include <openssl/rand.h>
 #include <tbb/concurrent_queue.h>
 #include <tbb/concurrent_unordered_map.h>
 #include <array>
@@ -374,8 +375,7 @@ public:
     OutgoingConnectionsLimit_ = outgoingConnectionsLimit;
     IncomingConnectionsLimit_ = incomingConnectionsLimit;
     SyncEvent = newUserEvent(base, 0, SyncCb, this);
-    for (unsigned i = 0; i < sizeof(LocalHostNonce_); i++)
-      reinterpret_cast<uint8_t*>(&LocalHostNonce_)[i] = rand();
+    RAND_bytes(reinterpret_cast<unsigned char*>(&LocalHostNonce_), sizeof(LocalHostNonce_));
   }
 
   size_t PeerCount() { return Peers.size(); }

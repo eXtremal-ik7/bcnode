@@ -51,13 +51,15 @@ void Storage::add(ActionTy type, BC::Common::BlockIndex *index, bool wakeUp)
 
 void Storage::wakeUp()
 {
-  userEventActivate(NewTaskEvent_);
+  if (Initialized_)
+    userEventActivate(NewTaskEvent_);
 }
 
 void Storage::onTimer()
 {
+  // Flush all data to disk if no new block within minute
   auto now = std::chrono::steady_clock::now();
-  if (std::chrono::duration_cast<std::chrono::seconds>(now - LastFlushTime_).count() >= 6000)
+  if (std::chrono::duration_cast<std::chrono::seconds>(now - LastFlushTime_).count() >= 60)
     flush();
   userEventStartTimer(TimerEvent_, 10*1000000, 1);
 }
@@ -71,6 +73,7 @@ void Storage::onQueuePush()
     if (task.Type == Connect || task.Type == Disconnect) {
       Archive_->add(task.Index, task.Type);
     } else {
+      LastFlushTime_ = std::chrono::steady_clock::now();
       if (!BlockDb_->writeBlock(task.Index))
         ErrorHandler_();
 

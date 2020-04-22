@@ -828,7 +828,9 @@ void Node::RemovePeer(Peer *peer)
     deleteUserEvent(peer->blockDownloadEvent);
     deleteUserEvent(peer->pingEvent);
     btcSocketDelete(peer->Socket);
-    Peers[peer->Address]->reset();
+    auto ptr = Peers[peer->Address];
+    if (ptr)
+      ptr->reset();
   }
 }
 

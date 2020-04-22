@@ -319,7 +319,7 @@ int main(int argc, char **argv)
     gReindex = 0;
   }
 
-  if (gReindex && !reindex(context.BlockIndex, context.ChainParams, context.Storage)) {
+  if (gReindex && !reindex(context.BlockIndex, context.DataDir, context.ChainParams, context.Storage)) {
     return 1;
   }
 
