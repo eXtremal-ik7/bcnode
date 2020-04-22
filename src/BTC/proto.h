@@ -123,6 +123,10 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     xvector<typename T::TxOut> txOut;
     uint32_t lockTime;
 
+    // Memory only
+    uint32_t SerializedDataOffset = 0;
+    uint32_t SerializedDataSize = 0;
+
     bool hasWitness() const {
       for (size_t i = 0; i < txIn.size(); i++) {
         if (!txIn[i].witnessStack.empty())
@@ -373,13 +377,44 @@ template<typename T> struct Io<Proto::BlockTy<T>> {
   }
 
   static inline void unserialize(xmstream &src, BTC::Proto::BlockTy<T> &data) {
+    size_t blockDataOffset = src.offsetOf();
+
     BTC::unserialize(src, data.header);
-    BTC::unserialize(src, data.vtx);
+
+    uint64_t txNum = 0;
+    unserializeVarSize(src, txNum);
+    if (txNum > src.remaining()) {
+      src.seekEnd(0, true);
+      return;
+    }
+
+    data.vtx.resize(txNum);
+    for (uint64_t i = 0; i < txNum; i++) {
+      data.vtx[i].SerializedDataOffset = static_cast<uint32_t>(src.offsetOf() - blockDataOffset);
+      BTC::unserialize(src, data.vtx[i]);
+      data.vtx[i].SerializedDataSize = static_cast<uint32_t>(src.offsetOf() - data.vtx[i].SerializedDataOffset);
+    }
   }
 
   static inline void unpack(xmstream &src, DynamicPtr<BTC::Proto::BlockTy<T>> dst) {
+    size_t blockDataOffset = src.offsetOf();
     BTC::unpack(src, DynamicPtr<decltype (dst->header)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, header)));
-    BTC::unpack(src, DynamicPtr<decltype (dst->vtx)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, vtx)));
+
+    {
+      auto vtxDst = DynamicPtr<decltype (dst->vtx)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, vtx));
+      uint64_t txNum;
+      unserializeVarSize(src, txNum);
+      size_t dataOffset = vtxDst.stream().offsetOf();
+      vtxDst.stream().reserve(txNum*sizeof(typename T::Transaction));
+
+      new (vtxDst.ptr()) xvector<typename T::Transaction>(reinterpret_cast<typename T::Transaction*>(dataOffset), txNum, false);
+      for (uint64_t i = 0; i < txNum; i++) {
+        auto txPtr = DynamicPtr<typename T::Transaction>(vtxDst.stream(), dataOffset + sizeof(typename T::Transaction)*i);
+        txPtr->SerializedDataOffset = static_cast<uint32_t>(src.offsetOf() - blockDataOffset);
+        BTC::unpack(src, txPtr);
+        txPtr->SerializedDataSize = static_cast<uint32_t>(src.offsetOf() - txPtr->SerializedDataOffset);
+      }
+    }
   }
 
   static inline void unpackFinalize(DynamicPtr<BTC::Proto::BlockTy<T>> dst) {

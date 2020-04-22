@@ -139,16 +139,20 @@ inline uint256 uint256S(const std::string& str)
     return rv;
 }
 
-//inline size_t tbb_hasher(const uint256& t)
-//{
-//    return t.GetUint64(0);
-//}
-
 template<>
-class std::hash<uint256> {
-public:
+struct std::hash<uint256> {
   size_t operator()(const uint256 &s) const {
     return s.GetUint64(0);
+  }
+};
+
+struct TbbHash256 {
+  size_t hash(const uint256 &s) const {
+    return s.GetUint64(0);
+  }
+
+  bool equal(const uint256 &s1, const uint256 &s2) const {
+    return s1 == s2;
   }
 };
 

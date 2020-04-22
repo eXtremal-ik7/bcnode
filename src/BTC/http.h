@@ -6,13 +6,19 @@
 #include <p2putils/HttpRequestParse.h>
 #include <tbb/concurrent_hash_map.h>
 
-#include "BC/proto.h"
+#include "BC/bc.h"
 
-struct BCNodeContext;
+class BlockDatabase;
+class BlockInMemoryIndex;
 
 namespace BC {
+namespace DB {
+class Archive;
+}
+
 namespace Network {
 
+class Node;
 class HttpApiNode;
 
 class HttpApiConnection {
@@ -26,11 +32,16 @@ private:
     fnGetInfo,
     fnBlockByHash,
     fnBlockByHeight,
+    fnTx,
     fnPeerInfo
   };
 
-  BCNodeContext *Context = nullptr;
-  HttpApiNode *Node = nullptr;
+  BlockInMemoryIndex &BlockIndex_;
+  BC::Common::ChainParams &ChainParams_;
+  BlockDatabase *BlockDb_ = nullptr;
+  BC::Network::Node *Node_ = nullptr;
+  BC::DB::Archive *Storage_ = nullptr;
+  HttpApiNode *HttpNode_ = nullptr;
   aioObject *Socket = nullptr;
   HostAddress Address;
   HttpRequestParserState ParserState;
@@ -47,6 +58,7 @@ private:
 
     // getInfo
     // blockByHash
+    // tx
     BC::Proto::BlockHashTy hash;
     // blockByHeight
     uint32_t height;
@@ -59,7 +71,14 @@ private:
   static int parseCb(HttpRequestComponent *component, void *arg);
 
 public:
-  HttpApiConnection(BCNodeContext &context, HttpApiNode *node, HostAddress address, aioObject *socket);
+  HttpApiConnection(BlockInMemoryIndex &blockIndex,
+                    BC::Common::ChainParams &chainParams,
+                    BlockDatabase &blockDb,
+                    BC::Network::Node &node,
+                    BC::DB::Archive &storage,
+                    HttpApiNode *httpNode,
+                    HostAddress address,
+                    aioObject *socket);
   void start();
   void OnRead(AsyncOpStatus status, size_t size);
   void OnWrite();
@@ -68,6 +87,7 @@ public:
   void OnGetInfo();
   void OnBlockByHash();
   void OnBlockByHeight();
+  void OnTx();
   void OnPeerInfo();
 
   // Helpers
@@ -82,7 +102,11 @@ public:
 
 class HttpApiNode {
 private:
-  BCNodeContext *Context;
+  BlockInMemoryIndex *BlockIndex_;
+  BC::Common::ChainParams *ChainParams_;
+  BlockDatabase *BlockDb_;
+  BC::Network::Node *Node_;
+  BC::DB::Archive *Storage_;
   HostAddress LocalAddress;
   aioObject *ServerSocket = nullptr;
 
@@ -91,7 +115,7 @@ private:
   void OnAccept(HostAddress address, aioObject *socket);
 
 public:
-  bool init(BCNodeContext &context, HostAddress localAddress);
+  bool init(BlockInMemoryIndex *blockIndex, BC::Common::ChainParams *chainParams, BlockDatabase *blockDb, BC::Network::Node *node, BC::DB::Archive &storage, asyncBase *mainBase, HostAddress localAddress);
   void removeConnection(HttpApiConnection *connection);
 };
 

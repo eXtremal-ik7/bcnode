@@ -106,29 +106,33 @@ set(BASE_SOURCES
   common/linearDataStorage.cpp
   common/merkleTree.cpp
   common/thread.cpp
+  db/archive.cpp
+  db/storage.cpp
+  db/txdb.cpp
 )
 
-if (MSVC)
-  set(EXTRA_SOURCES
-    ${CMAKE_SOURCE_DIR}/msvc/getopt.c
-    ${CMAKE_SOURCE_DIR}/msvc/getopt1.c
-  )
-endif()
-
 # Linker configuration
-
-set (COMMON_LIBRARIES
+set(COMMON_LIBRARIES
   bcnodecommon
   ${ASYNCIO_LIBRARY}
   ${ASYNCIO_EXTRAS_LIBRARY}
   ${P2PUTILS_LIBRARY}
   OpenSSL::SSL
   OpenSSL::Crypto
+  RocksDB::rocksdb
   ${CONFIG4CPP_LIBRARY}
-  ${MPIR_LIBRARY}
-  ${MPIR_CXX_LIBRARY}
+  ${MPIR_LIBRARIES}
   ${TBB_IMPORTED_TARGETS}
 )
+
+if (MSVC)
+  add_library(getopt STATIC
+    ${CMAKE_SOURCE_DIR}/msvc/getopt.c
+    ${CMAKE_SOURCE_DIR}/msvc/getopt1.c
+  )
+
+  set(COMMON_LIBRARIES ${COMMON_LIBRARIES} getopt)
+endif()
 
 # OS-specific configuration
 if (WIN32)
@@ -183,14 +187,12 @@ set(BTC_SOURCES
 )
 
 add_executable(bcnode-btc
-  ${EXTRA_SOURCES}
   ${BASE_SOURCES}
   ${BTC_SOURCES}
   BTC/btc.cpp
 )
 
 add_executable(bcterminal-btc
-  ${EXTRA_SOURCES}
   bcterminal.cpp
   BTC/proto.cpp
   common/merkleTree.cpp
@@ -208,14 +210,12 @@ target_link_libraries(bcterminal-btc ${COMMON_LIBRARIES})
 prepare_bc_env(LTC)
 
 add_executable(bcnode-ltc
-  ${EXTRA_SOURCES}
   ${BASE_SOURCES}
   ${BTC_SOURCES}
   LTC/ltc.cpp
 )
 
 add_executable(bcterminal-ltc
-  ${EXTRA_SOURCES}
   bcterminal.cpp
   BTC/proto.cpp
   common/merkleTree.cpp
@@ -233,7 +233,6 @@ target_link_libraries(bcterminal-ltc ${COMMON_LIBRARIES})
 prepare_bc_env(XPM)
 
 add_executable(bcnode-xpm
-  ${EXTRA_SOURCES}
   ${BASE_SOURCES}
   ${BTC_SOURCES}
   XPM/xpm.cpp
@@ -241,7 +240,6 @@ add_executable(bcnode-xpm
 )
 
 add_executable(bcterminal-xpm
-  ${EXTRA_SOURCES}
   bcterminal.cpp
   BTC/proto.cpp
   XPM/proto.cpp

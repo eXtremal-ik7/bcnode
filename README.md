@@ -47,7 +47,7 @@ make -j8
 - Run 'cmake-gui' from terminal
 - Select source ("src" subdirectory in git repo) and your build directory, run 'Configure' (can take a long time!) and 'Generate'.
 - Open Visual Studio solution and build all targets
-- Binaries require "tbb.dll" for running, you can find it YOUR_BUILD_DIRECTORY\in tbb_cmake_build\tbb_cmake_build_subdir_release
+- Binaries require "tbb.dll" (<build directory>/tbb_cmake_build/tbb_cmake_build_subdir_release) and "mpir.dll" (bcnode/dependencies/mpir/dll/x64/Release)
 
 ###### Launch
 
@@ -60,7 +60,7 @@ make -j8
 ./bcterminal-XXX --help
 ```
 
-- Configuration file path is ${DATA_DIRECTORY}/{$NETWORK_NAME}/bcnode.conf (example for BTC/Linux: /home/user/.bcnodebtc/main/bcnode.conf)
+- Configuration file path is ${DATA_DIRECTORY}/${NETWORK_NAME}/bcnode.conf (BTC/Linux: /home/user/.bcnodebtc/main/bcnode.conf; BTC/Windows: %userprofile%\AppData\Roaming\bcnodebtc\main)
 - Template of configuration file: https://github.com/eXtremal-ik7/bcnode/blob/master/doc/bcnode.conf
 
 ###### Functionality
@@ -70,3 +70,4 @@ make -j8
   - http://HOST:PORT/peerInfo
   - http://HOST:PORT/blockByHeight/1000000
   - http://HOST:PORT/blockByHash/a4b2e3f5f77f28e4e2cad9205ec725ef684e311aceb384352818670d38f9fdf8
+  - http://HOST:PORT/tx/d163b06b81b4252bb9b6295bff77754c33bcd65ae22fc91910ee51fca8a21f29 (requires txdb enabled)

@@ -26,8 +26,8 @@ namespace XPM {
 }
 
 namespace XPM {
-class Common {
-public:
+namespace Common {
+
   static constexpr const char *ProjectName = "Primecoin";
   static constexpr const char *TickerName = "XPM";
   static constexpr const char *DefaultDataDir = "bcnodexpm";
@@ -170,13 +170,13 @@ public:
     return true;
   }
 
-  static arith_uint256 GetBlockProof(const XPM::Proto::BlockHeader &header, const ChainParams &chainParams);
+  arith_uint256 GetBlockProof(const XPM::Proto::BlockHeader &header, const ChainParams &chainParams);
 
   static inline bool checkBlockSize(const XPM::Proto::Block &block, size_t serializedSize) { return BTC::Common::checkBlockSize(block, serializedSize); }
 
   // Consensus (PoW)
-  static void checkConsensusInitialize(CheckConsensusCtx &ctx);
-  static bool checkConsensus(const XPM::Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
+  void checkConsensusInitialize(CheckConsensusCtx &ctx);
+  bool checkConsensus(const XPM::Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
 };
 }
 

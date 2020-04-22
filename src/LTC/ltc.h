@@ -21,8 +21,8 @@ namespace LTC {
 }
 
 namespace LTC {
-class Common {
-public:
+namespace Common {
+
   static constexpr const char *ProjectName = "Litecoin";
   static constexpr const char *TickerName = "LTC";
   static constexpr const char *DefaultDataDir = "bcnodeltc";
@@ -173,10 +173,10 @@ public:
     return true;
   }
 
-  static arith_uint256 GetBlockProof(const LTC::Proto::BlockHeader &header, const ChainParams &chainParams);
+  arith_uint256 GetBlockProof(const LTC::Proto::BlockHeader &header, const ChainParams &chainParams);
 
   static inline bool checkBlockSize(const LTC::Proto::Block &block, size_t serializedSize) { return BTC::Common::checkBlockSize(block, serializedSize); }
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
-  static bool checkConsensus(const LTC::Proto::BlockHeader &header, CheckConsensusCtx &ctx, BC::Common::ChainParams &chainParams);
+  bool checkConsensus(const LTC::Proto::BlockHeader &header, CheckConsensusCtx &ctx, BC::Common::ChainParams &chainParams);
 };
 }

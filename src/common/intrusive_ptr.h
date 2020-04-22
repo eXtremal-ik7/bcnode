@@ -195,7 +195,17 @@ public:
     ptr._ptr = nullptr;
   }
 
-  intrusive_ptr& operator=(intrusive_ptr &&ptr) {
+  intrusive_ptr &operator=(T *ptr) {
+    if (_ptr)
+      object_release(_ptr, atomic_intrusive_ptr<T, deleter, tagSize>::WeakRef);
+
+    _ptr = ptr;
+    if (_ptr)
+      object_addref(_ptr, 1);
+    return *this;
+  }
+
+  intrusive_ptr &operator=(intrusive_ptr &&ptr) {
     _ptr = ptr._ptr;
     ptr._ptr = nullptr;
     return *this;

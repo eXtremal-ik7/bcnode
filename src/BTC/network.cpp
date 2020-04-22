@@ -4,8 +4,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "network.h"
-#include <common/bcnode.h>
 #include "common/blockDataBase.h"
+#include "db/storage.h"
 #include <asyncio/socket.h>
 
 namespace BC {
@@ -59,8 +59,18 @@ void Peer::blockDownloadCb(aioUserEvent*, void *arg) { static_cast<Peer*>(arg)->
 void Peer::pingEventCb(aioUserEvent*, void *arg) { static_cast<Peer*>(arg)->ping(); }
 
 
-Peer::Peer(BCNodeContext *context, Node *node, asyncBase *base, unsigned threadsNum, unsigned workerTimeThreadsNum, HostAddress address, aioObject *object, const char *name) :
-  Context(context),
+Peer::Peer(BlockInMemoryIndex &blockIndex,
+           BC::Common::ChainParams &chainParams,
+           BC::DB::Storage &storage,
+           Node *node, asyncBase *base,
+           unsigned threadsNum,
+           unsigned workerTimeThreadsNum,
+           HostAddress address,
+           aioObject *object,
+           const char *name) :
+  BlockIndex_(blockIndex),
+  ChainParams_(chainParams),
+  Storage_(storage),
   Address(address),
   Name(name),
   ParentNode(node),
@@ -104,7 +114,7 @@ Peer::Peer(BCNodeContext *context, Node *node, asyncBase *base, unsigned threads
   blockDownloadEvent = newUserEvent(Base, 0, blockDownloadCb, this);
   pingEvent = newUserEvent(Base, 0, pingEventCb, this);
 
-  btcSocketSetMagic(Socket, Context->chainParams.magic);
+  btcSocketSetMagic(Socket, ChainParams_.magic);
   objectSetDestructorCb(btcSocketHandle(Socket), socketDestructorCb, this);
   objectIncrementReference(btcSocketHandle(Socket), 2);
   eventSetDestructorCb(blockDownloadEvent, eventDestructorCb, this);
@@ -164,7 +174,7 @@ void Peer::onConnect(AsyncOpStatus status)
   msg.addr_from.port = 0;
   msg.nonce = ParentNode->localHostNonce();
   msg.user_agent = BC::Common::UserAgent;
-  msg.start_height = Context->BestIndex.load()->Height;
+  msg.start_height = BlockIndex_.best()->Height;
   msg.relay = 1;
 
   xmstream &stream = LocalStream();
@@ -259,7 +269,7 @@ void Peer::onMessage(AsyncOpStatus status)
         result = BC::unpack<BC::Proto::Block>(serialized, unpacked);
         if (result) {
           size_t unpackedMemorySize = unpacked.capacity();
-          intrusive_ptr<SerializedDataObject> object = Context->BlockCache.add(data, size, msize, unpacked.capture(), unpackedMemorySize);
+          intrusive_ptr<SerializedDataObject> object = Storage_.cache().add(data, size, msize, unpacked.capture(), unpackedMemorySize);
           onBlock(object.get(), std::chrono::steady_clock::now());
         } else {
           LOG_F(ERROR, "Peer %s: can't unserialize block", Name.c_str());
@@ -344,7 +354,7 @@ void Peer::processMessageQueue()
         bool result = BC::unpack<BC::Proto::Block>(serialized, unpacked);
         if (result) {
           size_t unpackedMemorySize = unpacked.capacity();
-          intrusive_ptr<SerializedDataObject> object = peer->Context->BlockCache.add(internalMsg->Data, internalMsg->Size, internalMsg->MemorySize, unpacked.capture(), unpackedMemorySize);
+          intrusive_ptr<SerializedDataObject> object = peer->Storage_.cache().add(internalMsg->Data, internalMsg->Size, internalMsg->MemorySize, unpacked.capture(), unpackedMemorySize);
           peer->onBlock(object.get(), internalMsg->Time);
         } else {
           LOG_F(ERROR, "Peer %s: can't unserialize block", peer->Name.c_str());
@@ -427,8 +437,8 @@ void Peer::onGetHeaders(BC::Proto::MessageGetHeaders &getheaders)
 {
   BC::Proto::MessageHeaders headers;
   for (const auto &hash: getheaders.BlockLocatorHashes) {
-    auto It = Context->blockIndex.find(hash);
-    if (It != Context->blockIndex.end()) {
+    auto It = BlockIndex_.blockIndex().find(hash);
+    if (It != BlockIndex_.blockIndex().end()) {
       unsigned counter = 0;
       BC::Common::BlockIndex *index = It->second;
       index = index->Next;
@@ -457,8 +467,8 @@ void Peer::onGetBlocks(BC::Proto::MessageGetBlocks &getblocks)
   BC::Proto::MessageInv inv;
   BC::Proto::MessageInv inv2;
   for (const auto &hash: getblocks.BlockLocatorHashes) {
-    auto It = Context->blockIndex.find(hash);
-    if (It != Context->blockIndex.end()) {
+    auto It = BlockIndex_.blockIndex().find(hash);
+    if (It != BlockIndex_.blockIndex().end()) {
       unsigned counter = 0;
       BC::Common::BlockIndex *index = It->second;
       index = index->Next;
@@ -483,28 +493,27 @@ void Peer::onGetBlocks(BC::Proto::MessageGetBlocks &getblocks)
 
 void Peer::onGetData(BC::Proto::MessageGetData &getdata)
 {
-  size_t serializedBlockSize;
-  BlockSearcher blockSearcher(*Context);
-  for (const auto &inv: getdata.inventory) {
-    if (inv.type == BC::Proto::MessageInv::MSG_BLOCK) {
-      blockSearcher.add(inv.hash);
-      while (void *data = blockSearcher.next(&serializedBlockSize))
-        sendMessage(MessageTy::block, data, serializedBlockSize);
-    } else {
-      // Other data types not supported now
+  auto handler = [this](void *data, size_t size) {
+    sendMessage(MessageTy::block, data, size);
+  };
+
+  {
+    BlockSearcher searcher(BlockIndex_, ChainParams_.magic, Storage_.blockDb(), handler, [this](){ postQuitOperation(Base); });
+    for (const auto &inv: getdata.inventory) {
+      if (inv.type == BC::Proto::MessageInv::MSG_BLOCK) {
+        searcher.add(inv.hash);
+      } else {
+        // Other data types not supported now
+      }
     }
   }
-
-  blockSearcher.fetchPending();
-  while (void *data = blockSearcher.next(&serializedBlockSize))
-    sendMessage(MessageTy::block, data, serializedBlockSize);
 
   if (ProtocolVersion == 70001) {
     xmstream &stream = LocalStream();
     BC::Proto::MessageInv inv;
     inv.Inventory.resize(1);
     inv.Inventory[0].type = BC::Proto::MessageInv::MSG_BLOCK;
-    inv.Inventory[0].hash = Context->BestIndex.load()->Header.GetHash();
+    inv.Inventory[0].hash = BlockIndex_.best()->Header.GetHash();
     BC::serialize(stream, inv);
     sendMessage(MessageTy::inv, stream.data(), stream.sizeOf());
   }
@@ -549,8 +558,8 @@ void Peer::onInv(BC::Proto::MessageInv &inv)
         break;
       case BC::Proto::MessageInv::MSG_BLOCK : {
         // Check presense of this block
-        auto it = Context->blockIndex.find(element.hash);
-        if (it == Context->blockIndex.end() || it->second->IndexState != BSBlock) {
+        auto it = BlockIndex_.blockIndex().find(element.hash);
+        if (it == BlockIndex_.blockIndex().end() || it->second->IndexState != BSBlock) {
           BC::Proto::InventoryVector iv;
           iv.type = BC::Proto::MessageInv::MSG_BLOCK;
           iv.hash = element.hash;
@@ -655,8 +664,8 @@ bool Peer::fetchQueuedBlocks(xvector<BC::Proto::BlockHashTy> &hashes)
   uint32_t sub = 0x10;
   if ((blockDownloading.fetch_add(sub) & 0xF) == 2) {
     for (auto &hash: ScheduledToDownload_) {
-      auto index = Context->blockIndex.find(hash);
-      if (index == Context->blockIndex.end() || index->second->IndexState != BSBlock)
+      auto index = BlockIndex_.blockIndex().find(hash);
+      if (index == BlockIndex_.blockIndex().end() || index->second->IndexState != BSBlock)
         hashes.emplace_back(hash);
     }
   }
@@ -797,7 +806,7 @@ void Node::AddPeer(const HostAddress &address, const char *name, aioObject *obje
     ptr = It.first->second;
   }
 
-  PeerPtr peer = new  Peer(Context_, this, Base, ThreadsNum_, WorkerThreadsNum_, address, object, name);
+  PeerPtr peer = new  Peer(*BlockIndex_, *ChainParams_, *Storage_, this, Base, ThreadsNum_, WorkerThreadsNum_, address, object, name);
   if (!ptr->compare_and_exchange(nullptr, peer.get())) {
     deleteUserEvent(peer.get()->blockDownloadEvent);
     deleteUserEvent(peer.get()->pingEvent);
@@ -879,7 +888,7 @@ void Node::Sync()
 {
   unsigned interval = 4*1000000;
 
-  BC::Common::BlockIndex *best = Context_->BestIndex.load(std::memory_order::memory_order_relaxed);
+  BC::Common::BlockIndex *best = BlockIndex_->best();
   bool hasConnectedPeers = false;
   std::vector<PeerPtr> candidatesForSync;
 
@@ -971,7 +980,7 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
         return;
       }
 
-      index = AddHeader(*Context_, header, ccCtx);
+      index = AddHeader(*BlockIndex_, *ChainParams_, header, ccCtx);
       if (!index) {
         LOG_F(INFO, "%s: invalid header with hash %s received", currentPeer->Name.c_str(), header.GetHash().ToString().c_str());
         disconnectPeerFromBlockSource(currentPeer, blockSourcePtr);
@@ -995,8 +1004,8 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
     } else {
       // Current peer have more short chain than block source or on another chain
       bool currentPeerOnAnotherChain = true;
-      auto I = Context_->blockIndex.find(headers.front().header.GetHash());
-      if (I != Context_->blockIndex.end()) {
+      auto I = BlockIndex_->blockIndex().find(headers.front().header.GetHash());
+      if (I != BlockIndex_->blockIndex().end()) {
         BC::Common::BlockIndex *index = currentPeer->LastAskedBlock_;
         BC::Common::BlockIndex *receivedIndex = I->second;
         while (index && index->Height > receivedIndex->Height)
@@ -1025,7 +1034,7 @@ void Node::Sync(Peer *peer, SerializedDataObject *object, bool scheduledBlock, b
 {
   BC::Common::CheckConsensusCtx ccCtx;
   BC::Common::checkConsensusInitialize(ccCtx);
-  auto oldBest = Context_->BestIndex.load();
+  auto oldBest = BlockIndex_->best();
 
   auto callback = [this, peer, scheduledBlock](const std::vector<BC::Common::BlockIndex*> &acceptedBlocks) {
     // Relay blocks
@@ -1042,7 +1051,7 @@ void Node::Sync(Peer *peer, SerializedDataObject *object, bool scheduledBlock, b
 
   // Need calculate block hash now
   BC::Common::BlockIndex *index;
-  if ( (index = AddBlock(*Context_, object, ccCtx, callback)) ) {
+  if ( (index = AddBlock(*BlockIndex_, *ChainParams_, *Storage_, object, ccCtx, callback)) ) {
     BC::Proto::BlockHashTy hash = index->Header.GetHash();
     if (index->Height == std::numeric_limits<uint32_t>::max()) {
       LOG_F(INFO, "%s: orhpan block %s received, node possible not synchronized", peer->Name.c_str(), hash.ToString().c_str());
@@ -1067,12 +1076,12 @@ void Node::Sync(Peer *peer, SerializedDataObject *object, bool scheduledBlock, b
   }
 
   if (index) {
-    auto newBest = Context_->BestIndex.load();
+    auto newBest = BlockIndex_->best();
     if (downloadFinished) {
       LOG_F(INFO, "Best chain: %s(%u); Last received: %s(%u); cache: %.3lfM",
             newBest->Header.GetHash().ToString().c_str(), newBest->Height,
             index->Header.GetHash().ToString().c_str(), index->Height,
-            Context_->BlockCache.size() / 1048576.0f);
+            Storage_->cache().size() / 1048576.0f);
     } else if (!scheduledBlock && newBest != oldBest) {
       LOG_F(INFO, "New best chain: %s(%u)", newBest->Header.GetHash().ToString().c_str(), newBest->Height);
     }
@@ -1122,8 +1131,8 @@ void Node::buildBlockLocator(xvector<BC::Proto::BlockHashTy> &hashes, BC::Common
     uint32_t step = 1;
     hashes.emplace_back(start->Header.GetHash());
     for (uint32_t i = start->Height-1; i > step; i -= step) {
-      auto It = Context_->blockHeightIndex.find(i);
-      if (It != Context_->blockHeightIndex.end())
+      auto It = BlockIndex_->blockHeightIndex().find(i);
+      if (It != BlockIndex_->blockHeightIndex().end())
         hashes.emplace_back(It->second->Header.GetHash());
       else
         break;
@@ -1133,7 +1142,7 @@ void Node::buildBlockLocator(xvector<BC::Proto::BlockHashTy> &hashes, BC::Common
     }
   }
 
-  hashes.emplace_back(Context_->chainParams.GenesisBlock.header.GetHash());
+  hashes.emplace_back(ChainParams_->GenesisBlock.header.GetHash());
 }
 
 bool Node::connectPeerToBlockSource(Peer *peer, BlockSource *current, BlockSource *next, bool isProducer)
@@ -1143,7 +1152,7 @@ bool Node::connectPeerToBlockSource(Peer *peer, BlockSource *current, BlockSourc
     peer->IsProducerPeer_ = isProducer;
     if (isProducer) {
       xvector<BC::Proto::BlockHashTy> blockLocator;
-      buildBlockLocator(blockLocator, Context_->BestIndex);
+      buildBlockLocator(blockLocator, BlockIndex_->best());
       peer->downloadHeaders(std::move(blockLocator), BC::Proto::BlockHashTy::getNull());
     }
 
@@ -1205,7 +1214,7 @@ bool Node::scheduleBlocksDownload(Peer *slave)
   }
 
   // Calculate coefficient for adjusting batch size
-  bool blockCacheOverflow = Context_->BlockCache.overflow();
+  bool blockCacheOverflow = Storage_->cache().overflow();
   double coeff = (300.0+slave->averagePing()) / slave->averageDownloadTime();
   // Normalize coefficient
   coeff = std::max(coeff, 0.25);

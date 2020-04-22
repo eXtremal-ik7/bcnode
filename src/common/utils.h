@@ -5,13 +5,7 @@
 
 #pragma once
 
-#if defined(BCNODE_TARGET_BTC)
-#include "BTC/proto.h"
-#elif defined(BCNODE_TARGET_LTC)
-#include "LTC/proto.h"
-#elif defined(BCNODE_TARGET_XPM)
-#include "XPM/proto.h"
-#endif
+#include "BC/proto.h"
 
 static inline void genesis_block_hash_assert_eq(const BC::Proto::BlockHeader &header, const char *targetHash)
 {

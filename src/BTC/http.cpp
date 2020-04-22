@@ -5,9 +5,10 @@
 
 #include "http.h"
 #include "blockIndex.h"
-#include <common/bcnode.h>
 #include "common/blockDataBase.h"
 #include "common/merkleTree.h"
+#include "db/archive.h"
+#include "BC/network.h"
 #include <asyncio/socket.h>
 #include <stdio.h>
 #include "../loguru.hpp"
@@ -24,8 +25,8 @@ void BC::Network::HttpApiConnection::socketDestructorCb(aioObjectRoot*, void *ar
   delete static_cast<BC::Network::HttpApiConnection*>(arg);
 }
 
-BC::Network::HttpApiConnection::HttpApiConnection(BCNodeContext &context, HttpApiNode *node, HostAddress address, aioObject *socket) :
-  Context(&context), Node(node), Socket(socket), Address(address)
+BC::Network::HttpApiConnection::HttpApiConnection(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BlockDatabase &blockDb, BC::Network::Node &node, BC::DB::Archive &storage, HttpApiNode *httpNode, HostAddress address, aioObject *socket) :
+  BlockIndex_(blockIndex), ChainParams_(chainParams), BlockDb_(&blockDb), Node_(&node), Storage_(&storage), HttpNode_(httpNode), Socket(socket), Address(address)
 {
   httpRequestParserInit(&ParserState);
   objectSetDestructorCb(aioObjectHandle(Socket), socketDestructorCb, this);
@@ -41,6 +42,7 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
   static constexpr char getInfo[] = "getInfo";
   static constexpr char blockByHash[] = "blockByHash";
   static constexpr char blockByHeight[] = "blockByHeight";
+  static constexpr char tx[] = "tx";
   static constexpr char peerInfo[] = "peerInfo";
   BC::Network::HttpApiConnection *connection = static_cast<BC::Network::HttpApiConnection*>(arg);
   if (component->type == httpRequestDtMethod) {
@@ -61,6 +63,9 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
     } else if (rawcmp<blockByHeight>(component->data)) {
       requiredMethod = hmGet;
       connection->RPCContext.function = fnBlockByHeight;
+    } else if (rawcmp<tx>(component->data)) {
+      requiredMethod = hmGet;
+      connection->RPCContext.function = fnTx;
     } else if (rawcmp<peerInfo>(component->data)) {
       requiredMethod = hmGet;
       connection->RPCContext.function = fnPeerInfo;
@@ -123,6 +128,26 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
       break;
     }
 
+  case fnTx : {
+    if (connection->RPCContext.argumentsNum == 0 && component->type == httpRequestDtUriPathElement) {
+      std::string hash(component->data.data, component->data.data + component->data.size);
+      connection->RPCContext.hash.SetHex(hash);
+      connection->RPCContext.argumentsNum = 1;
+    }
+
+    if (component->type == httpRequestDtDataLast) {
+      if (connection->RPCContext.argumentsNum == 1) {
+        connection->OnTx();
+      } else {
+        connection->Reply404();
+        return 0;
+      }
+
+    }
+
+    break;
+  }
+
     case fnPeerInfo : {
       if (component->type == httpRequestDtDataLast)
         connection->OnPeerInfo();
@@ -141,7 +166,7 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
 void BC::Network::HttpApiConnection::OnRead(AsyncOpStatus status, size_t)
 {
   if (status != aosSuccess) {
-    Node->removeConnection(this);
+    HttpNode_->removeConnection(this);
     return;
   }
 
@@ -164,12 +189,12 @@ void BC::Network::HttpApiConnection::OnRead(AsyncOpStatus status, size_t)
     }
 
     case ParserResultError : {
-      Node->removeConnection(this);
+      HttpNode_->removeConnection(this);
       break;
     }
 
     case ParserResultCancelled : {
-      Node->removeConnection(this);
+      HttpNode_->removeConnection(this);
       break;
     }
   }
@@ -178,7 +203,7 @@ void BC::Network::HttpApiConnection::OnRead(AsyncOpStatus status, size_t)
 void BC::Network::HttpApiConnection::OnWrite()
 {
   // TODO: check keep alive
-  Node->removeConnection(this);
+  HttpNode_->removeConnection(this);
 }
 
 void BC::Network::HttpApiConnection::OnGetInfo()
@@ -193,62 +218,81 @@ void BC::Network::HttpApiConnection::OnGetInfo()
 
 void BC::Network::HttpApiConnection::OnBlockByHash()
 {
-  size_t size;
-  BlockSearcher searcher(*Context);
-  BC::Common::BlockIndex *index = searcher.add(RPCContext.hash);
-  if (index) {
-    searcher.fetchPending();
-    if (void *data = searcher.next(&size)) {
-      BC::Proto::Block block;
-      {
-        xmstream source(data, size);
-        BC::unserialize(source, block);
-      }
+  BC::Common::BlockIndex *index = nullptr;
+  BC::Proto::Block block;
+  auto handler = [&block](void *data, size_t size) {
+    xmstream source(data, size);
+    BC::unserialize(source, block);
+  };
 
-      xmstream stream;
-      Build200(stream);
-      size_t offset = StartChunk(stream);
-      serializeJson(stream, *index, block);
-      FinishChunk(stream, offset);
-      aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  {
+    BlockSearcher searcher(BlockIndex_, ChainParams_.magic, *BlockDb_, handler, [this](){ postQuitOperation(aioGetBase(Socket)); });
+    index = searcher.add(RPCContext.hash);
+    if (!index) {
+      Reply404();
       return;
     }
   }
 
-  Reply404();
+  xmstream stream;
+  Build200(stream);
+  size_t offset = StartChunk(stream);
+  serializeJson(stream, *index, block);
+  FinishChunk(stream, offset);
+  aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::OnBlockByHeight()
 {
-  auto It = Context->blockHeightIndex.find(RPCContext.height);
-  if (It == Context->blockHeightIndex.end()) {
+  auto It = BlockIndex_.blockHeightIndex().find(RPCContext.height);
+  if (It == BlockIndex_.blockHeightIndex().end()) {
     Reply404();
     return;
   }
 
-  size_t size;
-  BlockSearcher searcher(*Context);
-  BC::Common::BlockIndex *index = searcher.add(It->second->Header.GetHash());
-  if (index) {
-    searcher.fetchPending();
-    if (void *data = searcher.next(&size)) {
-      BC::Proto::Block block;
-      {
-        xmstream source(data, size);
-        BC::unserialize(source, block);
-      }
+  BC::Proto::Block block;
+  auto handler = [&block](void *data, size_t size) {
+    xmstream source(data, size);
+    BC::unserialize(source, block);
+  };
 
-      xmstream stream;
-      Build200(stream);
-      size_t offset = StartChunk(stream);
-      serializeJson(stream, *index, block);
-      FinishChunk(stream, offset);
-      aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  {
+    BlockSearcher searcher(BlockIndex_, ChainParams_.magic, *BlockDb_, handler, [this](){ postQuitOperation(aioGetBase(Socket)); });
+    if (!searcher.add(It->second)) {
+      Reply404();
       return;
     }
   }
 
-  Reply404();
+  xmstream stream;
+  Build200(stream);
+  size_t offset = StartChunk(stream);
+  serializeJson(stream, *It->second, block);
+  FinishChunk(stream, offset);
+  aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+}
+
+void BC::Network::HttpApiConnection::OnTx()
+{
+  BC::DB::TxDb::QueryResult result;
+  if (Storage_->txdb().enabled() && Storage_->txdb().find(RPCContext.hash, BlockIndex_, *BlockDb_, result)) {
+    xmstream stream;
+    Build200(stream);
+    size_t offset = StartChunk(stream);
+
+    stream.write('{');
+    serializeJson(stream, "block", result.Block); stream.write(',');
+    serializeJson(stream, "tx", result.Tx);
+    stream.write('}');
+
+    FinishChunk(stream, offset);
+    aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  } else {
+    if (!result.DataCorrupted)
+      Reply404();
+    else
+      postQuitOperation(aioGetBase(Socket));
+  }
 }
 
 void BC::Network::HttpApiConnection::OnPeerInfo()
@@ -258,7 +302,7 @@ void BC::Network::HttpApiConnection::OnPeerInfo()
   size_t offset = StartChunk(stream);
   bool firstPeer = true;
   stream.write('[');
-  Context->PeerManager.enumeratePeers([&stream, &firstPeer](Peer *peer) {
+  Node_->enumeratePeers([&stream, &firstPeer](Peer *peer) {
     if (!firstPeer)
       stream.write(',');
     serializeJson(stream, *peer);
@@ -319,9 +363,13 @@ void BC::Network::HttpApiNode::acceptCb(AsyncOpStatus status, aioObject *object,
   aioAccept(object, 0, acceptCb, arg);
 }
 
-bool BC::Network::HttpApiNode::init(BCNodeContext &context, HostAddress localAddress)
+bool BC::Network::HttpApiNode::init(BlockInMemoryIndex *blockIndex, BC::Common::ChainParams *chainParams, BlockDatabase *blockDb, BC::Network::Node *node, BC::DB::Archive &storage, asyncBase *mainBase, HostAddress localAddress)
 {
-  Context = &context;
+  BlockIndex_ = blockIndex;
+  ChainParams_ = chainParams;
+  BlockDb_ = blockDb;
+  Node_ = node;
+  Storage_ = &storage;
   LocalAddress = localAddress;
 
   char addressAsString[64];
@@ -345,7 +393,7 @@ bool BC::Network::HttpApiNode::init(BCNodeContext &context, HostAddress localAdd
     return false;
   }
 
-  ServerSocket = newSocketIo(Context->networkBase, socketFd);
+  ServerSocket = newSocketIo(mainBase, socketFd);
   aioAccept(ServerSocket, 0, acceptCb, this);
   LOG_F(INFO, "HTTP Api server started at %s", addressAsString);
   return true;
@@ -353,7 +401,7 @@ bool BC::Network::HttpApiNode::init(BCNodeContext &context, HostAddress localAdd
 
 void BC::Network::HttpApiNode::OnAccept(HostAddress address, aioObject *socket)
 {
-  HttpApiConnection *connection = new HttpApiConnection(*Context, this, address, socket);
+  HttpApiConnection *connection = new HttpApiConnection(*BlockIndex_, *ChainParams_, *BlockDb_, *Node_, *Storage_, this, address, socket);
   connection->start();
 }
 

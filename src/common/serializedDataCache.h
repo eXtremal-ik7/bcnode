@@ -34,14 +34,6 @@ public:
                        size_t unpackedMemorySize) :
     Parent_(parent), Data_(data), DataSize_(dataSize), DataMemSize_(memorySize), UnpackedData_(unpackedData), UnpackedMemSize_(unpackedMemorySize) {}
 
-//  static SerializedDataObject *create(SerializedDataCache *parent,
-//                                      void *data,
-//                                      size_t dataSize,
-//                                      size_t memorySize,
-//                                      void *unpackedData,
-//                                      size_t unpackedMemorySize) {
-//    return new(std::align_val_t{ 512 }) SerializedDataObject(parent, data, dataSize, memorySize, unpackedData, unpackedMemorySize);
-//  }
   ~SerializedDataObject();
 
   void *data() const { return Data_; }

@@ -1,4 +1,5 @@
 #pragma once
+#include "common/blockDataBase.h"
 #include "common/blockSource.h"
 #include "common/hostAddress.h"
 #include "common/serializedDataCache.h"
@@ -37,7 +38,16 @@ static constexpr std::chrono::time_point<std::chrono::steady_clock> TimeUnknown 
 
 class alignas(512) Peer {
 private:
-  Peer(BCNodeContext *context, Node *node, asyncBase *base, unsigned threadsNum, unsigned rtThreadsNum, HostAddress address, aioObject *object, const char *name);
+  Peer(BlockInMemoryIndex &blockIndex,
+       BC::Common::ChainParams &chainParams,
+       BC::DB::Storage &storage,
+       Node *node,
+       asyncBase *base,
+       unsigned threadsNum,
+       unsigned rtThreadsNum,
+       HostAddress address,
+       aioObject *object,
+       const char *name);
 
 public:
   Peer(const Peer&) = delete;
@@ -165,7 +175,9 @@ private:
   }
 
 private:
-  BCNodeContext *Context;
+  BlockInMemoryIndex &BlockIndex_;
+  BC::Common::ChainParams &ChainParams_;
+  BC::DB::Storage &Storage_;
   HostAddress Address;
   std::string Name;
 
@@ -311,7 +323,9 @@ private:
   typedef std::vector<BC::Proto::BlockHashTy> HashArray;
 
 private:
-  BCNodeContext *Context_;
+  BlockInMemoryIndex *BlockIndex_;
+  BC::Common::ChainParams *ChainParams_;
+  BC::DB::Storage *Storage_;
   asyncBase *Base;
   unsigned ThreadsNum_;
   unsigned WorkerThreadsNum_;
@@ -343,13 +357,17 @@ private:
   void OnBCNodeConnection(HostAddress address, aioObject *object);
 
 public:
-  void Init(BCNodeContext *context,
+  void Init(BlockInMemoryIndex &blockIndex,
+            BC::Common::ChainParams &chainParams,
+            BC::DB::Storage &storage,
             asyncBase *base,
             unsigned threadsNum,
             unsigned workerThreadsNum,
             unsigned outgoingConnectionsLimit,
             unsigned incomingConnectionsLimit) {
-    Context_ = context;
+    BlockIndex_ = &blockIndex;
+    ChainParams_ = &chainParams;
+    Storage_ = &storage;
     Base = base;
     ThreadsNum_ = threadsNum;
     WorkerThreadsNum_ = workerThreadsNum;

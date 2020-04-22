@@ -137,7 +137,7 @@ public:
   }
 
   void onPing(BC::Network::Connection<TextTerminal>*) {}
-  void onPong(BC::Network::Connection<TextTerminal>*, long latency) {
+  void onPong(BC::Network::Connection<TextTerminal>*, int64_t latency) {
     write("Latency: %lims\n", latency);
   }
 
@@ -175,7 +175,9 @@ public:
     HANDLE stdInput = GetStdHandle(STD_INPUT_HANDLE);
     GetConsoleMode(stdInput, &mode);
     SetConsoleMode(stdInput, mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT));
-    ReadConsole(stdInput, &first, 1, &bytesRead, NULL);
+    do {
+      ReadConsole(stdInput, &first, 1, &bytesRead, NULL);
+    } while (first != '\r');
     SetConsoleMode(stdInput, mode);
 #else
     termios oldSettings;
@@ -196,7 +198,7 @@ public:
 
     // Lock terminal until user press ENTER
     TerminalMutex_.lock();
-    std::cout << "\nterminal> " << first;
+    std::cout << "\nterminal> ";
     std::cin.getline(out, size);
     flush();
     TerminalMutex_.unlock();

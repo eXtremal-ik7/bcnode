@@ -4,9 +4,9 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "nativeApi.h"
-#include <common/bcnode.h>
 #include <asyncio/socket.h>
 #include "../loguru.hpp"
+#include <stdio.h>
 
 
 void BC::Network::NativeApiNode::acceptCb(AsyncOpStatus status, aioObject *object, HostAddress address, socketTy socketFd, void *arg)
@@ -18,9 +18,9 @@ void BC::Network::NativeApiNode::acceptCb(AsyncOpStatus status, aioObject *objec
   aioAccept(object, 0, acceptCb, arg);
 }
 
-bool BC::Network::NativeApiNode::init(BCNodeContext &context, HostAddress localAddress)
+bool BC::Network::NativeApiNode::init(asyncBase *mainBase, HostAddress localAddress)
 {
-  Context = &context;
+  MainBase_ = mainBase;
   LocalAddress = localAddress;
 
   char addressAsString[64];
@@ -44,7 +44,7 @@ bool BC::Network::NativeApiNode::init(BCNodeContext &context, HostAddress localA
     return false;
   }
 
-  ServerSocket = newSocketIo(Context->networkBase, socketFd);
+  ServerSocket = newSocketIo(MainBase_, socketFd);
   aioAccept(ServerSocket, 0, acceptCb, this);
   LOG_F(INFO, "Native Api server started at %s", addressAsString);
   return true;

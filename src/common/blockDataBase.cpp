@@ -4,10 +4,10 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "blockDataBase.h"
-
-#include "bcnode.h"
 #include "merkleTree.h"
-#include "p2putils/coreTypes.h"
+#include "db/storage.h"
+#include <asyncio/asyncio.h>
+#include <p2putils/coreTypes.h>
 #include <p2putils/xmstream.h>
 #include "loguru.hpp"
 #include <chrono>
@@ -24,6 +24,50 @@ struct BlockPosition {
   uint32_t offset;
   uint32_t size;
 };
+
+
+BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
+                                    BC::Common::BlockIndex *previousBest,
+                                    std::vector<BC::Common::BlockIndex*> &forDisconnect)
+{
+  // New best block found
+  if (newBest->Prev == previousBest) {
+    return newBest;
+  } else {
+    // Rebuild chain from least common ancestor
+    BC::Common::BlockIndex *lb;
+    BC::Common::BlockIndex *sb;
+    if (newBest->Height >= previousBest->Height) {
+      lb = newBest;
+      sb = previousBest;
+      uint32_t sbHeight = sb->Height;
+      while (lb->Height > sbHeight) {
+        lb = lb->Prev;
+      }
+      while (sb != lb) {
+        forDisconnect.push_back(sb);
+        sb = sb->Prev;
+        lb = lb->Prev;
+      }
+
+    } else {
+      lb = previousBest;
+      sb = newBest;
+      uint32_t sbHeight = sb->Height;
+      while (lb->Height > sbHeight) {
+        forDisconnect.push_back(lb);
+        lb = lb->Prev;
+      }
+      while (sb != lb) {
+        forDisconnect.push_back(lb);
+        sb = sb->Prev;
+        lb = lb->Prev;
+      }
+    }
+
+    return sb;
+  }
+}
 
 static inline void QueueNextHeaders(std::deque<BC::Common::BlockIndex*> &queue, BC::Common::BlockIndex *start)
 {
@@ -48,23 +92,25 @@ static inline void QueueNextBlocks(std::deque<BC::Common::BlockIndex*> &queue, B
   }
 }
 
-static void ConnectBlock(BCNodeContext &context, BC::Common::BlockIndex *index, bool silent = true)
+static void ConnectBlock(BlockInMemoryIndex &blockIndex, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
 {
   if (!silent)
     LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().ToString().c_str(), index->Height);
   index->Prev->Next = index;
-  context.blockHeightIndex[index->Height] = index;
+  blockIndex.blockHeightIndex()[index->Height] = index;
+  storage.add(BC::DB::Connect, index);
 }
 
-static void DisconnectBlock(BCNodeContext &context, BC::Common::BlockIndex *index, bool silent = true)
+static void DisconnectBlock(BlockInMemoryIndex &blockIndex, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
 {
   if (!silent)
     LOG_F(INFO, "Disconnect block %s (%u)", index->Header.GetHash().ToString().c_str(), index->Height);
   index->Prev->Next = nullptr;
-  context.blockHeightIndex[index->Height] = nullptr;
+  blockIndex.blockHeightIndex()[index->Height] = nullptr;
+  storage.add(BC::DB::Disconnect, index);
 }
 
-static void BuildHeaderChain(BCNodeContext &context, BC::Common::BlockIndex *start)
+static void BuildHeaderChain(BC::Common::ChainParams &chainParams, BC::Common::BlockIndex *start)
 {
   BC::Common::BlockIndex *currentStart = start;
   std::deque<BC::Common::BlockIndex*> queue;
@@ -77,7 +123,7 @@ static void BuildHeaderChain(BCNodeContext &context, BC::Common::BlockIndex *sta
 
     if (current->Height == std::numeric_limits<uint32_t>::max()) {
       current->Height = prev->Height + 1;
-      current->ChainWork = prev->ChainWork + BC::Common::GetBlockProof(current->Header, context.chainParams);
+      current->ChainWork = prev->ChainWork + BC::Common::GetBlockProof(current->Header, chainParams);
     }
 
     QueueNextHeaders(queue, current);
@@ -85,7 +131,7 @@ static void BuildHeaderChain(BCNodeContext &context, BC::Common::BlockIndex *sta
   }
 }
 
-static void buildBlockChain(BCNodeContext &context, BC::Common::BlockIndex *start, std::vector<BC::Common::BlockIndex*> &acceptedBlocks)
+static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage, BC::Common::BlockIndex *start, std::vector<BC::Common::BlockIndex*> &acceptedBlocks)
 {
   BC::Common::BlockIndex *currentStart = start;
   std::deque<BC::Common::BlockIndex*> queue;
@@ -98,14 +144,14 @@ static void buildBlockChain(BCNodeContext &context, BC::Common::BlockIndex *star
     current->OnChain = prev->OnChain;
     if (current->Height == std::numeric_limits<uint32_t>::max()) {
       current->Height = prev->Height + 1;
-      current->ChainWork = prev->ChainWork + BC::Common::GetBlockProof(current->Header, context.chainParams);
+      current->ChainWork = prev->ChainWork + BC::Common::GetBlockProof(current->Header, chainParams);
     }
 
-    if (current->ChainWork > context.BestIndex.load()->ChainWork) {
+    if (current->ChainWork > blockIndex.best()->ChainWork) {
       // New best block found
-      BC::Common::BlockIndex *previousBest = context.BestIndex.load();
+      BC::Common::BlockIndex *previousBest = blockIndex.best();
       if (current->Prev == previousBest) {
-        ConnectBlock(context, current);
+        ConnectBlock(blockIndex, storage, current);
       } else {
         // Rebuild chain from least common ancestor
         std::vector<BC::Common::BlockIndex*> newPath;
@@ -121,7 +167,7 @@ static void buildBlockChain(BCNodeContext &context, BC::Common::BlockIndex *star
           }
           while (sb != lb) {
             newPath.push_back(lb);
-            DisconnectBlock(context, sb, false);
+            DisconnectBlock(blockIndex, storage, sb, false);
             sb = sb->Prev;
             lb = lb->Prev;
           }
@@ -131,12 +177,12 @@ static void buildBlockChain(BCNodeContext &context, BC::Common::BlockIndex *star
           sb = current;
           uint32_t sbHeight = sb->Height;
           while (lb->Height > sbHeight) {
-            DisconnectBlock(context, lb, false);
+            DisconnectBlock(blockIndex, storage, lb, false);
             lb = lb->Prev;
           }
           while (sb != lb) {
             newPath.push_back(sb);
-            DisconnectBlock(context, lb, false);
+            DisconnectBlock(blockIndex, storage, lb, false);
             sb = sb->Prev;
             lb = lb->Prev;
           }
@@ -144,24 +190,23 @@ static void buildBlockChain(BCNodeContext &context, BC::Common::BlockIndex *star
 
         // Connect blocks from new path
         for (auto I = newPath.rbegin(), IE = newPath.rend(); I != IE; ++I)
-          ConnectBlock(context, *I, false);
+          ConnectBlock(blockIndex, storage, *I, false);
       }
 
-      context.BestIndex = current;
+      blockIndex.setBest(current);
     }
 
     // drop block data cache for connected block
-    StoreTask *task = new StoreTask;
-    task->id = context.storageTaskId++;
-    task->index = current;
     acceptedBlocks.push_back(current);
-    context.storeQueue.push(task);
+//    blockDb.add(current);
+    storage.add(BC::DB::WriteData, current);
+
     QueueNextBlocks(queue, current);
     queue.pop_front();
   }
 }
 
-BC::Common::BlockIndex *AddHeader(BCNodeContext &context, const BC::Proto::BlockHeader &header, BC::Common::CheckConsensusCtx &ccCtx)
+BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, const BC::Proto::BlockHeader &header, BC::Common::CheckConsensusCtx &ccCtx)
 {
   // Check presence of this block
   BlockStatus empty = BSEmpty;
@@ -169,8 +214,8 @@ BC::Common::BlockIndex *AddHeader(BCNodeContext &context, const BC::Proto::Block
   BC::Common::BlockIndex *index = nullptr;
 
   {
-    auto It = context.blockIndex.find(hash);
-    if (It != context.blockIndex.end()) {
+    auto It = blockIndex.blockIndex().find(hash);
+    if (It != blockIndex.blockIndex().end()) {
       // Found BlockIndex structure can describe:
       //  1. Block
       //  2. Stub for previous block (not have predecessor block)
@@ -182,7 +227,7 @@ BC::Common::BlockIndex *AddHeader(BCNodeContext &context, const BC::Proto::Block
   }
 
   // Check consensus (such as PoW)
-  if (!BC::Common::checkConsensus(header, ccCtx, context.chainParams)) {
+  if (!BC::Common::checkConsensus(header, ccCtx, chainParams)) {
     LOG_F(ERROR, "Check Proof-Of-Work failed for block %s", hash.ToString().c_str());
     return nullptr;
   }
@@ -190,7 +235,7 @@ BC::Common::BlockIndex *AddHeader(BCNodeContext &context, const BC::Proto::Block
   // Prepare block index structure for predecessor block
   auto prevIndex = BC::Common::BlockIndex::create(BSEmpty, nullptr);
 
-  auto prevIt = context.blockIndex.insert(std::pair(header.hashPrevBlock, prevIndex));
+  auto prevIt = blockIndex.blockIndex().insert(std::pair(header.hashPrevBlock, prevIndex));
   if (!prevIt.second) {
     delete prevIndex;
     prevIndex = prevIt.first->second;
@@ -199,7 +244,7 @@ BC::Common::BlockIndex *AddHeader(BCNodeContext &context, const BC::Proto::Block
   // Try insert incoming block to index
   if (!index) {
     index = BC::Common::BlockIndex::create(BSHeader, prevIndex);
-    auto It = context.blockIndex.insert(std::pair(hash, index));
+    auto It = blockIndex.blockIndex().insert(std::pair(hash, index));
     if (!It.second) {
       // Already have index for current block
       delete index;
@@ -219,12 +264,19 @@ BC::Common::BlockIndex *AddHeader(BCNodeContext &context, const BC::Proto::Block
   index->ConcurrentHeaderNext = WaitPtr<BC::Common::BlockIndex>();
   index->ConcurrentHeaderNext = prevIndex->SuccessorHeaders.exchange(index, 0);
   if (index->ConcurrentHeaderNext.tag() == 1)
-    BuildHeaderChain(context, prevIndex);
+    BuildHeaderChain(chainParams, prevIndex);
 
   return index;
 }
 
-BC::Common::BlockIndex *AddBlock(BCNodeContext &context, SerializedDataObject *serialized, BC::Common::CheckConsensusCtx &ccCtx, newBestCallback callback, uint32_t fileNo, uint32_t fileOffset)
+BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
+                                 BC::Common::ChainParams &chainParams,
+                                 BC::DB::Storage &storage,
+                                 SerializedDataObject *serialized,
+                                 BC::Common::CheckConsensusCtx &ccCtx,
+                                 newBestCallback callback,
+                                 uint32_t fileNo,
+                                 uint32_t fileOffset)
 {
   BC::Proto::Block *block = static_cast<BC::Proto::Block*>(serialized->unpackedData());
 
@@ -234,8 +286,8 @@ BC::Common::BlockIndex *AddBlock(BCNodeContext &context, SerializedDataObject *s
   bool alreadyHaveHeader = false;
 
   {
-    auto It = context.blockIndex.find(hash);
-    if (It != context.blockIndex.end()) {
+    auto It = blockIndex.blockIndex().find(hash);
+    if (It != blockIndex.blockIndex().end()) {
       index = It->second;
       uint32_t prevIndexState = index->IndexState.exchange(BSBlock);
       if (prevIndexState == BSEmpty) {
@@ -254,7 +306,7 @@ BC::Common::BlockIndex *AddBlock(BCNodeContext &context, SerializedDataObject *s
   // Don't check PoW if we already have header
   if (!alreadyHaveHeader) {
     // Check consensus (such as PoW)
-    if (!BC::Common::checkConsensus(block->header, ccCtx, context.chainParams)) {
+    if (!BC::Common::checkConsensus(block->header, ccCtx, chainParams)) {
       LOG_F(ERROR, "Check Proof-Of-Work failed for block %s", hash.ToString().c_str());
       return nullptr;
     }
@@ -271,7 +323,7 @@ BC::Common::BlockIndex *AddBlock(BCNodeContext &context, SerializedDataObject *s
   // Prepare block index structure for predecessor block
   auto prevIndex = BC::Common::BlockIndex::create(BSEmpty, nullptr);
 
-  auto prevIt = context.blockIndex.insert(std::pair(block->header.hashPrevBlock, prevIndex));
+  auto prevIt = blockIndex.blockIndex().insert(std::pair(block->header.hashPrevBlock, prevIndex));
   if (!prevIt.second) {
     delete prevIndex;
     prevIndex = prevIt.first->second;
@@ -280,7 +332,7 @@ BC::Common::BlockIndex *AddBlock(BCNodeContext &context, SerializedDataObject *s
   // Try insert incoming block to index
   if (!index) {
     index = BC::Common::BlockIndex::create(BSBlock, prevIndex);
-    auto It = context.blockIndex.insert(std::pair(hash, index));
+    auto It = blockIndex.blockIndex().insert(std::pair(hash, index));
     if (!It.second) {
       // Already have index for current block
       delete index;
@@ -315,7 +367,7 @@ BC::Common::BlockIndex *AddBlock(BCNodeContext &context, SerializedDataObject *s
     index->ConcurrentHeaderNext = WaitPtr<BC::Common::BlockIndex>();
     index->ConcurrentHeaderNext = prevIndex->SuccessorHeaders.exchange(index, 0);
     if (index->ConcurrentHeaderNext.tag() == 1)
-      BuildHeaderChain(context, prevIndex);
+      BuildHeaderChain(chainParams, prevIndex);
   }
 
   // Try to continue chain
@@ -327,12 +379,12 @@ BC::Common::BlockIndex *AddBlock(BCNodeContext &context, SerializedDataObject *s
   index->ConcurrentBlockNext = prevIndex->SuccessorBlocks.exchange(index, 0);
   if (index->ConcurrentBlockNext.tag() == 1) {
     std::vector<BC::Common::BlockIndex*> acceptedBlocks;
-    context.ChainStateCombiner.call(static_cast<BlockProcessingTask*>(prevIndex), [&context, &acceptedBlocks](BC::Common::BlockIndex *index) {
-      buildBlockChain(context, index, acceptedBlocks);
+    blockIndex.combiner().call(static_cast<BlockProcessingTask*>(prevIndex), [&blockIndex, &chainParams, &storage, &acceptedBlocks](BC::Common::BlockIndex *index) {
+      buildBlockChain(blockIndex, chainParams, storage, index, acceptedBlocks);
     });
 
-    if (!acceptedBlocks.empty() && context.storageEvent) {
-      userEventActivate(context.storageEvent);
+    if (!acceptedBlocks.empty()) {
+      storage.wakeUp();
       if (callback)
         callback(acceptedBlocks);
     }
@@ -341,7 +393,7 @@ BC::Common::BlockIndex *AddBlock(BCNodeContext &context, SerializedDataObject *s
   return index;
 }
 
-bool loadBlocks(BCNodeContext &context, const char *path, uint8_t *data, BlockPosition *position, size_t blocksNum, uint32_t fileNo)
+bool loadBlocks(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage, const char *path, uint8_t *data, BlockPosition *position, size_t blocksNum, uint32_t fileNo)
 {
   BC::Common::CheckConsensusCtx ccCtx;
   BC::Common::checkConsensusInitialize(ccCtx);
@@ -356,8 +408,8 @@ bool loadBlocks(BCNodeContext &context, const char *path, uint8_t *data, BlockPo
     }
 
     size_t unpackedMemorySize = unpacked.capacity();
-    auto object = context.BlockCache.add(nullptr, stream.sizeOf(), 0, unpacked.capture(), unpackedMemorySize);
-    if (!AddBlock(context, object.get(), ccCtx, nullptr, fileNo, position[i].offset)) {
+    auto object = storage.cache().add(nullptr, stream.sizeOf(), 0, unpacked.capture(), unpackedMemorySize);
+    if (!AddBlock(blockIndex, chainParams, storage, object.get(), ccCtx, nullptr, fileNo, position[i].offset)) {
       LOG_F(ERROR, "Can't parse block file %s (invalid block structure)", path);
       return false;
     }
@@ -366,7 +418,7 @@ bool loadBlocks(BCNodeContext &context, const char *path, uint8_t *data, BlockPo
   return true;
 }
 
-static bool loadBlockIndexDeserializer(BCNodeContext &context, LoadingIndexContext &loadingIndexContext, std::vector<size_t> &blockFileSizes, RawData *data, size_t indexesNum, const char *path)
+static bool loadBlockIndexDeserializer(BlockInMemoryIndex &blockIndex, LoadingIndexContext &loadingIndexContext, std::vector<size_t> &blockFileSizes, RawData *data, size_t indexesNum, const char *path)
 {
   for (size_t i = 0; i < indexesNum; i++) {
     BC::Common::BlockIndex *index = BC::Common::BlockIndex::create(BSBlock, nullptr);
@@ -389,7 +441,7 @@ static bool loadBlockIndexDeserializer(BCNodeContext &context, LoadingIndexConte
 
     // Check proof of work if need
 
-    context.blockIndex.insert(std::pair(index->Header.GetHash(), index));
+    blockIndex.blockIndex().insert(std::pair(index->Header.GetHash(), index));
     loadingIndexContext.allIndexes.push_back(index);
     if (loadingIndexContext.bestIndex == nullptr || index->ChainWork > loadingIndexContext.bestIndex->ChainWork)
       loadingIndexContext.bestIndex = index;
@@ -398,11 +450,11 @@ static bool loadBlockIndexDeserializer(BCNodeContext &context, LoadingIndexConte
   return true;
 }
 
-static bool loadBlockIndexBuilder(BCNodeContext &context, LoadingIndexContext *loadingIndexContext)
+static bool loadBlockIndexBuilder(BlockInMemoryIndex &blockIndex, LoadingIndexContext *loadingIndexContext)
 {
   for (auto &index: loadingIndexContext->allIndexes) {
-    auto It = context.blockIndex.find(index->Header.hashPrevBlock);
-    if (It == context.blockIndex.end()) {
+    auto It = blockIndex.blockIndex().find(index->Header.hashPrevBlock);
+    if (It == blockIndex.blockIndex().end()) {
       LOG_F(ERROR, "Can't find previous block %s for %s (%u)", index->Header.hashPrevBlock.ToString().c_str(), index->Header.GetHash().ToString().c_str(), index->Height);
       return false;
     }
@@ -413,14 +465,14 @@ static bool loadBlockIndexBuilder(BCNodeContext &context, LoadingIndexContext *l
   return true;
 }
 
-bool loadingBlockIndex(BCNodeContext &context)
+bool loadingBlockIndex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir)
 {
   LOG_F(INFO, "Loading block index...");
 
   char fileName[64];
   uint32_t indexFileNo = 0;
-  std::filesystem::path indexPath = context.dataDir / "index";
-  std::filesystem::path blocksPath = context.dataDir / "blocks";
+  std::filesystem::path indexPath = dataDir / "index";
+  std::filesystem::path blocksPath = dataDir / "blocks";
   std::vector<size_t> blockFileSizes;
 
   // Collect block data file sizes
@@ -490,7 +542,7 @@ bool loadingBlockIndex(BCNodeContext &context)
       size_t off = offset;
       size_t size = workLoad + (i < workLoadExtra);
       offset += size;
-      workers[i] = std::async(std::launch::async, loadBlockIndexDeserializer, std::ref(context), std::ref(loadingIndexContext[i]), std::ref(blockFileSizes), &offsets[0] + off, size, path.u8string().c_str());
+      workers[i] = std::async(std::launch::async, loadBlockIndexDeserializer, std::ref(blockIndex), std::ref(loadingIndexContext[i]), std::ref(blockFileSizes), &offsets[0] + off, size, path.u8string().c_str());
     }
 
     for (unsigned i = 0; i < threadsNum; i++) {
@@ -502,7 +554,7 @@ bool loadingBlockIndex(BCNodeContext &context)
 
   // Make links to previous blocks
   for (unsigned i = 0; i < threadsNum; i++)
-    workers[i] = std::async(loadBlockIndexBuilder, std::ref(context), &loadingIndexContext[i]);
+    workers[i] = std::async(loadBlockIndexBuilder, std::ref(blockIndex), &loadingIndexContext[i]);
   for (unsigned i = 0; i < threadsNum; i++) {
     if (!workers[i].get())
       return false;
@@ -519,14 +571,14 @@ bool loadingBlockIndex(BCNodeContext &context)
   LOG_F(INFO, "Loaded %zu blocks", static_cast<size_t>(blocksNum));
 
   if (blocksNum == 0)
-    bestIndex = context.genesisIndex;
+    bestIndex = blockIndex.genesis();
 
   LOG_F(INFO, "Found best index: %s (%u)", bestIndex->Header.GetHash().ToString().c_str(), bestIndex->Height);
   LOG_F(INFO, "Restore best chain...");
 
   BC::Common::BlockIndex *index = bestIndex;
   while (index) {
-    context.blockHeightIndex[index->Height] = index;
+    blockIndex.blockHeightIndex()[index->Height] = index;
 
     BC::Common::BlockIndex *prevIndex = index->Prev;
     if (prevIndex) {
@@ -541,19 +593,19 @@ bool loadingBlockIndex(BCNodeContext &context)
     index = prevIndex;
   }
 
-  context.BestIndex = bestIndex;
+  blockIndex.setBest(bestIndex);
   LOG_F(INFO, "Loading index done");
   return true;
 }
 
-bool reindex(BCNodeContext &context)
+bool reindex(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage)
 {
   size_t bufferSize = 0;
   std::unique_ptr<uint8_t[]> data;
   char blockFileName[64];
   unsigned blkFileIndex = 0;
-  std::filesystem::path indexPath = context.dataDir / "index";
-  std::filesystem::path blocksPath = context.dataDir / "blocks";
+  std::filesystem::path indexPath = storage.blockDb().dataDir() / "index";
+  std::filesystem::path blocksPath = storage.blockDb().dataDir() / "blocks";
   size_t totalBlockCount = 0;
 
   std::vector<BlockPosition> blockOffsets;
@@ -567,27 +619,26 @@ bool reindex(BCNodeContext &context)
   LinearDataWriter indexStorageWriter;
   indexStorageWriter.init(indexPath, "index%05u.dat", BC::Common::BlocksFileLimit);
 
-  auto indexWriter = std::async(std::launch::async, [&context, &indexStorageWriter]() -> bool {
+  auto indexWriter = std::async(std::launch::async, [&storage, &indexStorageWriter]() -> bool {
     xmstream stream;
     for (;;) {
-      StoreTask *task;
-      if (!context.storeQueue.try_pop(task)) {
+      BC::DB::Task task;
+      if (!storage.queue().try_pop(task)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         continue;
       }
 
-      if (!task)
+      if (!task.Index)
         break;
 
       std::pair<uint32_t, uint32_t> position;
 
       stream.reset();
-      BC::serialize(stream, *task->index);
+      BC::serialize(stream, *task.Index);
       uint32_t serializedSize = static_cast<uint32_t>(stream.sizeOf());
       if (!indexStorageWriter.write(&serializedSize, sizeof(serializedSize), stream.data(), static_cast<uint32_t>(stream.sizeOf()), position))
         return false;
-      task->index->Serialized.reset();
-      delete task;
+      task.Index->Serialized.reset();
     }
 
     return true;
@@ -613,13 +664,13 @@ bool reindex(BCNodeContext &context)
       std::unique_ptr<FILE, std::function<void(FILE*)>> hFile(fopen(path.u8string().c_str(), "rb"), [](FILE *f) { fclose(f); });
       if (!hFile.get()) {
         LOG_F(ERROR, "Can't open block file %s", path.c_str());
-        context.storeQueue.push(nullptr);
+        storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
         return false;
       }
 
       if (fread(data.get(), 1, blockFileSize, hFile.get()) != blockFileSize) {
         LOG_F(ERROR, "Can't read block file %s", path.c_str());
-        context.storeQueue.push(nullptr);
+        storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
         return false;
       }
     }
@@ -635,9 +686,9 @@ bool reindex(BCNodeContext &context)
         if (!magic && !blockSize)
           continue;
 
-        if (magic != context.chainParams. magic) {
+        if (magic != chainParams.magic) {
           LOG_F(ERROR, "Can't parse block file %s (invalid magic)", path.c_str());
-          context.storeQueue.push(nullptr);
+          storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
           return false;
         }
 
@@ -657,203 +708,187 @@ bool reindex(BCNodeContext &context)
       size_t off = blockOffset;
       size_t size = workLoad + (i < workLoadExtra);
       blockOffset += size;
-      workers[i] = std::async(std::launch::async, loadBlocks, std::ref(context), path.u8string().c_str(), data.get(), &blockOffsets[0] + off, size, blkFileIndex);
+      workers[i] = std::async(std::launch::async, loadBlocks, std::ref(blockIndex), std::ref(chainParams), std::ref(storage), path.u8string().c_str(), data.get(), &blockOffsets[0] + off, size, blkFileIndex);
     }
 
     for (unsigned i = 0; i < threadsNum; i++) {
       if (!workers[i].get()) {
-        context.storeQueue.push(nullptr);
+        storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
         return false;
       }
     }
 
-    LOG_F(INFO, "%u blocks loaded from %s; cache size: %.3lfM", static_cast<unsigned>(blockOffsets.size()), path.c_str(), context.BlockCache.size() / 1048576.0f);
+    LOG_F(INFO, "%u blocks loaded from %s; cache size: %.3lfM", static_cast<unsigned>(blockOffsets.size()), path.c_str(), storage.cache().size() / 1048576.0f);
     totalBlockCount += blockOffsets.size();
     blkFileIndex++;
   }
 
-  context.storeQueue.push(nullptr);
+  storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
   if (!indexWriter.get())
     return false;
   if (!indexStorageWriter.flush())
     return false;
 
-  auto best = context.BestIndex.load();
+  auto best = blockIndex.best();
   LOG_F(INFO, "%zu blocks loaded from disk", totalBlockCount);
   LOG_F(INFO, "Best block is %s (%u)", best->Header.GetHash().ToString().c_str(), best->Height);
   return true;
 }
 
-static void storageTimerCb(aioUserEvent*, void *arg)
+
+bool BlockDatabase::init(std::filesystem::path &dataDir, BC::Common::ChainParams &chainParams)
 {
-  BCNodeContext *context = static_cast<BCNodeContext*>(arg);
-  auto now = std::chrono::steady_clock::now();
-  if (std::chrono::duration_cast<std::chrono::seconds>(now - context->blockStorageWriter.lastWriteTime()).count() >= 10) {
-    if (!context->blockStorageWriter.flush())
-      shutdown(*context);
-    std::for_each(context->cachedBlocks.begin(), context->cachedBlocks.end(), [](BC::Common::BlockIndex *index) {
-      index->Serialized.reset();
-    });
-    context->cachedBlocks.clear();
-  }
-  if (std::chrono::duration_cast<std::chrono::seconds>(now - context->indexStorageWriter.lastWriteTime()).count() >= 10) {
-    if (!context->indexStorageWriter.flush())
-      shutdown(*context);
-  }
-  userEventStartTimer(context->storageTimer, 4*100000, 1);
-}
+  Magic_ = chainParams.magic;
+  DataDir_ = dataDir;
 
-static void storageEventCb(aioUserEvent*, void *arg)
-{
-  BCNodeContext *context = static_cast<BCNodeContext*>(arg);
-
-  StoreTask *task;
-  while (context->storeQueue.try_pop(task)) {
-    context->cachedBlocks.push_back(task->index);
-
-    std::pair<uint32_t, uint32_t> position;
-    const SerializedDataObject *serialized = task->index->Serialized.get();
-    uint32_t prefix[2] = { context->chainParams.magic, task->index->SerializedBlockSize };
-    if (!context->blockStorageWriter.write(prefix, sizeof(prefix), serialized->data(), static_cast<uint32_t>(serialized->size()), position)) {
-      shutdown(*context);
-      return;
-    }
-
-    if (context->blockStorageWriter.bufferEmpty()) {
-      std::for_each(context->cachedBlocks.begin(), context->cachedBlocks.end(), [](BC::Common::BlockIndex *index) {
-        index->Serialized.reset();
-      });
-      context->cachedBlocks.clear();
-    }
-
-    {
-      // Serialize index for storage
-      uint8_t buffer[1024];
-      xmstream indexData(buffer, sizeof(buffer));
-      task->index->FileNo = position.first;
-      task->index->FileOffset = position.second;
-      indexData.reset();
-      BC::serialize(indexData, *task->index);
-      uint32_t serializedSize = static_cast<uint32_t>(indexData.sizeOf());
-      if (!context->indexStorageWriter.write(&serializedSize, sizeof(serializedSize), indexData.data(), static_cast<uint32_t>(indexData.sizeOf()), position)) {
-        // TODO: shutdown
-        shutdown(*context);
-        return;
-      }
-    }
-
-    delete task;
-  }
-}
-
-bool initializeStorage(BCNodeContext &context, std::thread &storageThread)
-{
-  context.blockStorageReader.init(context.dataDir / "blocks", "blk%05u.dat");
-  if (!context.blockStorageWriter.init(context.dataDir / "blocks", "blk%05u.dat", BC::Common::BlocksFileLimit))
+  blockStorageReader.init(dataDir / "blocks", "blk%05u.dat");
+  if (!blockStorageWriter.init(dataDir / "blocks", "blk%05u.dat", BC::Common::BlocksFileLimit))
     return false;
-  if (!context.indexStorageWriter.init(context.dataDir / "index", "index%05u.dat", BC::Common::BlocksFileLimit))
+  if (!indexStorageWriter.init(dataDir / "index", "index%05u.dat", BC::Common::BlocksFileLimit))
     return false;
 
-  if (context.blockStorageWriter.empty()) {
+  if (blockStorageWriter.empty()) {
     // Store genesis block to disk (for compatibility with core clients)
     // Serialize block using storage format:
     //   <magic>:4 <blockSize>:4 <block>
     std::pair<uint32_t, uint32_t> position;
     xmstream stream;
-    BC::serialize(stream, context.chainParams.GenesisBlock);
-    uint32_t prefix[2] = {context.chainParams.magic, static_cast<uint32_t>(stream.sizeOf())};
-    if (!context.blockStorageWriter.write(prefix, sizeof(prefix), stream.data(), static_cast<uint32_t>(stream.sizeOf()), position))
-      shutdown(context);
+    BC::serialize(stream, chainParams.GenesisBlock);
+    uint32_t prefix[2] = {chainParams.magic, static_cast<uint32_t>(stream.sizeOf())};
+    if (!blockStorageWriter.write(prefix, sizeof(prefix), stream.data(), static_cast<uint32_t>(stream.sizeOf()), position) ||
+        !blockStorageWriter.flush())
+      return false;
   }
 
-  context.storageBase = createAsyncBase(amOSDefault);
-  context.storageEvent = newUserEvent(context.storageBase, 0, storageEventCb, &context);
-  context.storageTimer = newUserEvent(context.storageBase, 0, storageTimerCb, &context);
-  std::thread thread([](asyncBase *base) {
-    loguru::set_thread_name("storage");
-    asyncLoop(base);
-  }, context.storageBase);
-
-  userEventStartTimer(context.storageTimer, 10*100000, 1);
-  storageThread = std::move(thread);
   return true;
 }
 
-void shutdownStorage(BCNodeContext &context)
+bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index)
 {
-  deleteUserEvent(context.storageEvent);
-  deleteUserEvent(context.storageTimer);
-  postQuitOperation(context.storageBase);
+  std::pair<uint32_t, uint32_t> position;
+  const SerializedDataObject *serialized = index->Serialized.get();
+  uint32_t prefix[2] = { Magic_, index->SerializedBlockSize };
+  if (!blockStorageWriter.write(prefix, sizeof(prefix), serialized->data(), static_cast<uint32_t>(serialized->size()), position))
+    return false;
+
+  // Serialize index for storage
+  uint8_t buffer[1024];
+  xmstream indexData(buffer, sizeof(buffer));
+  index->FileNo = position.first;
+  index->FileOffset = position.second;
+  indexData.reset();
+  BC::serialize(indexData, *index);
+  uint32_t serializedSize = static_cast<uint32_t>(indexData.sizeOf());
+  if (!indexStorageWriter.write(&serializedSize, sizeof(serializedSize), indexData.data(), static_cast<uint32_t>(indexData.sizeOf()), position))
+    return false;
+
+  return true;
 }
 
-BlockSearcher::BlockSearcher(BCNodeContext &context) : context(&context) {
-  blocksDirectory = context.dataDir / "blocks";
+
+BlockSearcher::BlockSearcher(BlockInMemoryIndex &blockIndex, uint32_t magic, BlockDatabase &blockDb, std::function<void(void*, size_t)> handler, std::function<void()> errorHandler) :
+  BlockIndex_(&blockIndex), Magic_(magic), BlockDb_(&blockDb), Handler_(handler), ErrorHandler_(errorHandler)
+{
+  blocksDirectory = blockDb.dataDir() / "blocks";
+}
+
+BlockSearcher::~BlockSearcher()
+{
+  fetchPending();
+  size_t serializedBlockSize = 0;
+  while (void *data = next(&serializedBlockSize))
+    Handler_(data, serializedBlockSize);
 }
 
 BC::Common::BlockIndex *BlockSearcher::add(const BC::Proto::BlockHashTy &hash)
 {
-  auto It = context->blockIndex.find(hash);
-  if (It != context->blockIndex.end()) {
-    BC::Common::BlockIndex *index = It->second;
-    intrusive_ptr<const SerializedDataObject> serializedPtr(index->Serialized);
-    if (const SerializedDataObject *serialized = serializedPtr.get()) {
-      fileNo = std::numeric_limits<uint32_t>::max();
-      stream.reset();
-      // Serialize block using storage format:
-      //   <magic>:4 <blockSize>:4 <block>
-      // TODO: remove memory copying from here
-      BC::serialize(stream, context->chainParams.magic);
-      BC::serialize(stream, static_cast<uint32_t>(0));
-      stream.write(serialized->data(), serialized->size());
-      stream.data<uint32_t>()[1] = static_cast<uint32_t>(stream.sizeOf()) - 8;
-      stream.seekSet(0);
-      return index;
-    } else if (index->FileNo != std::numeric_limits<uint32_t>::max() &&
-               index->FileOffset != std::numeric_limits<uint32_t>::max() &&
-               index->SerializedBlockSize != std::numeric_limits<uint32_t>::max()) {
+  auto It = BlockIndex_->blockIndex().find(hash);
+  if (It != BlockIndex_->blockIndex().end()) {
+    return add(It->second);
+  } else {
+    return nullptr;
+  }
+}
 
-      if (fileNo == std::numeric_limits<uint32_t>::max()) {
-        fileNo = index->FileNo;
-        fileOffsetBegin = index->FileOffset;
-        fileOffsetCurrent = fileOffsetBegin + index->SerializedBlockSize + 8;
-      } else if (fileNo == index->FileNo && fileOffsetCurrent == index->FileOffset) {
-        fileOffsetCurrent = index->FileOffset + index->SerializedBlockSize + 8;
-      } else {
-        fetchPending();
-        fileNo = index->FileNo;
-        fileOffsetBegin = index->FileOffset;
-        fileOffsetCurrent = fileOffsetBegin + index->SerializedBlockSize + 8;
-      }
+BC::Common::BlockIndex *BlockSearcher::add(BC::Common::BlockIndex *index)
+{
+  ExpectedBlockSizes_.push_back(index->SerializedBlockSize);
 
-      if (fileOffsetCurrent - fileOffsetBegin >= MaxIoSize)
-        fetchPending();
+  intrusive_ptr<const SerializedDataObject> serializedPtr(index->Serialized);
+  if (const SerializedDataObject *serialized = serializedPtr.get()) {
+    fileNo = std::numeric_limits<uint32_t>::max();
+    stream.reset();
+    // Serialize block using storage format:
+    //   <magic>:4 <blockSize>:4 <block>
+    // TODO: remove memory copying from here
+    BC::serialize(stream, Magic_);
+    BC::serialize(stream, static_cast<uint32_t>(0));
+    stream.write(serialized->data(), serialized->size());
+    stream.data<uint32_t>()[1] = static_cast<uint32_t>(stream.sizeOf()) - 8;
+    stream.seekSet(0);
+  } else if (index->FileNo != std::numeric_limits<uint32_t>::max() &&
+             index->FileOffset != std::numeric_limits<uint32_t>::max() &&
+             index->SerializedBlockSize != std::numeric_limits<uint32_t>::max()) {
 
-      return index;
+    if (fileNo == std::numeric_limits<uint32_t>::max()) {
+      fileNo = index->FileNo;
+      fileOffsetBegin = index->FileOffset;
+      fileOffsetCurrent = fileOffsetBegin + index->SerializedBlockSize + 8;
+    } else if (fileNo == index->FileNo && fileOffsetCurrent == index->FileOffset) {
+      fileOffsetCurrent = index->FileOffset + index->SerializedBlockSize + 8;
+    } else {
+      fetchPending();
+      fileNo = index->FileNo;
+      fileOffsetBegin = index->FileOffset;
+      fileOffsetCurrent = fileOffsetBegin + index->SerializedBlockSize + 8;
     }
+  } else {
+    return nullptr;
   }
 
-  return nullptr;
+  if (stream.remaining()) {
+    size_t serializedBlockSize = 0;
+    while (void *data = next(&serializedBlockSize))
+      Handler_(data, serializedBlockSize);
+
+    ExpectedBlockSizesIndex_ = 0;
+    ExpectedBlockSizes_.clear();
+    ExpectedBlockSizes_.push_back(index->SerializedBlockSize);
+  }
+
+  return index;
 }
 
 void *BlockSearcher::next(size_t *size)
 {
-  if (!stream.remaining())
+  if (!stream.remaining()) {
     return nullptr;
+  }
 
   uint32_t magic;
   uint32_t blockSize;
   BC::unserialize(stream, magic);
   BC::unserialize(stream, blockSize);
   void *data = stream.seek<uint8_t>(blockSize);
-  if (magic != context->chainParams.magic || stream.eof()) {
+  if (magic != Magic_ || stream.eof()) {
     char fileName[64];
     snprintf(fileName, sizeof(fileName), "blk%05u.dat", fileNo);
     std::filesystem::path path = blocksDirectory / fileName;
     LOG_F(ERROR, "Invalid block data in file %s", path.c_str());
-    shutdown(*context);
+    ErrorHandler_();
     return nullptr;
   }
 
+  if (blockSize != ExpectedBlockSizes_[ExpectedBlockSizesIndex_]) {
+    char fileName[64];
+    snprintf(fileName, sizeof(fileName), "blk%05u.dat", fileNo);
+    std::filesystem::path path = blocksDirectory / fileName;
+    LOG_F(ERROR, "Invalid block data in file %s: mismatch block size in index(%u) and data file(%u)", path.c_str(), ExpectedBlockSizes_[ExpectedBlockSizesIndex_], blockSize);
+    ErrorHandler_();
+    return nullptr;
+  }
+
+  ExpectedBlockSizesIndex_++;
   *size = blockSize;
   return data;
 }
@@ -862,9 +897,9 @@ void BlockSearcher::fetchPending()
 {
   stream.reset();
   uint32_t size = fileOffsetCurrent - fileOffsetBegin;
-  if (fileNo != std::numeric_limits<uint32_t>::max() && size && !context->blockStorageReader.read(fileNo, fileOffsetBegin, stream.reserve(size), size)) {
-    LOG_F(ERROR, "Can't read data from %s (offset = %u, size = %u)", context->blockStorageReader.getFilePath(fileNo).c_str(), fileOffsetBegin, size);
-    shutdown(*context);
+  if (fileNo != std::numeric_limits<uint32_t>::max() && size && !BlockDb_->blockReader().read(fileNo, fileOffsetBegin, stream.reserve(size), size)) {
+    LOG_F(ERROR, "Can't read data from %s (offset = %u, size = %u)", BlockDb_->blockReader().getFilePath(fileNo).c_str(), fileOffsetBegin, size);
+    ErrorHandler_();
   }
   stream.seekSet(0);
 }

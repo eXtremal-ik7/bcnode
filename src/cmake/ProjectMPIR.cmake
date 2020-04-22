@@ -10,17 +10,18 @@ if (NOT MSVC)
     GIT_SHALLOW 1
     SOURCE_DIR ${MPIR_DIRECTORY}
     BINARY_DIR ${MPIR_DIRECTORY}
-    CONFIGURE_COMMAND sh ./autogen.sh && sh ./configure --enable-cxx --prefix=${MPIR_INSTALL_DIRECTORY}
+    CONFIGURE_COMMAND sh ./autogen.sh && sh ./configure --enable-cxx --disable-static --enable-shared --prefix=${MPIR_INSTALL_DIRECTORY}
     BUILD_COMMAND ${CMAKE_MAKE_PROGRAM} -j
     INSTALL_COMMAND ${CMAKE_MAKE_PROGRAM} install
     UPDATE_COMMAND ""
   )
 
-  add_library(MPIR_LIBRARY__     STATIC IMPORTED DEPENDS mpir)
-  add_library(MPIR_CXX_LIBRARY__ STATIC IMPORTED DEPENDS mpir)
+  add_library(MPIR_LIBRARY__     SHARED IMPORTED DEPENDS mpir)
+  add_library(MPIR_CXX_LIBRARY__ SHARED IMPORTED DEPENDS mpir)
   set_target_properties(MPIR_LIBRARY__     PROPERTIES IMPORTED_LOCATION ${MPIR_INSTALL_DIRECTORY}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}mpir${CMAKE_STATIC_LIBRARY_SUFFIX})
   set_target_properties(MPIR_CXX_LIBRARY__ PROPERTIES IMPORTED_LOCATION ${MPIR_INSTALL_DIRECTORY}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}mpirxx${CMAKE_STATIC_LIBRARY_SUFFIX})
   set(MPIR_INCLUDE_DIR ${MPIR_DIRECTORY}/install/include)
+  set(MPIR_LIBRARIES MPIR_LIBRARY__ MPIR_CXX_LIBRARY__)
 else()
   # MPIR have separate solution files for each visual studio version
   # Visual Studio 2019 Dev16  15.0  1920-1929
@@ -40,29 +41,21 @@ else()
   endif()
 
   # Patch sources: use Multithreaded DLL runtime library
-  # NOTE: ExternalProject_Add PATCH_COMMAND executes on every rebuild, need ignore 'git apply' exit code
   ExternalProject_Add(mpir
     GIT_REPOSITORY https://github.com/BrianGladman/mpir
     GIT_TAG master
     GIT_SHALLOW 1
     SOURCE_DIR ${MPIR_DIRECTORY}
     BINARY_DIR ${MPIR_DIRECTORY}/msvc/${SOLUTION_DIR}
-    PATCH_COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/cmake/mpir/msvc.patch ${MPIR_DIRECTORY}
-        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/cmake/mpir/msvc.patch.bat ${MPIR_DIRECTORY}
-        COMMAND msvc.patch.bat
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND msbuild.bat gc LIB ${CMAKE_VS_PLATFORM_NAME} Release
+    BUILD_COMMAND msbuild.bat gc DLL ${CMAKE_VS_PLATFORM_NAME} Release
     INSTALL_COMMAND ""
     UPDATE_COMMAND ""
   )
 
-  add_library(MPIR_LIBRARY__     STATIC IMPORTED DEPENDS mpir)
-  add_library(MPIR_CXX_LIBRARY__ STATIC IMPORTED DEPENDS mpir)
-  set_target_properties(MPIR_LIBRARY__     PROPERTIES IMPORTED_LOCATION ${MPIR_DIRECTORY}/lib/${CMAKE_VS_PLATFORM_NAME}/Release/mpir.lib)
-  set_target_properties(MPIR_CXX_LIBRARY__ PROPERTIES IMPORTED_LOCATION ${MPIR_DIRECTORY}/lib/${CMAKE_VS_PLATFORM_NAME}/Release/mpirxx.lib)
-  set(MPIR_INCLUDE_DIR ${MPIR_DIRECTORY}/lib/${CMAKE_VS_PLATFORM_NAME}/Release)
+  add_library(MPIR_LIBRARY__ SHARED IMPORTED DEPENDS mpir)
+  set_target_properties(MPIR_LIBRARY__ PROPERTIES IMPORTED_LOCATION ${MPIR_DIRECTORY}/dll/${CMAKE_VS_PLATFORM_NAME}/Release/mpir.dll)
+  set_target_properties(MPIR_LIBRARY__ PROPERTIES IMPORTED_IMPLIB ${MPIR_DIRECTORY}/dll/${CMAKE_VS_PLATFORM_NAME}/Release/mpir.lib)
+  set(MPIR_INCLUDE_DIR ${MPIR_DIRECTORY}/dll/${CMAKE_VS_PLATFORM_NAME}/Release)
+  set(MPIR_LIBRARIES MPIR_LIBRARY__)
 endif()
-
-
-set(MPIR_LIBRARY     MPIR_LIBRARY__)
-set(MPIR_CXX_LIBRARY MPIR_CXX_LIBRARY__)

@@ -3,19 +3,30 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include "common/bcnode.h"
+#include "BC/network.h"
+#include "BC/http.h"
+#include "BC/nativeApi.h"
+
 #include "common/blockDataBase.h"
 #include "common/thread.h"
+#include <db/archive.h>
+#include <db/storage.h>
 #include "loguru.hpp"
+
+#include "asyncio/asyncio.h"
+#include "asyncio/socket.h"
+__NO_DEPRECATED_BEGIN
+#include "config4cpp/Configuration.h"
+__NO_DEPRECATED_END
+#include "p2putils/uriParse.h"
 
 #include <getopt.h>
 #include <string.h>
 #include <stdio.h>
 #include <signal.h>
-#include <string>
 #include <filesystem>
-
 #include <future>
+#include <string>
 
 #ifndef WIN32
 #include <sys/socket.h>
@@ -23,15 +34,6 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #endif
-
-//__NO_DEPRECATED_BEGIN
-#include "config4cpp/Configuration.h"
-//__NO_DEPRECATED_END
-
-#include "asyncio/asyncio.h"
-#include "asyncio/socket.h"
-#include "p2putils/uriParse.h"
-
 
 static int gReindex = 0;
 static int gResync = 0;
@@ -112,13 +114,6 @@ static bool LookupPeers(std::vector<const char*> &addresses, uint16_t defaultPor
   return true;
 }
 
-void shutdown(BCNodeContext &context)
-{
-  LOG_F(INFO, "bcnode shutdown...");
-  postQuitOperation(context.networkBase);
-  shutdownStorage(context);
-}
-
 void printHelpMessage()
 {
   std::string defaultDataDir;
@@ -137,6 +132,26 @@ void printHelpMessage()
   puts("  --watchlog:\t\tview log in current terminal");
   puts("");
 }
+
+struct Context {
+  // Other objects
+  asyncBase *MainBase;
+  std::filesystem::path DataDir;
+  BC::Common::ChainParams ChainParams;
+
+  // Databases
+  BlockInMemoryIndex BlockIndex;
+  BlockDatabase BlockDb;
+  BC::DB::Archive Archive;
+
+  // Storage manager
+  BC::DB::Storage Storage;
+
+  // Network
+  BC::Network::Node Node;
+  BC::Network::HttpApiNode httpApiNode;
+  BC::Network::NativeApiNode nativeApiNode;
+};
 
 int main(int argc, char **argv)
 { 
@@ -168,16 +183,17 @@ int main(int argc, char **argv)
   initializeSocketSubsystem();
   loguru::init(argc, argv);
   loguru::set_thread_name("main");
-  BCNodeContext context;
+
+  Context context;
   if (!dataDir.empty())
-    context.dataDir = dataDir;
+    context.DataDir = dataDir;
 
   LOG_F(INFO, "Starting for %s/%s", BC::Common::ProjectName, BC::Common::TickerName);
 
   // Check network id
-  if (!BC::Common::setupChainParams(&context.chainParams, gNetwork)) {
+  if (!BC::Common::setupChainParams(&context.ChainParams, gNetwork)) {
     LOG_F(ERROR, "Unknown network: %s", gNetwork);
-    exit(1);
+    return 1;
   }
 
   {
@@ -186,47 +202,47 @@ int main(int argc, char **argv)
     genesisIndex->SuccessorHeaders.set(nullptr, 1);
     genesisIndex->SuccessorBlocks.set(nullptr, 1);
     genesisIndex->Height = 0;
-    genesisIndex->Header = context.chainParams.GenesisBlock.header;
-    genesisIndex->ChainWork = BC::Common::GetBlockProof(genesisIndex->Header, context.chainParams);
+    genesisIndex->Header = context.ChainParams.GenesisBlock.header;
+    genesisIndex->ChainWork = BC::Common::GetBlockProof(genesisIndex->Header, context.ChainParams);
     genesisIndex->OnChain = true;
     {
       xmstream stream;
-      BTC::serialize(stream, context.chainParams.GenesisBlock);
+      BTC::serialize(stream, context.ChainParams.GenesisBlock);
       genesisIndex->FileNo = 0;
       genesisIndex->FileOffset = 0;
       genesisIndex->SerializedBlockSize = static_cast<uint32_t>(stream.sizeOf());
     }
-    BC::Proto::BlockHashTy hash = context.chainParams.GenesisBlock.header.GetHash();
-    context.blockIndex.insert(std::pair(hash, genesisIndex));
-    context.blockHeightIndex.insert(std::pair(0, genesisIndex));
-    context.genesisIndex = genesisIndex;
-    context.BestIndex = genesisIndex;
+    BC::Proto::BlockHashTy hash = context.ChainParams.GenesisBlock.header.GetHash();
+    context.BlockIndex.blockIndex().insert(std::pair(hash, genesisIndex));
+    context.BlockIndex.blockHeightIndex().insert(std::pair(0, genesisIndex));
+    context.BlockIndex.setGenesis(genesisIndex);
+    context.BlockIndex.setBest(genesisIndex);
     LOG_F(INFO, "Adding genesis block %s", hash.ToString().c_str());
   }
 
   {
     // Setup data dir
-    if (context.dataDir.empty()) {
+    if (context.DataDir.empty()) {
       std::string defaultDataDir;
 #ifndef WIN32
       defaultDataDir.append(".");
 #endif
       defaultDataDir.append(BC::Common::DefaultDataDir);
-      context.dataDir = userHomeDir().append(defaultDataDir);
+      context.DataDir = userHomeDir().append(defaultDataDir);
     }
 
-    context.dataDir.append(gNetwork);
-    std::filesystem::create_directories(context.dataDir);
-    auto debugPath = context.dataDir / "debug.log";
+    context.DataDir.append(gNetwork);
+    std::filesystem::create_directories(context.DataDir);
+    auto debugPath = context.DataDir / "debug.log";
     loguru::add_file(debugPath.u8string().c_str(), loguru::Append, loguru::Verbosity_INFO);
     if (!gWatchLog)
       loguru::g_stderr_verbosity = loguru::Verbosity_ERROR;
-    LOG_F(INFO, "Using %s as data directory", context.dataDir.u8string().c_str());
+    LOG_F(INFO, "Using %s as data directory", context.DataDir.u8string().c_str());
 
-    if (!std::filesystem::exists(context.dataDir)) {
-      if (!std::filesystem::create_directories(context.dataDir)) {
-        LOG_F(ERROR, "Can't create data directory %s", context.dataDir.c_str());
-        exit(1);
+    if (!std::filesystem::exists(context.DataDir)) {
+      if (!std::filesystem::create_directories(context.DataDir)) {
+        LOG_F(ERROR, "Can't create data directory %s", context.DataDir.u8string().c_str());
+        return 1;
       }
     }
   }
@@ -235,7 +251,7 @@ int main(int argc, char **argv)
   std::vector<const char*> addressesForLookup;
   config4cpp::StringVector addNode;
   config4cpp::StringVector forceNode;
-  std::filesystem::path configPath = context.dataDir / "bcnode.conf";
+  std::filesystem::path configPath = context.DataDir / "bcnode.conf";
   config4cpp::Configuration *cfg = config4cpp::Configuration::create();
   uint16_t bcnodePort = 0;
   uint16_t httpApiPort = 0;
@@ -255,35 +271,38 @@ int main(int argc, char **argv)
         for (int i = 0; i < forceNode.length(); i++)
           addressesForLookup.push_back(forceNode[i]);
       } else {
-        addressesForLookup.insert(addressesForLookup.begin(), context.chainParams.DNSSeeds.begin(), context.chainParams.DNSSeeds.end());
+        addressesForLookup.insert(addressesForLookup.begin(), context.ChainParams.DNSSeeds.begin(), context.ChainParams.DNSSeeds.end());
         for (int i = 0; i < addNode.length(); i++)
           addressesForLookup.push_back(addNode[i]);
       }
 
-      bcnodePort = cfg->lookupInt("bcnode", "port", context.chainParams.DefaultPort);
-      httpApiPort = cfg->lookupInt("bcnode", "httpApiPort", context.chainParams.DefaultRPCPort);
+      bcnodePort = cfg->lookupInt("bcnode", "port", context.ChainParams.DefaultPort);
+      httpApiPort = cfg->lookupInt("bcnode", "httpApiPort", context.ChainParams.DefaultRPCPort);
       nativeApiPort = cfg->lookupInt("bcnode", "nativeApiPort", 0);
       workerThreadsNum = cfg->lookupInt("bcnode", "workerThreadsNum", 0);
       rtThreadsNum = cfg->lookupInt("bcnode", "realTimeThreadsNum", 1);
 
       outgoingConnectionsLimit = cfg->lookupInt("bcnode", "outgoingConnectionsLimit", 16);
       incomingConnectionsLimit = cfg->lookupInt("bcnode", "incomingConnectionsLimit", std::numeric_limits<unsigned>::max());
+
+      // Load database configs
+      context.Archive.txdb().getConfiguration(cfg);
     } catch(const config4cpp::ConfigurationException& ex) {
       LOG_F(ERROR, "%s", ex.c_str());
-      exit(1);
+      return 1;
     }
   } else {
     // Setup default params
-    bcnodePort = context.chainParams.DefaultPort;
-    httpApiPort = context.chainParams.DefaultRPCPort;
-    addressesForLookup.insert(addressesForLookup.begin(), context.chainParams.DNSSeeds.begin(), context.chainParams.DNSSeeds.end());
+    bcnodePort = context.ChainParams.DefaultPort;
+    httpApiPort = context.ChainParams.DefaultRPCPort;
+    addressesForLookup.insert(addressesForLookup.begin(), context.ChainParams.DNSSeeds.begin(), context.ChainParams.DNSSeeds.end());
   }
 
   if (workerThreadsNum == 0)
     workerThreadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
   unsigned totalThreadsNum = workerThreadsNum + rtThreadsNum;
 
-  context.BlockCache.setLimit(BC::Common::DefaultBlockCacheSize);
+  context.Storage.cache().setLimit(BC::Common::DefaultBlockCacheSize);
 
   // Lookup peers (DNS seeds and user defined nodes)
   // TODO: do it asynchronously (now using std::async)
@@ -291,8 +310,7 @@ int main(int argc, char **argv)
   std::vector<HostAddress> seeds[lookupThreadsNum];
   std::future<bool> workers[lookupThreadsNum];
   for (unsigned i = 0; i < lookupThreadsNum; i++)
-    workers[i] = std::async(std::launch::async, LookupPeers, std::ref(addressesForLookup), context.chainParams.DefaultPort, std::ref(seeds[i]), i, lookupThreadsNum);
-
+    workers[i] = std::async(std::launch::async, LookupPeers, std::ref(addressesForLookup), context.ChainParams.DefaultPort, std::ref(seeds[i]), i, lookupThreadsNum);
 
   // Handling special modes:
   //   - resync
@@ -301,25 +319,35 @@ int main(int argc, char **argv)
     gReindex = 0;
   }
 
-  if (gReindex && !reindex(context)) {
-    exit(1);
+  if (gReindex && !reindex(context.BlockIndex, context.ChainParams, context.Storage)) {
+    return 1;
   }
 
   // Loading index
-  if (!gResync && !gReindex && !loadingBlockIndex(context)) {
-    exit(1);
+  if (!gResync && !gReindex && !loadingBlockIndex(context.BlockIndex, context.DataDir)) {
+    return 1;
   }
 
+  context.MainBase = createAsyncBase(amOSDefault);
 
   // Initialize storage
-  std::thread storageThread;
-  if (!initializeStorage(context, storageThread)) {
-    exit(1);
-  }
+  if (!context.BlockDb.init(context.DataDir, context.ChainParams))
+    return 1;
+
+  // Initialize archive
+  BC::DB::IndexDbMap forDisconnect;
+  BC::Common::BlockIndex *firstBlocks[BC::DB::DbCount] = {nullptr};
+  if (!context.Archive.init(context.BlockIndex, context.DataDir, firstBlocks, forDisconnect))
+    return 1;
+  if (!context.Archive.sync(context.BlockIndex, context.ChainParams, context.BlockDb, firstBlocks, forDisconnect))
+    return 1;
+
+  // Initialize storage manager
+  if (!context.Storage.init(context.BlockDb, context.Archive, [&context]() { postQuitOperation(context.MainBase); }))
+    return 1;
 
   // Starting daemon
-  context.networkBase = createAsyncBase(amOSDefault);
-  context.PeerManager.Init(&context, context.networkBase, totalThreadsNum, workerThreadsNum, outgoingConnectionsLimit, incomingConnectionsLimit);
+  context.Node.Init(context.BlockIndex, context.ChainParams, context.Storage, context.MainBase, totalThreadsNum, workerThreadsNum, outgoingConnectionsLimit, incomingConnectionsLimit);
 
   for (size_t i = 0; i < lookupThreadsNum; i++) {
     if (!workers[i].get())
@@ -336,15 +364,15 @@ int main(int argc, char **argv)
       addrEnumeration.append(inet_ntoa(addr));
       addrEnumeration.push_back(':');
       addrEnumeration.append(std::to_string(htons(seeds[i][j].port)));
-      context.PeerManager.AddPeer(seeds[i][j], inet_ntoa(addr), nullptr);
+      context.Node.AddPeer(seeds[i][j], inet_ntoa(addr), nullptr);
     }
 
     LOG_F(INFO, "%s -> %s", addressesForLookup[i], addrEnumeration.c_str());
   }
 
-  LOG_F(INFO, "DNS seeds: found %zu peers", context.PeerManager.PeerCount());
+  LOG_F(INFO, "DNS seeds: found %zu peers", context.Node.PeerCount());
 
-  context.PeerManager.Start();
+  context.Node.Start();
 
   {
     HostAddress address;
@@ -353,26 +381,17 @@ int main(int argc, char **argv)
 
     // Start main bcnode server
     address.port = htons(bcnodePort);
-    if (!context.PeerManager.StartBCNodeServer(address)) {
-      shutdownStorage(context);
-      storageThread.join();
+    if (!context.Node.StartBCNodeServer(address))
       return 1;
-    }
 
     // Start http api
     address.port = htons(httpApiPort);
-    if (!context.httpApiNode.init(context, address)) {
-      shutdownStorage(context);
-      storageThread.join();
+    if (!context.httpApiNode.init(&context.BlockIndex, &context.ChainParams, &context.BlockDb, &context.Node, context.Archive, context.MainBase, address))
       return 1;
-    }
 
     // Start native api
-    if (nativeApiPort && !context.nativeApiNode.init(context, address)) {
-      shutdownStorage(context);
-      storageThread.join();
+    if (nativeApiPort && !context.nativeApiNode.init(context.MainBase, address))
       return 1;
-    }
   }
 
   std::unique_ptr<std::thread[]> workerThreads(new std::thread[totalThreadsNum]);
@@ -383,23 +402,24 @@ int main(int argc, char **argv)
       snprintf(threadName, sizeof(threadName), i < rtThreadsNum ? "rtworker%u" : "worker%u", GetWorkerThreadId());
       loguru::set_thread_name(threadName);
       asyncLoop(base);
-    }, context.networkBase, i, rtThreadsNum);
+    }, context.MainBase, i, rtThreadsNum);
   }
 
   // SIGINT (CTRL+C) monitoring
   signal(SIGINT, sigIntHandler);
+  signal(SIGTERM, sigIntHandler);
   std::thread sigIntThread([&context]() {
     while (!interrupted)
       std::this_thread::sleep_for(std::chrono::seconds(1));
-    shutdown(context);
+    LOG_F(INFO, "Interrupted by user");
+    postQuitOperation(context.MainBase);
   });
 
   sigIntThread.detach();
 
   for (unsigned i = 0; i < totalThreadsNum; i++)
     workerThreads[i].join();
-  storageThread.join();
-  context.blockStorageWriter.flush();
-  context.indexStorageWriter.flush();
+
   LOG_F(INFO, "done");
+  return 0;
 }

@@ -26,6 +26,7 @@ private:
     free();
     Data_ = newData;
     MemorySize_ = newMemorySize_;
+    Own_ = true;
   }
 
   void grow(size_t newSize) {
@@ -40,6 +41,7 @@ private:
     free();
     Data_ = newData;
     MemorySize_ = newMemorySize_;
+    Own_ = true;
   }
 
   void free() {
@@ -64,7 +66,7 @@ public:
   constexpr xvector& operator=(const xvector<T> &data) {
     Size_ = data.Size_;
     MemorySize_ = data.Size_;
-    Own_ = false;
+    Own_ = true;
     Data_ = static_cast<T*>(operator new(sizeof(T) * Size_));
     for (size_t i = 0; i < Size_; i++)
       new (&Data_[i]) T(data.Data_[i]);
@@ -78,6 +80,7 @@ public:
     Own_ = data.Own_;
     data.Data_ = nullptr;
     data.MemorySize_ = 0;
+    data.Own_ = false;
   }
 
   xvector(std::initializer_list<T> list) : Own_(true) {

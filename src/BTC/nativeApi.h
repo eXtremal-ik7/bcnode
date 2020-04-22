@@ -31,6 +31,7 @@ public:
 
 private:
   BCNodeContext *Context;
+  asyncBase *MainBase_;
   HostAddress LocalAddress;
   aioObject *ServerSocket = nullptr;
 
@@ -39,7 +40,7 @@ private:
   void OnAccept(HostAddress address, aioObject *socket);
 
 public:
-  bool init(BCNodeContext &context, HostAddress localAddress);
+  bool init(asyncBase *mainBase, HostAddress localAddress);
 };
 
 }

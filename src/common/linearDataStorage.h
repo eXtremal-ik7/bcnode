@@ -33,8 +33,10 @@ private:
 
 public:
   ~LinearDataWriter() {
-    if (_hFile)
+    if (_hFile) {
+      flush();
       fclose(_hFile);
+    }
   }
 
   bool init(const std::filesystem::path &directory, const char *format, uint32_t fileSizeLimit);

@@ -6,53 +6,119 @@
 #pragma once
 
 #include "BC/bc.h"
+#include "common/blockIndexCombiner.h"
+#include "common/linearDataStorage.h"
+#include <tbb/concurrent_queue.h>
+#include <tbb/concurrent_unordered_map.h>
 #include <filesystem>
 #include <functional>
 #include <thread>
 
 struct BCNodeContext;
+struct asyncBase;
+struct aioUserEvent;
 
-struct StoreTask {
-  uint64_t id;
-  BC::Common::BlockIndex *index;
-};
+namespace BC {
+namespace DB {
+class Storage;
+}
+}
+
+class BlockInMemoryIndex;
+class BlockDatabase;
 
 typedef std::function<void(const std::vector<BC::Common::BlockIndex*>&)> newBestCallback;
 
-BC::Common::BlockIndex *AddHeader(BCNodeContext &context,
+BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
+                                    BC::Common::BlockIndex *previousBest,
+                                    std::vector<BC::Common::BlockIndex*> &forDisconnect);
+
+BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex,
+                                  BC::Common::ChainParams &chainParams,
                                   const BC::Proto::BlockHeader &header,
                                   BC::Common::CheckConsensusCtx &ccCtx);
 
-BC::Common::BlockIndex *AddBlock(BCNodeContext &context,
+BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
+                                 BC::Common::ChainParams &chainParams,
+                                 BC::DB::Storage &storage,
                                  SerializedDataObject *serialized,
                                  BC::Common::CheckConsensusCtx &ccCtx,
                                  newBestCallback callback,
                                  uint32_t fileNo=std::numeric_limits<uint32_t>::max(),
                                  uint32_t fileOffset=std::numeric_limits<uint32_t>::max());
 
-bool loadingBlockIndex(BCNodeContext &context);
-bool reindex(BCNodeContext &config);
+bool loadingBlockIndex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir);
+bool reindex(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage);
 
-bool initializeStorage(BCNodeContext &context, std::thread &storageThread);
-void shutdownStorage(BCNodeContext &context);
+
+class BlockInMemoryIndex {
+public:
+  BlockInMemoryIndex() {}
+
+  BC::Common::BlockIndex *best() { return BestIndex_.load(std::memory_order::memory_order_relaxed); }
+  BC::Common::BlockIndex *genesis() { return GenesisIndex_; }
+  void setBest(BC::Common::BlockIndex *index) { BestIndex_.store(index); }
+  void setGenesis(BC::Common::BlockIndex *index) { GenesisIndex_ = index; }
+
+  // Old-style accessors
+  auto &blockIndex() { return BlockIndex_; }
+  auto &blockHeightIndex() { return BlockHeightIndex_; }
+  auto &combiner() { return ChainStateCombiner_; }
+
+private:
+  Combiner<BlockProcessingTask> ChainStateCombiner_;
+  tbb::concurrent_unordered_map<BC::Proto::BlockHashTy, BC::Common::BlockIndex*, std::hash<BC::Proto::BlockHashTy>> BlockIndex_;
+  tbb::concurrent_unordered_map<uint32_t, BC::Common::BlockIndex*, std::hash<uint32_t>> BlockHeightIndex_;
+  std::atomic<BC::Common::BlockIndex*> BestIndex_ = nullptr;
+  BC::Common::BlockIndex *GenesisIndex_ = nullptr;
+};
+
+class BlockDatabase {
+public:
+  BlockDatabase() {}
+  bool init(std::filesystem::path &dataDir, BC::Common::ChainParams &chainParams);
+
+  std::filesystem::path &dataDir() { return DataDir_; }
+  LinearDataReader &blockReader() { return blockStorageReader; }
+
+  bool writeBlock(BC::Common::BlockIndex *index);
+  bool writeBufferEmpty() { return blockStorageWriter.bufferEmpty(); }
+  bool flush() { return blockStorageWriter.flush() && indexStorageWriter.flush(); }
+
+private:
+  LinearDataReader blockStorageReader;
+  LinearDataWriter blockStorageWriter;
+  LinearDataWriter indexStorageWriter;
+  std::filesystem::path DataDir_;
+  // NOTE: bitcoin core compatibility
+  uint32_t Magic_;
+};
 
 class BlockSearcher {
 private:
   static constexpr unsigned MaxIoSize = 4*1048576;
 
 private:
-  BCNodeContext *context = nullptr;
+  BlockInMemoryIndex *BlockIndex_ = nullptr;
+  uint32_t Magic_ = 0;
+  BlockDatabase *BlockDb_ = nullptr;
   uint32_t fileNo = std::numeric_limits<uint32_t>::max();
   uint32_t fileOffsetBegin = std::numeric_limits<uint32_t>::max();
   uint32_t fileOffsetCurrent = std::numeric_limits<uint32_t>::max();
 
   xmstream stream;
   std::filesystem::path blocksDirectory;
+  std::function<void(void*, size_t)> Handler_;
+  std::function<void()> ErrorHandler_;
+  std::vector<uint32_t> ExpectedBlockSizes_;
+  size_t ExpectedBlockSizesIndex_ = 0;
 
-public:
-  BlockSearcher(BCNodeContext &context);
-
-  BC::Common::BlockIndex *add(const BC::Proto::BlockHashTy &hash);
   void *next(size_t *size);
   void fetchPending();
+
+public:
+  BlockSearcher(BlockInMemoryIndex &blockIndex, uint32_t magic, BlockDatabase &blockDb, std::function<void(void*, size_t)> handler, std::function<void()> errorHandler);
+  ~BlockSearcher();
+  BC::Common::BlockIndex *add(BC::Common::BlockIndex *index);
+  BC::Common::BlockIndex *add(const BC::Proto::BlockHashTy &hash);
 };
