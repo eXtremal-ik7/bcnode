@@ -71,7 +71,21 @@ void Storage::onQueuePush()
     CachedBlocks_.push_back(task.Index);
 
     if (task.Type == Connect || task.Type == Disconnect) {
-      Archive_->add(task.Index, task.Type);
+      intrusive_ptr<const SerializedDataObject> serializedPtr(task.Index->Serialized);
+      if (serializedPtr.get()) {
+        const BC::Proto::Block *block = static_cast<BC::Proto::Block*>(serializedPtr.get()->unpackedData());
+        Archive_->add(task.Index, *block, task.Type);
+      } else {
+        auto handler = [this, &task](void *data, size_t size) {
+          BC::Proto::Block block;
+          xmstream stream(data, size);
+          BC::unserialize(stream, block);
+          Archive_->add(task.Index, block, task.Type);
+        };
+
+        BlockSearcher searcher(*BlockDb_, handler, ErrorHandler_);
+        searcher.add(task.Index);
+      }
     } else {
       LastFlushTime_ = std::chrono::steady_clock::now();
       if (!BlockDb_->writeBlock(task.Index))

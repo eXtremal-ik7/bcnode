@@ -84,6 +84,7 @@ public:
   bool writeBlock(BC::Common::BlockIndex *index);
   bool writeBufferEmpty() { return blockStorageWriter.bufferEmpty(); }
   bool flush() { return blockStorageWriter.flush() && indexStorageWriter.flush(); }
+  uint32_t magic() { return Magic_; }
 
 private:
   LinearDataReader blockStorageReader;
@@ -99,9 +100,7 @@ private:
   static constexpr unsigned MaxIoSize = 4*1048576;
 
 private:
-  BlockInMemoryIndex *BlockIndex_ = nullptr;
-  uint32_t Magic_ = 0;
-  BlockDatabase *BlockDb_ = nullptr;
+  BlockDatabase &BlockDb_;
   uint32_t fileNo = std::numeric_limits<uint32_t>::max();
   uint32_t fileOffsetBegin = std::numeric_limits<uint32_t>::max();
   uint32_t fileOffsetCurrent = std::numeric_limits<uint32_t>::max();
@@ -115,8 +114,8 @@ private:
   void fetchPending();
 
 public:
-  BlockSearcher(BlockInMemoryIndex &blockIndex, uint32_t magic, BlockDatabase &blockDb, std::function<void(void*, size_t)> handler, std::function<void()> errorHandler);
+  BlockSearcher(BlockDatabase &blockDb, std::function<void(void*, size_t)> handler, std::function<void()> errorHandler);
   ~BlockSearcher();
   BC::Common::BlockIndex *add(BC::Common::BlockIndex *index);
-  BC::Common::BlockIndex *add(const BC::Proto::BlockHashTy &hash);
+  BC::Common::BlockIndex *add(BlockInMemoryIndex &blockIndex, const BC::Proto::BlockHashTy &hash);
 };

@@ -38,7 +38,7 @@ bool Archive::sync(BlockInMemoryIndex &blockIndex,
       ++It;
     };
 
-    BlockSearcher searcher(blockIndex, chainParams.magic, blockDb, handler, [&noError]() { noError = false; });
+    BlockSearcher searcher(blockDb, handler, [&noError]() { noError = false; });
     for (const auto &element: disconnectQueue) {
       searcher.add(element.first);
       if (!noError)
@@ -66,7 +66,7 @@ bool Archive::sync(BlockInMemoryIndex &blockIndex,
     };
 
     BC::Common::BlockIndex *index = firstCommon;
-    BlockSearcher searcher(blockIndex, chainParams.magic, blockDb, handler, [&noError]() { noError = false; });
+    BlockSearcher searcher(blockDb, handler, [&noError]() { noError = false; });
     unsigned portionNum = 0;
     unsigned portionSize = count / 20 + 1;
     unsigned i = 0;

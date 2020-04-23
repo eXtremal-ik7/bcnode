@@ -226,8 +226,8 @@ void BC::Network::HttpApiConnection::OnBlockByHash()
   };
 
   {
-    BlockSearcher searcher(BlockIndex_, ChainParams_.magic, *BlockDb_, handler, [this](){ postQuitOperation(aioGetBase(Socket)); });
-    index = searcher.add(RPCContext.hash);
+    BlockSearcher searcher(*BlockDb_, handler, [this](){ postQuitOperation(aioGetBase(Socket)); });
+    index = searcher.add(BlockIndex_, RPCContext.hash);
     if (!index) {
       Reply404();
       return;
@@ -257,7 +257,7 @@ void BC::Network::HttpApiConnection::OnBlockByHeight()
   };
 
   {
-    BlockSearcher searcher(BlockIndex_, ChainParams_.magic, *BlockDb_, handler, [this](){ postQuitOperation(aioGetBase(Socket)); });
+    BlockSearcher searcher(*BlockDb_, handler, [this](){ postQuitOperation(aioGetBase(Socket)); });
     if (!searcher.add(It->second)) {
       Reply404();
       return;

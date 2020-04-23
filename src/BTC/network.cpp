@@ -498,10 +498,10 @@ void Peer::onGetData(BC::Proto::MessageGetData &getdata)
   };
 
   {
-    BlockSearcher searcher(BlockIndex_, ChainParams_.magic, Storage_.blockDb(), handler, [this](){ postQuitOperation(Base); });
+    BlockSearcher searcher(Storage_.blockDb(), handler, [this](){ postQuitOperation(Base); });
     for (const auto &inv: getdata.inventory) {
       if (inv.type == BC::Proto::MessageInv::MSG_BLOCK) {
-        searcher.add(inv.hash);
+        searcher.add(BlockIndex_, inv.hash);
       } else {
         // Other data types not supported now
       }

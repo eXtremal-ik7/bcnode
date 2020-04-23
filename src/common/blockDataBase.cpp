@@ -793,8 +793,8 @@ bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index)
 }
 
 
-BlockSearcher::BlockSearcher(BlockInMemoryIndex &blockIndex, uint32_t magic, BlockDatabase &blockDb, std::function<void(void*, size_t)> handler, std::function<void()> errorHandler) :
-  BlockIndex_(&blockIndex), Magic_(magic), BlockDb_(&blockDb), Handler_(handler), ErrorHandler_(errorHandler)
+BlockSearcher::BlockSearcher(BlockDatabase &blockDb, std::function<void(void*, size_t)> handler, std::function<void()> errorHandler) :
+  BlockDb_(blockDb), Handler_(handler), ErrorHandler_(errorHandler)
 {
   blocksDirectory = blockDb.dataDir() / "blocks";
 }
@@ -804,10 +804,10 @@ BlockSearcher::~BlockSearcher()
   fetchPending();
 }
 
-BC::Common::BlockIndex *BlockSearcher::add(const BC::Proto::BlockHashTy &hash)
+BC::Common::BlockIndex *BlockSearcher::add(BlockInMemoryIndex &blockIndex, const BC::Proto::BlockHashTy &hash)
 {
-  auto It = BlockIndex_->blockIndex().find(hash);
-  if (It != BlockIndex_->blockIndex().end()) {
+  auto It = blockIndex.blockIndex().find(hash);
+  if (It != blockIndex.blockIndex().end()) {
     return add(It->second);
   } else {
     return nullptr;
@@ -850,8 +850,8 @@ void BlockSearcher::fetchPending()
 {
   stream.reset();
   uint32_t size = fileOffsetCurrent - fileOffsetBegin;
-  if (fileNo != std::numeric_limits<uint32_t>::max() && size && !BlockDb_->blockReader().read(fileNo, fileOffsetBegin, stream.reserve(size), size)) {
-    LOG_F(ERROR, "Can't read data from %s (offset = %u, size = %u)", BlockDb_->blockReader().getFilePath(fileNo).c_str(), fileOffsetBegin, size);
+  if (fileNo != std::numeric_limits<uint32_t>::max() && size && !BlockDb_.blockReader().read(fileNo, fileOffsetBegin, stream.reserve(size), size)) {
+    LOG_F(ERROR, "Can't read data from %s (offset = %u, size = %u)", BlockDb_.blockReader().getFilePath(fileNo).c_str(), fileOffsetBegin, size);
     ErrorHandler_();
   }
 
@@ -863,7 +863,7 @@ void BlockSearcher::fetchPending()
     BC::unserialize(stream, magic);
     BC::unserialize(stream, blockSize);
     void *data = stream.seek<uint8_t>(blockSize);
-    if (magic != Magic_ || stream.eof()) {
+    if (magic != BlockDb_.magic() || stream.eof()) {
       char fileName[64];
       snprintf(fileName, sizeof(fileName), "blk%05u.dat", fileNo);
       std::filesystem::path path = blocksDirectory / fileName;

@@ -27,12 +27,12 @@ public:
             BC::Common::BlockIndex **connectPoints,
             BC::DB::IndexDbMap &disconnectQueue);
 
-  void add(BC::Common::BlockIndex *index, ActionTy action) {
-    const SerializedDataObject *serialized = index->Serialized.get();
-    const BC::Proto::Block *block = static_cast<BC::Proto::Block*>(serialized->unpackedData());
+  void add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, ActionTy action) {
+//    const SerializedDataObject *serialized = index->Serialized.get();
+//    const BC::Proto::Block *block = static_cast<BC::Proto::Block*>(serialized->unpackedData());
 
     if (TxDb_.enabled())
-      TxDb_.add(index, *block, action);
+      TxDb_.add(index, block, action);
   }
 
   void flush() {
