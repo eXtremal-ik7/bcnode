@@ -287,6 +287,7 @@ int main(int argc, char **argv)
 
       // Load database configs
       context.Archive.txdb().getConfiguration(cfg);
+      context.Archive.balancedb().getConfiguration(cfg);
     } catch(const config4cpp::ConfigurationException& ex) {
       LOG_F(ERROR, "%s", ex.c_str());
       return 1;
@@ -337,7 +338,7 @@ int main(int argc, char **argv)
   // Initialize archive
   BC::DB::IndexDbMap forDisconnect;
   BC::Common::BlockIndex *firstBlocks[BC::DB::DbCount] = {nullptr};
-  if (!context.Archive.init(context.BlockIndex, context.DataDir, firstBlocks, forDisconnect))
+  if (!context.Archive.init(context.BlockIndex, context.BlockDb, firstBlocks, forDisconnect))
     return 1;
   if (!context.Archive.sync(context.BlockIndex, context.ChainParams, context.BlockDb, firstBlocks, forDisconnect))
     return 1;

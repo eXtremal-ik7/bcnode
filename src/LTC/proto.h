@@ -12,6 +12,7 @@ namespace LTC {
 class Proto {
 public:
   using BlockHashTy = BTC::Proto::BlockHashTy;
+  using AddressTy = BTC::Proto::AddressTy;
   using BlockHeader = BTC::Proto::BlockHeader;
   using BlockHeaderNet = BTC::Proto::BlockHeaderNet;
   using Block = BTC::Proto::Block;

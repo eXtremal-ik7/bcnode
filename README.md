@@ -71,3 +71,4 @@ make -j8
   - http://HOST:PORT/blockByHeight/1000000
   - http://HOST:PORT/blockByHash/a4b2e3f5f77f28e4e2cad9205ec725ef684e311aceb384352818670d38f9fdf8
   - http://HOST:PORT/tx/d163b06b81b4252bb9b6295bff77754c33bcd65ae22fc91910ee51fca8a21f29 (requires txdb enabled)
+  - http://HOST:PORT/getBalance/AcK38iDzEuYUUm79ngqtH6gvUsMfMbHHpa (requires balances db enabled)

@@ -52,6 +52,8 @@ namespace Common {
       params->DefaultPort = 9333;
       params->DefaultRPCPort = 9332;
 
+      params->PublicKeyPrefix = 48;
+
       params->powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
       {
@@ -108,6 +110,8 @@ namespace Common {
       params->magic = 0xF1C8D2FD;
       params->DefaultPort = 19335;
       params->DefaultRPCPort = 19332;
+
+      params->PublicKeyPrefix = 111;
 
       params->powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 

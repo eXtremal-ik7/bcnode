@@ -18,8 +18,9 @@ namespace BC {
 namespace DB {
 
 class Archive;
+class TxDb;
 
-class TxDb {
+class BalanceDb {
 public:
   static constexpr unsigned MinimalBatchSize = 8192;
 
@@ -31,13 +32,13 @@ public:
   };
 
 public:
-  ~TxDb();
+  ~BalanceDb();
   bool enabled() { return Enabled_; }
   void getConfiguration(config4cpp::Configuration *cfg);
   bool initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, BC::DB::Archive &archive, BC::Common::BlockIndex **forConnect, IndexDbMap &forDisconnect);
 
   void add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, ActionTy actionType, bool doFlush = false);
-  bool find(const BC::Proto::BlockHashTy &hash, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, QueryResult &result);
+  bool find(const BC::Proto::AddressTy &address, int64_t *result);
 
   void flush(unsigned shardNum);
   void flush() {
@@ -45,35 +46,33 @@ public:
       flush(i);
   }
 
+#pragma pack(push, 1)
+  struct Value {
+    int64_t Balance;
+    int32_t BatchId;
+  };
+#pragma pack(pop)
+
 private:
 #pragma pack(push, 1)
   struct Configuration {
     uint32_t Version = 1;
     uint32_t ShardsNum = 1;
-    uint32_t StoreFullTxHash = 1;
-    uint32_t StoreFullTx = 0;
+    uint32_t StoreFullAddress = 1;
 
-    static constexpr size_t Size[] = {16};
+    static constexpr size_t Size[] = {12};
+  };
+
+  struct Stamp {
+    BC::Proto::BlockHashTy Hash;
+    uint32_t BatchId;
   };
 #pragma pack(pop)
 
-  struct TxData {
-    BC::Proto::BlockHashTy Hash;
-    size_t dataOffset = 0;
-    size_t dataSize = 0;
-  };
-
-  struct TxLink {
-    BC::Common::BlockIndex *block;
-    uint32_t txIndex;
-    uint32_t SerializedDataOffset;
-    uint32_t SerializedDataSize;
-  };
 
   struct Shard {
-    xmstream Data;
-    std::vector<TxData> Queue;
-    tbb::concurrent_hash_map<BC::Proto::BlockHashTy, TxLink, TbbHash<256>> Cache;
+    tbb::concurrent_hash_map<BC::Proto::AddressTy, Value, TbbHash<160>> Cache;
+    int32_t BatchId;
   };
 
 private:
@@ -82,6 +81,10 @@ private:
   std::vector<std::unique_ptr<rocksdb::DB>> Databases_;
   std::vector<Shard> ShardData_;
   const BC::Common::BlockIndex *LastAdded_ = nullptr;
+
+  BlockInMemoryIndex *BlockIndex_ = nullptr;
+  BlockDatabase *BlockDb_ = nullptr;
+  TxDb *TxDb_ = nullptr;
 };
 
 }

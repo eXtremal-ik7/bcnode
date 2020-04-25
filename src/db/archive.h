@@ -5,7 +5,10 @@
 
 #pragma once
 
+#include "balancedb.h"
 #include "txdb.h"
+
+class BlockDatabase;
 
 namespace BC {
 namespace DB {
@@ -13,10 +16,11 @@ namespace DB {
 class Archive {
 public:
   bool init(BlockInMemoryIndex &blockIndex,
-            std::filesystem::path &dataDir,
+            BlockDatabase &blockDb,
             BC::Common::BlockIndex **connectPoints,
             BC::DB::IndexDbMap &disconnectQueue) {
-    if (!TxDb_.initialize(blockIndex, dataDir, &connectPoints[BC::DB::DbTransactions], disconnectQueue))
+    if (!TxDb_.initialize(blockIndex, blockDb, *this, &connectPoints[BC::DB::DbTransactions], disconnectQueue) ||
+        !BalanceDb_.initialize(blockIndex, blockDb, *this, &connectPoints[BC::DB::DbAddrBalance], disconnectQueue))
       return false;
     return true;
   }
@@ -28,11 +32,10 @@ public:
             BC::DB::IndexDbMap &disconnectQueue);
 
   void add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, ActionTy action) {
-//    const SerializedDataObject *serialized = index->Serialized.get();
-//    const BC::Proto::Block *block = static_cast<BC::Proto::Block*>(serialized->unpackedData());
-
     if (TxDb_.enabled())
       TxDb_.add(index, block, action);
+    if (BalanceDb_.enabled())
+      BalanceDb_.add(index, block, action);
   }
 
   void flush() {
@@ -40,9 +43,11 @@ public:
       TxDb_.flush();
   }
 
+  BC::DB::BalanceDb &balancedb() { return BalanceDb_; }
   BC::DB::TxDb &txdb() { return TxDb_; }
 
 private:
+  BC::DB::BalanceDb BalanceDb_;
   BC::DB::TxDb TxDb_;
 };
 

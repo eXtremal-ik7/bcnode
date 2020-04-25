@@ -36,6 +36,9 @@ namespace Common {
     uint32_t magic;
     BTC::Proto::BlockTy<T> GenesisBlock;
 
+    // Prefixes
+    uint8_t PublicKeyPrefix;
+
     // Network
     uint16_t DefaultPort;
     uint16_t DefaultRPCPort;
@@ -58,6 +61,8 @@ namespace Common {
       params->magic = 0xD9B4BEF9;
       params->DefaultPort = 8333;
       params->DefaultRPCPort = 8332;
+
+      params->PublicKeyPrefix = 0;
 
       params->powLimit.SetHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -121,6 +126,8 @@ namespace Common {
       params->DefaultPort = 18333;
       params->DefaultRPCPort = 18332;
 
+      params->PublicKeyPrefix = 111;
+
       params->powLimit.SetHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
       {
@@ -180,6 +187,8 @@ namespace Common {
       params->magic = 0xDAB5BFFA;
       params->DefaultPort = 18444;
       params->DefaultRPCPort = 18443;
+
+      params->PublicKeyPrefix = 111;
 
       params->powLimit.SetHex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 

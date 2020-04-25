@@ -49,6 +49,9 @@ namespace Common {
     uint32_t magic;
     XPM::Proto::Block GenesisBlock;
 
+    // Prefixes
+    uint8_t PublicKeyPrefix;
+
     // Network
     uint16_t DefaultPort;
     uint16_t DefaultRPCPort;
@@ -76,6 +79,8 @@ namespace Common {
       params->magic = 0xE7E5E7E4;
       params->DefaultPort = 9911;
       params->DefaultRPCPort = 9912;
+
+      params->PublicKeyPrefix = 23;
 
       {
         // Genesis block
@@ -123,6 +128,8 @@ namespace Common {
       params->magic = 0xC3CBFEFB;
       params->DefaultPort = 9913;
       params->DefaultRPCPort = 9914;
+
+      params->PublicKeyPrefix = 111;
 
       {
         // Genesis block

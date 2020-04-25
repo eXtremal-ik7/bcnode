@@ -43,6 +43,7 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
   static constexpr char blockByHash[] = "blockByHash";
   static constexpr char blockByHeight[] = "blockByHeight";
   static constexpr char tx[] = "tx";
+  static constexpr char getBalance[] = "getBalance";
   static constexpr char peerInfo[] = "peerInfo";
   BC::Network::HttpApiConnection *connection = static_cast<BC::Network::HttpApiConnection*>(arg);
   if (component->type == httpRequestDtMethod) {
@@ -66,6 +67,9 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
     } else if (rawcmp<tx>(component->data)) {
       requiredMethod = hmGet;
       connection->RPCContext.function = fnTx;
+    } else if (rawcmp<getBalance>(component->data)) {
+      requiredMethod = hmGet;
+      connection->RPCContext.function = fnGetBalance;
     } else if (rawcmp<peerInfo>(component->data)) {
       requiredMethod = hmGet;
       connection->RPCContext.function = fnPeerInfo;
@@ -128,25 +132,42 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
       break;
     }
 
-  case fnTx : {
-    if (connection->RPCContext.argumentsNum == 0 && component->type == httpRequestDtUriPathElement) {
-      std::string hash(component->data.data, component->data.data + component->data.size);
-      connection->RPCContext.hash.SetHex(hash);
-      connection->RPCContext.argumentsNum = 1;
-    }
-
-    if (component->type == httpRequestDtDataLast) {
-      if (connection->RPCContext.argumentsNum == 1) {
-        connection->OnTx();
-      } else {
-        connection->Reply404();
-        return 0;
+    case fnTx : {
+      if (connection->RPCContext.argumentsNum == 0 && component->type == httpRequestDtUriPathElement) {
+        std::string hash(component->data.data, component->data.data + component->data.size);
+        connection->RPCContext.hash.SetHex(hash);
+        connection->RPCContext.argumentsNum = 1;
       }
 
+      if (component->type == httpRequestDtDataLast) {
+        if (connection->RPCContext.argumentsNum == 1) {
+          connection->OnTx();
+        } else {
+          connection->Reply404();
+          return 0;
+        }
+      }
+
+      break;
     }
 
-    break;
-  }
+    case fnGetBalance : {
+      if (connection->RPCContext.argumentsNum == 0 && component->type == httpRequestDtUriPathElement) {
+        connection->RPCContext.address.assign(component->data.data, component->data.data + component->data.size);
+        connection->RPCContext.argumentsNum = 1;
+      }
+
+      if (component->type == httpRequestDtDataLast) {
+        if (connection->RPCContext.argumentsNum == 1) {
+          connection->OnGetBalance();
+        } else {
+          connection->Reply404();
+          return 0;
+        }
+      }
+
+      break;
+    }
 
     case fnPeerInfo : {
       if (component->type == httpRequestDtDataLast)
@@ -292,6 +313,30 @@ void BC::Network::HttpApiConnection::OnTx()
       Reply404();
     else
       postQuitOperation(aioGetBase(Socket));
+  }
+}
+
+void BC::Network::HttpApiConnection::OnGetBalance()
+{
+  BC::Proto::AddressTy address;
+  if (Storage_->balancedb().enabled() && decodeHumanReadableAddress(RPCContext.address, ChainParams_.PublicKeyPrefix, address)) {
+    int64_t balance;
+    xmstream stream;
+    Build200(stream);
+    size_t offset = StartChunk(stream);
+    stream.write('{');
+    if (Storage_->balancedb().find(address, &balance)) {
+      serializeJson(stream, "found", true); stream.write(",");
+      serializeJson(stream, "balance", balance);
+    } else {
+      serializeJson(stream, "found", false);
+    }
+
+    stream.write('}');
+    FinishChunk(stream, offset);
+    aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  } else {
+    Reply404();
   }
 }
 

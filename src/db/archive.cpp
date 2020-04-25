@@ -31,10 +31,10 @@ bool Archive::sync(BlockInMemoryIndex &blockIndex,
       BC::Proto::Block block;
       BC::unserialize(stream, block);
       BitMap bitMap = It->second;
-      if (bitMap.Affected[DbTransactions]) {
-        if (TxDb_.enabled())
-          TxDb_.add(It->first, block, Disconnect, true);
-      }
+      if (bitMap.Affected[DbTransactions] && TxDb_.enabled())
+        TxDb_.add(It->first, block, Disconnect, true);
+      if (bitMap.Affected[DbAddrBalance] && BalanceDb_.enabled())
+        BalanceDb_.add(It->first, block, Disconnect, true);
       ++It;
     };
 
@@ -58,10 +58,10 @@ bool Archive::sync(BlockInMemoryIndex &blockIndex,
       xmstream stream(data, size);
       BC::Proto::Block block;
       BC::unserialize(stream, block);
-      if (indexIt->Height >= forConnectHeights[DbTransactions]) {
-        if (TxDb_.enabled())
-          TxDb_.add(indexIt, block, Connect, true);
-      }
+      if (indexIt->Height >= forConnectHeights[DbTransactions] && TxDb_.enabled())
+        TxDb_.add(indexIt, block, Connect, true);
+      if (indexIt->Height >= forConnectHeights[DbAddrBalance] && BalanceDb_.enabled())
+        BalanceDb_.add(indexIt, block, Connect, true);
       indexIt = indexIt->Next;
     };
 

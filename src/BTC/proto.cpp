@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "proto.h"
+#include "common/base58.h"
 #include "common/serializeJson.h"
 
 namespace BTC {
@@ -298,4 +299,53 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tx
   serializeJson(stream, "value", txout.value); stream.write(',');
   serializeJson(stream, "pkscript", txout.pkScript);
   stream.write('}');
+}
+
+std::string makeHumanReadableAddress(uint8_t pubkeyAddressPrefix, const BTC::Proto::AddressTy &address)
+{
+  uint8_t data[sizeof(BTC::Proto::AddressTy) + 5];
+  data[0] = pubkeyAddressPrefix;
+  memcpy(&data[1], address.begin(), sizeof(BTC::Proto::AddressTy));
+
+  uint8_t sha256[32];
+  SHA256_CTX ctx;
+  SHA256_Init(&ctx);
+  SHA256_Update(&ctx, &data[0], sizeof(data) - 4);
+  SHA256_Final(sha256, &ctx);
+
+  SHA256_Init(&ctx);
+  SHA256_Update(&ctx, sha256, sizeof(sha256));
+  SHA256_Final(sha256, &ctx);
+
+  memcpy(data+1+sizeof(BTC::Proto::AddressTy), sha256, 4);
+  return EncodeBase58(data, data+sizeof(data));
+}
+
+bool decodeHumanReadableAddress(const std::string &hrAddress, uint8_t pubkeyAddressPrefix, BTC::Proto::AddressTy &address)
+{
+  std::vector<uint8_t> data;
+  if (!DecodeBase58(hrAddress.c_str(), data) ||
+      data.size() != 1 + sizeof(BTC::Proto::AddressTy) + 4 ||
+      data[0] != pubkeyAddressPrefix)
+    return false;
+
+  uint32_t addrHash;
+  memcpy(&addrHash, &data[1 + sizeof(BTC::Proto::AddressTy)], 4);
+
+  // Compute sha256 and take first 4 bytes
+  uint8_t sha256[32];
+  SHA256_CTX ctx;
+  SHA256_Init(&ctx);
+  SHA256_Update(&ctx, &data[0], data.size() - 4);
+  SHA256_Final(sha256, &ctx);
+
+  SHA256_Init(&ctx);
+  SHA256_Update(&ctx, sha256, sizeof(sha256));
+  SHA256_Final(sha256, &ctx);
+
+  if (reinterpret_cast<uint32_t*>(sha256)[0] != addrHash)
+    return false;
+
+  memcpy(address.begin(), &data[1], sizeof(BTC::Proto::AddressTy));
+  return true;
 }

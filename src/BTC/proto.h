@@ -14,6 +14,7 @@ namespace BTC {
 class Proto {
 public:
   using BlockHashTy = ::uint256;
+  using AddressTy = ::uint160;
 
 struct NetworkAddress {
   uint32_t time;
@@ -564,3 +565,6 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tr
 void serializeJsonInside(xmstream &stream, const BTC::Proto::BlockHeader &header);
 void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TxIn &txin);
 void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TxOut &txout);
+
+std::string makeHumanReadableAddress(uint8_t pubkeyAddressPrefix, const BTC::Proto::AddressTy &address);
+bool decodeHumanReadableAddress(const std::string &hrAddress, uint8_t pubkeyAddressPrefix, BTC::Proto::AddressTy &address);

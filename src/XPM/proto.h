@@ -12,6 +12,7 @@ namespace XPM {
 class Proto {
 public:
   using BlockHashTy = BTC::Proto::BlockHashTy;
+  using AddressTy = BTC::Proto::AddressTy;
 
   // Data structures
 #pragma pack(push, 1)

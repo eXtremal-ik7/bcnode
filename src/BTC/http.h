@@ -33,6 +33,7 @@ private:
     fnBlockByHash,
     fnBlockByHeight,
     fnTx,
+    fnGetBalance,
     fnPeerInfo
   };
 
@@ -60,6 +61,8 @@ private:
     // blockByHash
     // tx
     BC::Proto::BlockHashTy hash;
+    // balance
+    std::string address;
     // blockByHeight
     uint32_t height;
     // peerInfo
@@ -88,6 +91,7 @@ public:
   void OnBlockByHash();
   void OnBlockByHeight();
   void OnTx();
+  void OnGetBalance();
   void OnPeerInfo();
 
   // Helpers

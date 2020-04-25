@@ -78,6 +78,7 @@ include_directories(
 add_library(bcnodecommon STATIC
   loguru.cpp
   common/arith_uint256.cpp
+  common/base58.cpp
   common/bigNum.cpp
   common/serializedDataCache.cpp
   common/uint256.cpp
@@ -107,6 +108,7 @@ set(BASE_SOURCES
   common/merkleTree.cpp
   common/thread.cpp
   db/archive.cpp
+  db/balancedb.cpp
   db/storage.cpp
   db/txdb.cpp
 )
@@ -164,6 +166,7 @@ macro(prepare_bc_env NAME)
     "network.h"
     "proto.h"
     "serialize.h"
+    "script.h"
   )
 
   foreach(FILE IN LISTS BC_FILES)
@@ -184,6 +187,7 @@ set(BTC_SOURCES
   BTC/network.cpp
   BTC/http.cpp
   BTC/nativeApi.cpp
+  BTC/script.cpp
 )
 
 add_executable(bcnode-btc

@@ -28,7 +28,7 @@ void TxDb::getConfiguration(config4cpp::Configuration *cfg)
   Cfg_.StoreFullTx = cfg->lookupBoolean("txdb", "storeFullTx", false);
 }
 
-bool TxDb::initialize(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC::Common::BlockIndex **forConnect, IndexDbMap &forDisconnect)
+bool TxDb::initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, BC::DB::Archive&, BC::Common::BlockIndex **forConnect, IndexDbMap &forDisconnect)
 {
   if (!Enabled_)
     return true;
@@ -41,7 +41,7 @@ bool TxDb::initialize(BlockInMemoryIndex &blockIndex, std::filesystem::path &dat
   Databases_.resize(Cfg_.ShardsNum);
   ShardData_.resize(Cfg_.ShardsNum);
   for (unsigned i = 0; i < Cfg_.ShardsNum; i++) {
-    auto shardPath = dataDir / "txdb" / std::to_string(i);
+    auto shardPath = blockDb.dataDir() / "txdb" / std::to_string(i);
     std::filesystem::create_directories(shardPath);
 
     rocksdb::DB *db;

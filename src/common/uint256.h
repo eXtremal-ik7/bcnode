@@ -146,12 +146,13 @@ struct std::hash<uint256> {
   }
 };
 
-struct TbbHash256 {
-  size_t hash(const uint256 &s) const {
+template<unsigned int BitSize>
+struct TbbHash {
+  size_t hash(const base_blob<BitSize> &s) const {
     return s.GetUint64(0);
   }
 
-  bool equal(const uint256 &s1, const uint256 &s2) const {
+  bool equal(const base_blob<BitSize> &s1, const base_blob<BitSize> &s2) const {
     return s1 == s2;
   }
 };
