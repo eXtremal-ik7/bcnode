@@ -41,6 +41,8 @@ public:
   void flush() {
     if (TxDb_.enabled())
       TxDb_.flush();
+    if (BalanceDb_.enabled())
+      BalanceDb_.flush();
   }
 
   BC::DB::BalanceDb &balancedb() { return BalanceDb_; }
