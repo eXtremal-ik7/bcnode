@@ -27,6 +27,9 @@ public:
       auto *resultPtr = const_cast<BC::DB::BalanceDb::Value*>(reinterpret_cast<const BC::DB::BalanceDb::Value*>(result->data()));
       auto *existingPtr = reinterpret_cast<const BC::DB::BalanceDb::Value*>(existingValue->data());
       resultPtr->Balance += existingPtr->Balance;
+      resultPtr->TotalSent += existingPtr->TotalSent;
+      resultPtr->TotalReceived += existingPtr->TotalReceived;
+      resultPtr->TransactionsNum += existingPtr->TransactionsNum;
     }
 
     return true;
@@ -167,10 +170,15 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
       decltype (shardData.Cache)::accessor accessor;
       if (shardData.Cache.find(accessor, address)) {
         accessor->second.Balance += delta;
+        accessor->second.TotalReceived += delta;
+        accessor->second.TransactionsNum++;
       } else {
         Value value;
         value.BatchId = shardData.BatchId;
         value.Balance = delta;
+        value.TotalSent = 0;
+        value.TotalReceived = delta;
+        value.TransactionsNum = 1;
         shardData.Cache.insert(std::make_pair(address, value));
       }
 
@@ -180,10 +188,8 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
   }
 
   for (size_t i = 1, ie = block.vtx.size(); i != ie; i++) {
-    int64_t totalInput = 0;
-    int64_t totalOutput = 0;
     auto tx = block.vtx[i];
-
+    std::set<BC::Proto::AddressTy> knownAddresses;
     for (const auto &input: tx.txIn) {
       // Here we need find referenced output
       // Best way: use UTXO cache
@@ -202,14 +208,19 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
           decltype (shardData.Cache)::accessor accessor;
           if (shardData.Cache.find(accessor, address)) {
             accessor->second.Balance += delta;
+            accessor->second.TotalSent += (-delta);
+            accessor->second.TransactionsNum += knownAddresses.insert(address).second;
           } else {
             Value value;
             value.BatchId = shardData.BatchId;
             value.Balance = delta;
+            value.TotalSent = (-delta);
+            value.TotalReceived = 0;
+            value.TransactionsNum = 1;
             shardData.Cache.insert(std::make_pair(address, value));
           }
 
-          totalInput += delta;
+          knownAddresses.insert(address);
         }
       }
     }
@@ -228,28 +239,23 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
         decltype (shardData.Cache)::accessor accessor;
         if (shardData.Cache.find(accessor, address)) {
           accessor->second.Balance += delta;
+          accessor->second.TotalReceived += delta;
+          accessor->second.TransactionsNum += knownAddresses.insert(address).second;
         } else {
           Value value;
           value.BatchId = shardData.BatchId;
           value.Balance = delta;
+          value.TotalSent = 0;
+          value.TotalReceived = delta;
+          value.TransactionsNum = 1;
           shardData.Cache.insert(std::make_pair(address, value));
         }
 
-        totalOutput += delta;
         if (i == 0 && j == 0) {
           coinbaseShard = shardNum;
           coinbaseAddress = address;
         }
       }
-    }
-
-    // Process transaction fee
-    int64_t txFee = - (totalInput + totalOutput);
-    if (txFee && !coinbaseAddress.IsNull()) {
-      Shard &shard = ShardData_[coinbaseShard];
-      decltype (shard.Cache)::accessor accessor;
-      if (shard.Cache.find(accessor, coinbaseAddress))
-        accessor->second.Balance += txFee;
     }
   }
 
@@ -263,13 +269,14 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
   }
 }
 
-bool BalanceDb::find(const BC::Proto::AddressTy &address, int64_t *result)
+bool BalanceDb::find(const BC::Proto::AddressTy &address, QueryResult *result)
 {
   unsigned shardNum = address.GetUint64(0) % Cfg_.ShardsNum;
   Shard &shardData = ShardData_[shardNum];
   bool hasCachedValue = false;
   bool hasStoredValue = false;
-  Value balance = {0, shardData.BatchId};
+  Value balance;
+  balance.BatchId = shardData.BatchId;
 
   if (Cfg_.StoreFullAddress) {
     {
@@ -287,8 +294,12 @@ bool BalanceDb::find(const BC::Proto::AddressTy &address, int64_t *result)
     std::string data;
     if (db->Get(rocksdb::ReadOptions(), key, &data).ok() && data.size() == sizeof(Value)) {
       const Value *value = reinterpret_cast<const Value*>(data.data());
-      if (balance.BatchId - value->BatchId >= 0)
+      if (balance.BatchId - value->BatchId >= 0) {
         balance.Balance += value->Balance;
+        balance.TotalSent += value->TotalSent;
+        balance.TotalReceived += value->TotalReceived;
+        balance.TransactionsNum += value->TransactionsNum;
+      }
       hasStoredValue = true;
     }
   } else {
@@ -296,7 +307,10 @@ bool BalanceDb::find(const BC::Proto::AddressTy &address, int64_t *result)
     abort();
   }
 
-  *result = balance.Balance;
+  result->Balance = balance.Balance;
+  result->TotalSent = balance.TotalSent;
+  result->TotalReceived = balance.TotalReceived;
+  result->TransactionsNum = balance.TransactionsNum;
   return hasCachedValue | hasStoredValue;
 }
 

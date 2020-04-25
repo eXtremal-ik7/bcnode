@@ -25,10 +25,10 @@ public:
   static constexpr unsigned MinimalBatchSize = 8192;
 
   struct QueryResult {
-    BC::Proto::Transaction Tx;
-    BC::Proto::BlockHashTy Block;
-    uint32_t TxNum;
-    bool DataCorrupted = false;
+    int64_t Balance;
+    int64_t TotalSent;
+    int64_t TotalReceived;
+    int32_t TransactionsNum;
   };
 
 public:
@@ -38,7 +38,7 @@ public:
   bool initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, BC::DB::Archive &archive, BC::Common::BlockIndex **forConnect, IndexDbMap &forDisconnect);
 
   void add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, ActionTy actionType, bool doFlush = false);
-  bool find(const BC::Proto::AddressTy &address, int64_t *result);
+  bool find(const BC::Proto::AddressTy &address, QueryResult *result);
 
   void flush(unsigned shardNum);
   void flush() {
@@ -48,7 +48,10 @@ public:
 
 #pragma pack(push, 1)
   struct Value {
-    int64_t Balance;
+    int64_t Balance = 0;
+    int64_t TotalSent = 0;
+    int64_t TotalReceived = 0;
+    int32_t TransactionsNum = 0;
     int32_t BatchId;
   };
 #pragma pack(pop)

@@ -320,14 +320,17 @@ void BC::Network::HttpApiConnection::OnGetBalance()
 {
   BC::Proto::AddressTy address;
   if (Storage_->balancedb().enabled() && decodeHumanReadableAddress(RPCContext.address, ChainParams_.PublicKeyPrefix, address)) {
-    int64_t balance;
+    BC::DB::BalanceDb::QueryResult result;
     xmstream stream;
     Build200(stream);
     size_t offset = StartChunk(stream);
     stream.write('{');
-    if (Storage_->balancedb().find(address, &balance)) {
+    if (Storage_->balancedb().find(address, &result)) {
       serializeJson(stream, "found", true); stream.write(",");
-      serializeJson(stream, "balance", balance);
+      serializeJson(stream, "balance", result.Balance);
+      serializeJson(stream, "totalSent", result.TotalSent);
+      serializeJson(stream, "totalReceived", result.TotalReceived);
+      serializeJson(stream, "transactionsNum", result.TransactionsNum);
     } else {
       serializeJson(stream, "found", false);
     }

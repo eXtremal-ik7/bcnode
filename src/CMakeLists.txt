@@ -30,6 +30,7 @@ set (CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH}
 )
 
 set(CMAKE_DEBUG_POSTFIX d)
+add_definitions(-DTBB_USE_EXCEPTIONS=0)
 
 if(MSVC)
   add_definitions(
@@ -42,10 +43,11 @@ if(MSVC)
     -DNOGDI
   )
 
+  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /GR-")
   include_directories(${CMAKE_SOURCE_DIR}/msvc/include)
 else(MSVC)
   set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra")
-  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fno-rtti")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcx16")
 endif(MSVC)
 
