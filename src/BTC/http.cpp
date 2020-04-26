@@ -327,9 +327,9 @@ void BC::Network::HttpApiConnection::OnGetBalance()
     stream.write('{');
     if (Storage_->balancedb().find(address, &result)) {
       serializeJson(stream, "found", true); stream.write(",");
-      serializeJson(stream, "balance", result.Balance);
-      serializeJson(stream, "totalSent", result.TotalSent);
-      serializeJson(stream, "totalReceived", result.TotalReceived);
+      serializeJson(stream, "balance", result.Balance); stream.write(",");
+      serializeJson(stream, "totalSent", result.TotalSent); stream.write(",");
+      serializeJson(stream, "totalReceived", result.TotalReceived); stream.write(",");
       serializeJson(stream, "transactionsNum", result.TransactionsNum);
     } else {
       serializeJson(stream, "found", false);
