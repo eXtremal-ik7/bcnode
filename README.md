@@ -28,15 +28,23 @@ cd YOUR_BUILD_DIRECTORY && git clone https://github.com/eXtremal-ik7/bcnode
 ###### How to build on Ubuntu 18.04 (using gcc)
 
 ```
+# Install gcc 8 and other dependencies
 sudo apt-get update
-sudo apt-get install g++-8 git cmake yasm texinfo autoconf libtool libjemalloc-dev
+sudo apt-get install g++-8 git yasm texinfo autoconf automake libtool libjemalloc-dev valgrind wget software-properties-common
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 80 --slave /usr/bin/g++ g++ /usr/bin/g++-8 --slave /usr/bin/gcov gcov /usr/bin/gcov-8
 
+# Install latest cmake version
+wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | sudo apt-key add -
+sudo apt-add-repository 'deb https://apt.kitware.com/ubuntu/ bionic main'
+sudo apt-get install cmake
+
+# Build
 cd YOUR_BUILD_DIRECTORY/bcnode
 mkdir x86_64-Linux
 cd x86_64-Linux
 cmake ../src
 make -j8
+
 ```
 
 ###### How to build on Windows with Visual Studio
