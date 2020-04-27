@@ -4,7 +4,7 @@ HunterGate(
     SHA1 "88ea6d37c897a81a080eb9ae0f69d7807bbb3c73"
 )
 
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.11)
 project(bcnode)
 
 set (CMAKE_CXX_STANDARD 17)
@@ -70,7 +70,8 @@ include(${CMAKE_SOURCE_DIR}/cmake/ProjectSecp256k1.cmake)
 
 include_directories(
   ${CMAKE_SOURCE_DIR}
-  ${ASYNCIO_INCLUDE_DIR}
+  ${libp2p_SOURCE_DIR}/src/include
+  ${libp2p_BINARY_DIR}/include
   ${CONFIG4CPP_INCLUDE_DIR}
   ${MPIR_INCLUDE_DIR}
   ${OPENSSL_INCLUDE_DIR}
@@ -91,7 +92,7 @@ target_include_directories(bcnodecommon PUBLIC
 )
 
 add_dependencies(bcnodecommon
-  config4cpp libp2p mpir secp256k1
+  config4cpp mpir
 )
 
 add_library(bcnodecrypto STATIC
@@ -118,9 +119,9 @@ set(BASE_SOURCES
 # Linker configuration
 set(COMMON_LIBRARIES
   bcnodecommon
-  ${ASYNCIO_LIBRARY}
-  ${ASYNCIO_EXTRAS_LIBRARY}
-  ${P2PUTILS_LIBRARY}
+  asyncio-0.5
+  asyncioextras-0.5
+  p2putils
   OpenSSL::SSL
   OpenSSL::Crypto
   RocksDB::rocksdb

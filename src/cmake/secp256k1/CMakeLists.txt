@@ -100,12 +100,12 @@ endif()
 
 
 configure_file(
-  ${CMAKE_SOURCE_DIR}/src/libsecp256k1-config.h.cmake.in
-  ${CMAKE_BINARY_DIR}/src/libsecp256k1-config.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/libsecp256k1-config.h.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/src/libsecp256k1-config.h
 )
 
 
-include_directories(${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/src)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/src)
 
 if (NOT MSVC)
   set(GEN_CONTEXT_COMPILE_OPTIONS -Wall -Wextra -Wno-unused-function)
@@ -115,7 +115,7 @@ else()
 endif()
 
 # Build gen_context
-add_executable(gen_context ${CMAKE_SOURCE_DIR}/src/gen_context.c)
+add_executable(gen_context ${CMAKE_CURRENT_SOURCE_DIR}/src/gen_context.c)
 target_compile_options(gen_context PRIVATE ${GEN_CONTEXT_COMPILE_OPTIONS})
 
 # Run gen_context
@@ -125,7 +125,7 @@ if (USE_ECMULT_STATIC_PRECOMPUTATION)
 endif()
 
 # Main static library
-add_library(secp256k1 STATIC ${CMAKE_SOURCE_DIR}/src/secp256k1.c)
+add_library(secp256k1 STATIC ${CMAKE_CURRENT_SOURCE_DIR}/src/secp256k1.c)
 if (NOT MSVC)
   target_compile_definitions(secp256k1 PRIVATE -DVALGRIND)
 endif()
@@ -134,8 +134,8 @@ add_dependencies(secp256k1 ecmult_static_context)
 
 # Tests
 if (ENABLE_TESTS)
-  add_executable(tests ${CMAKE_SOURCE_DIR}/src/tests.c)
-  target_include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  add_executable(tests ${CMAKE_CURRENT_SOURCE_DIR}/src/tests.c)
+  target_include_directories(tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   if (NOT MSVC)
     target_compile_definitions(tests PRIVATE -DVALGRIND)
   endif()
@@ -144,12 +144,12 @@ if (ENABLE_TESTS)
   target_link_libraries(tests secp256k1)
     
   if (NOT MSVC)
-    add_executable(valgrind_ctime_test ${CMAKE_SOURCE_DIR}/src/valgrind_ctime_test.c)
+    add_executable(valgrind_ctime_test ${CMAKE_CURRENT_SOURCE_DIR}/src/valgrind_ctime_test.c)
     target_compile_options(valgrind_ctime_test PRIVATE ${DEFAULT_COMPILE_OPTIONS})
     target_link_libraries(valgrind_ctime_test secp256k1)
   endif()
   
-  add_executable(exhaustive_tests ${CMAKE_SOURCE_DIR}/src/tests_exhaustive.c)
+  add_executable(exhaustive_tests ${CMAKE_CURRENT_SOURCE_DIR}/src/tests_exhaustive.c)
   target_compile_definitions(exhaustive_tests PRIVATE -DVERIFY)
   target_compile_options(exhaustive_tests PRIVATE ${DEFAULT_COMPILE_OPTIONS})
   target_link_libraries(exhaustive_tests secp256k1)
