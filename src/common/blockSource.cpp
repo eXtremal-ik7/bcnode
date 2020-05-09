@@ -181,12 +181,14 @@ void BlockSourceList::releaseBlockSource(BlockSource *source)
   if (Head_.get() != source)
     return;
 
+  intrusive_ptr<BlockSource> current(source->Next_);
   for (;;) {
-    intrusive_ptr<BlockSource> current(source->Next_);
     if (current.get() == nullptr || !current.get()->DownloadingFinished_) {
       Head_.compare_and_exchange(source, current.get());
       return;
     }
+
+    current = current.get()->Next_;
   }
 
   Head_.compare_and_exchange(source, nullptr);

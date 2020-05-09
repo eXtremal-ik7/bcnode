@@ -9,7 +9,6 @@ namespace BC {
 namespace DB {
 
 bool Archive::sync(BlockInMemoryIndex &blockIndex,
-                   BC::Common::ChainParams &chainParams,
                    BlockDatabase &blockDb,
                    BC::Common::BlockIndex **connectPoints,
                    BC::DB::IndexDbMap &disconnectQueue)

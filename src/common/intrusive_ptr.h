@@ -196,18 +196,40 @@ public:
   }
 
   intrusive_ptr &operator=(T *ptr) {
+    if (ptr)
+      object_addref(_ptr, 1);
     if (_ptr)
       object_release(_ptr, atomic_intrusive_ptr<T, deleter, tagSize>::WeakRef);
-
     _ptr = ptr;
-    if (_ptr)
-      object_addref(_ptr, 1);
     return *this;
+  }
+
+  intrusive_ptr &operator=(const intrusive_ptr &ptr) {
+    if (ptr._ptr != nullptr)
+      object_addref(_ptr, atomic_intrusive_ptr<T, deleter, tagSize>::WeakRef);
+    if (_ptr)
+      object_release(_ptr, atomic_intrusive_ptr<T, deleter, tagSize>::WeakRef);
+    _ptr = ptr._ptr;
   }
 
   intrusive_ptr &operator=(intrusive_ptr &&ptr) {
     _ptr = ptr._ptr;
     ptr._ptr = nullptr;
+    return *this;
+  }
+
+  intrusive_ptr &operator=(atomic_intrusive_ptr<T, deleter, tagSize> &ptr) {
+    // Read pointer value and increment weak reference counter
+    tagged_ptr<T, tagSize> link = ptr._ptr.fetch_add(1);
+
+    if (_ptr)
+      object_release(_ptr, atomic_intrusive_ptr<T, deleter, tagSize>::WeakRef);
+    _ptr = link.pointer();
+    uintptr_t tag = link.tag();
+
+    // Flush reference counter cache if limit exceeded
+    if (tag >= atomic_intrusive_ptr<T, deleter, tagSize>::ReferenceCacheLimit)
+      ptr.flush(_ptr, tag + 1);
     return *this;
   }
 

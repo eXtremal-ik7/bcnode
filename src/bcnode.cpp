@@ -340,7 +340,7 @@ int main(int argc, char **argv)
   BC::Common::BlockIndex *firstBlocks[BC::DB::DbCount] = {nullptr};
   if (!context.Archive.init(context.BlockIndex, context.BlockDb, firstBlocks, forDisconnect))
     return 1;
-  if (!context.Archive.sync(context.BlockIndex, context.ChainParams, context.BlockDb, firstBlocks, forDisconnect))
+  if (!context.Archive.sync(context.BlockIndex, context.BlockDb, firstBlocks, forDisconnect))
     return 1;
 
   // Initialize storage manager

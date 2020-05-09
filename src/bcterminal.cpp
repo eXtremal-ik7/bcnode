@@ -168,8 +168,8 @@ public:
 
   int read(char *out, size_t size) {
     // Wait key press and lock terminal (use WinAPI and Posix API)
-    char first = 0;
 #ifdef WIN32
+    char first = 0;
     DWORD mode;
     DWORD bytesRead;
     HANDLE stdInput = GetStdHandle(STD_INPUT_HANDLE);
