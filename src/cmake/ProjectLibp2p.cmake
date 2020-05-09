@@ -13,5 +13,5 @@ FetchContent_Declare(
 FetchContent_GetProperties(libp2p)
 if (NOT libp2p_POPULATED)
   FetchContent_Populate(libp2p)
-  add_subdirectory(${libp2p_SOURCE_DIR}/src ${libp2p_BINARY_DIR})
+  add_subdirectory(${libp2p_SOURCE_DIR}/src ${libp2p_BINARY_DIR} EXCLUDE_FROM_ALL)
 endif()

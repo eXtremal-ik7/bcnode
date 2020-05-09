@@ -151,12 +151,9 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
   if (block.vtx.empty())
     return;
 
-  unsigned coinbaseShard = 0;
-  BC::Proto::AddressTy coinbaseAddress;
-  coinbaseAddress.SetNull();
-
   // Process coinbase transaction
   const auto &coinbaseTx = block.vtx[0];
+  int32_t txDelta = actionType == Connect ? 1 : -1;
   if (coinbaseTx.txIn.size() == 1 && coinbaseTx.txOut.size() == 1) {
     BC::Proto::AddressTy address;
     int64_t delta = coinbaseTx.txOut[0].value;
@@ -171,19 +168,16 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
       if (shardData.Cache.find(accessor, address)) {
         accessor->second.Balance += delta;
         accessor->second.TotalReceived += delta;
-        accessor->second.TransactionsNum++;
+        accessor->second.TransactionsNum += txDelta;
       } else {
         Value value;
         value.BatchId = shardData.BatchId;
         value.Balance = delta;
         value.TotalSent = 0;
         value.TotalReceived = delta;
-        value.TransactionsNum = 1;
+        value.TransactionsNum = txDelta;
         shardData.Cache.insert(std::make_pair(address, value));
       }
-
-      coinbaseShard = shardNum;
-      coinbaseAddress = address;
     }
   }
 
@@ -209,14 +203,14 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
           if (shardData.Cache.find(accessor, address)) {
             accessor->second.Balance += delta;
             accessor->second.TotalSent += (-delta);
-            accessor->second.TransactionsNum += knownAddresses.insert(address).second;
+            accessor->second.TransactionsNum += (knownAddresses.insert(address).second ? txDelta : 0);
           } else {
             Value value;
             value.BatchId = shardData.BatchId;
             value.Balance = delta;
             value.TotalSent = (-delta);
             value.TotalReceived = 0;
-            value.TransactionsNum = 1;
+            value.TransactionsNum = txDelta;
             shardData.Cache.insert(std::make_pair(address, value));
           }
 
@@ -240,20 +234,15 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
         if (shardData.Cache.find(accessor, address)) {
           accessor->second.Balance += delta;
           accessor->second.TotalReceived += delta;
-          accessor->second.TransactionsNum += knownAddresses.insert(address).second;
+          accessor->second.TransactionsNum += (knownAddresses.insert(address).second ? txDelta : 0);
         } else {
           Value value;
           value.BatchId = shardData.BatchId;
           value.Balance = delta;
           value.TotalSent = 0;
           value.TotalReceived = delta;
-          value.TransactionsNum = 1;
+          value.TransactionsNum = txDelta;
           shardData.Cache.insert(std::make_pair(address, value));
-        }
-
-        if (i == 0 && j == 0) {
-          coinbaseShard = shardNum;
-          coinbaseAddress = address;
         }
       }
     }
