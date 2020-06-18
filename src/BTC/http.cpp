@@ -44,6 +44,7 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
   static constexpr char blockByHeight[] = "blockByHeight";
   static constexpr char tx[] = "tx";
   static constexpr char getBalance[] = "getBalance";
+  static constexpr char addrTxid[] ="addrTxid";
   static constexpr char peerInfo[] = "peerInfo";
   BC::Network::HttpApiConnection *connection = static_cast<BC::Network::HttpApiConnection*>(arg);
   if (component->type == httpRequestDtMethod) {
@@ -70,6 +71,9 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
     } else if (rawcmp<getBalance>(component->data)) {
       requiredMethod = hmGet;
       connection->RPCContext.function = fnGetBalance;
+    } else if (rawcmp<addrTxid>(component->data)) {
+      requiredMethod = hmGet;
+      connection->RPCContext.function = fnGetAddrTxid;
     } else if (rawcmp<peerInfo>(component->data)) {
       requiredMethod = hmGet;
       connection->RPCContext.function = fnPeerInfo;
@@ -160,6 +164,30 @@ int BC::Network::HttpApiConnection::parseCb(HttpRequestComponent *component, voi
       if (component->type == httpRequestDtDataLast) {
         if (connection->RPCContext.argumentsNum == 1) {
           connection->OnGetBalance();
+        } else {
+          connection->Reply404();
+          return 0;
+        }
+      }
+
+      break;
+    }
+
+    case fnGetAddrTxid : {
+      if (component->type == httpRequestDtUriPathElement) {
+        if (connection->RPCContext.argumentsNum == 0)
+          connection->RPCContext.address.assign(component->data.data, component->data.data + component->data.size);
+        connection->RPCContext.argumentsNum++;
+      } else if (component->type == httpRequestDtUriQueryElement) {
+        std::string argName(component->data.data, component->data.data + component->data.size);
+        std::string argValue(component->data2.data, component->data2.data + component->data2.size);
+        if (argName == "from")
+          connection->RPCContext.from = xatoi<uint64_t>(argValue.c_str());
+        else if (argName == "count")
+          connection->RPCContext.count = xatoi<uint64_t>(argValue.c_str());
+      } else if (component->type == httpRequestDtDataLast) {
+        if (connection->RPCContext.argumentsNum == 1) {
+          connection->OnGetAddrTxid();
         } else {
           connection->Reply404();
           return 0;
@@ -331,6 +359,32 @@ void BC::Network::HttpApiConnection::OnGetBalance()
       serializeJson(stream, "totalSent", result.TotalSent); stream.write(",");
       serializeJson(stream, "totalReceived", result.TotalReceived); stream.write(",");
       serializeJson(stream, "transactionsNum", result.TransactionsNum);
+    } else {
+      serializeJson(stream, "found", false);
+    }
+
+    stream.write('}');
+    FinishChunk(stream, offset);
+    aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  } else {
+    Reply404();
+  }
+}
+
+void BC::Network::HttpApiConnection::OnGetAddrTxid()
+{
+  BC::Proto::AddressTy address;
+  if (Storage_->balancedb().enabled() && decodeHumanReadableAddress(RPCContext.address, ChainParams_.PublicKeyPrefix, address)) {
+    xmstream stream;
+    Build200(stream);
+    size_t offset = StartChunk(stream);
+    stream.write('{');
+
+    std::vector<BC::Proto::BlockHashTy> transactions;
+    Storage_->balancedb().findTxidForAddr(address, RPCContext.from, RPCContext.count, transactions);
+    if (!transactions.empty()) {
+      serializeJson(stream, "found", true); stream.write(",");
+      serializeJson(stream, "txid", transactions);
     } else {
       serializeJson(stream, "found", false);
     }

@@ -14,6 +14,7 @@ namespace BTC {
 class Proto {
 public:
   using BlockHashTy = ::uint256;
+  using TxHashTy = ::uint256;
   using AddressTy = ::uint160;
 
 struct NetworkAddress {

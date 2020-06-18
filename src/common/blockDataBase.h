@@ -79,17 +79,16 @@ public:
   bool init(std::filesystem::path &dataDir, BC::Common::ChainParams &chainParams);
 
   std::filesystem::path &dataDir() { return DataDir_; }
-  LinearDataReader &blockReader() { return blockStorageReader; }
+  LinearDataStorage &blockReader() { return BlockStorage_; }
 
   bool writeBlock(BC::Common::BlockIndex *index);
-  bool writeBufferEmpty() { return blockStorageWriter.bufferEmpty(); }
-  bool flush() { return blockStorageWriter.flush() && indexStorageWriter.flush(); }
+  bool writeBufferEmpty() { return BlockStorage_.bufferEmpty(); }
+  bool flush() { return BlockStorage_.flush() && IndexStorage_.flush(); }
   uint32_t magic() { return Magic_; }
 
 private:
-  LinearDataReader blockStorageReader;
-  LinearDataWriter blockStorageWriter;
-  LinearDataWriter indexStorageWriter;
+  LinearDataStorage BlockStorage_;
+  LinearDataStorage IndexStorage_;
   std::filesystem::path DataDir_;
   // NOTE: bitcoin core compatibility
   uint32_t Magic_;

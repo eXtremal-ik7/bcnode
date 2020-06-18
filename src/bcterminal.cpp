@@ -25,6 +25,8 @@
 #include <termios.h>
 #endif
 
+#include <iostream>
+
 enum CmdLineOptsTy {
   clOptHelp = 1,
   clMagic

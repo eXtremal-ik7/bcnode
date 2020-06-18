@@ -83,6 +83,7 @@ add_library(bcnodecommon STATIC
   common/arith_uint256.cpp
   common/base58.cpp
   common/bigNum.cpp
+  common/file.cpp
   common/serializedDataCache.cpp
   common/uint256.cpp
 )

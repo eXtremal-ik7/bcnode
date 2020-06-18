@@ -90,18 +90,18 @@ static inline void serializeJson(xmstream &stream, const char *fieldName, const 
   stream.write('\"');
 }
 
-//static inline void serializeJson(xmstream &stream, const char *fieldName, const xmstream &data)  {
-//  if (fieldName) {
-//    stream.write('\"');
-//    stream.write(fieldName, strlen(fieldName));
-//    stream.write("\":", 2);
-//  }
-
-//  stream.write('\"');
-//  char *out = stream.alloc<char>(data.sizeOf()*2);
-//  for (size_t i = 0, ie = data.sizeOf(); i < ie; i++) {
-//    out[i*2+0] = hexDigit(data.data<uint8_t>()[i] >> 4);
-//    out[i*2+1] = hexDigit(data.data<uint8_t>()[i] & 0x0F);
-//  }
-//  stream.write('\"');
-//}
+template<typename T>
+static inline void serializeJson(xmstream &stream, const char *fieldName, std::vector<T> &data) {
+  if (fieldName) {
+    stream.write('\"');
+    stream.write(fieldName, strlen(fieldName));
+    stream.write("\":", 2);
+  }
+  stream.write('[');
+  for (size_t i = 0, ie = data.size(); i < ie; i++) {
+    if (i != 0)
+      stream.write(',');
+    serializeJson(stream, nullptr, data[i]);
+  }
+  stream.write(']');
+}

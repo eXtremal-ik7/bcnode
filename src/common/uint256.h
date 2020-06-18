@@ -140,6 +140,13 @@ inline uint256 uint256S(const std::string& str)
 }
 
 template<>
+struct std::hash<uint160> {
+  size_t operator()(const uint160 &s) const {
+    return s.GetUint64(0);
+  }
+};
+
+template<>
 struct std::hash<uint256> {
   size_t operator()(const uint256 &s) const {
     return s.GetUint64(0);

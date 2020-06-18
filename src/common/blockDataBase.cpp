@@ -620,10 +620,10 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
   }
 
   // Initialize local index storage
-  LinearDataWriter indexStorageWriter;
-  indexStorageWriter.init(indexPath, "index%05u.dat", BC::Common::BlocksFileLimit);
+  LinearDataStorage indexStorage;
+  indexStorage.init(indexPath, "index%05u.dat", BC::Common::BlocksFileLimit);
 
-  auto indexWriter = std::async(std::launch::async, [&storage, &indexStorageWriter]() -> bool {
+  auto indexWriter = std::async(std::launch::async, [&storage, &indexStorage]() -> bool {
     xmstream stream;
     for (;;) {
       BC::DB::Task task;
@@ -643,7 +643,7 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
       stream.reset();
       BC::serialize(stream, *task.Index);
       uint32_t serializedSize = static_cast<uint32_t>(stream.sizeOf());
-      if (!indexStorageWriter.write(&serializedSize, sizeof(serializedSize), stream.data(), static_cast<uint32_t>(stream.sizeOf()), position))
+      if (!indexStorage.append2(&serializedSize, sizeof(serializedSize), stream.data(), static_cast<uint32_t>(stream.sizeOf()), position))
         return false;
       task.Index->Serialized.reset();
     }
@@ -733,7 +733,7 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
   storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
   if (!indexWriter.get())
     return false;
-  if (!indexStorageWriter.flush())
+  if (!indexStorage.flush())
     return false;
 
   auto best = blockIndex.best();
@@ -748,13 +748,12 @@ bool BlockDatabase::init(std::filesystem::path &dataDir, BC::Common::ChainParams
   Magic_ = chainParams.magic;
   DataDir_ = dataDir;
 
-  blockStorageReader.init(dataDir / "blocks", "blk%05u.dat");
-  if (!blockStorageWriter.init(dataDir / "blocks", "blk%05u.dat", BC::Common::BlocksFileLimit))
+  if (!BlockStorage_.init(dataDir / "blocks", "blk%05u.dat", BC::Common::BlocksFileLimit))
     return false;
-  if (!indexStorageWriter.init(dataDir / "index", "index%05u.dat", BC::Common::BlocksFileLimit))
+  if (!IndexStorage_.init(dataDir / "index", "index%05u.dat", BC::Common::BlocksFileLimit))
     return false;
 
-  if (blockStorageWriter.empty()) {
+  if (BlockStorage_.empty()) {
     // Store genesis block to disk (for compatibility with core clients)
     // Serialize block using storage format:
     //   <magic>:4 <blockSize>:4 <block>
@@ -762,8 +761,8 @@ bool BlockDatabase::init(std::filesystem::path &dataDir, BC::Common::ChainParams
     xmstream stream;
     BC::serialize(stream, chainParams.GenesisBlock);
     uint32_t prefix[2] = {chainParams.magic, static_cast<uint32_t>(stream.sizeOf())};
-    if (!blockStorageWriter.write(prefix, sizeof(prefix), stream.data(), static_cast<uint32_t>(stream.sizeOf()), position) ||
-        !blockStorageWriter.flush())
+    if (!BlockStorage_.append2(prefix, sizeof(prefix), stream.data(), static_cast<uint32_t>(stream.sizeOf()), position) ||
+        !BlockStorage_.flush())
       return false;
   }
 
@@ -775,7 +774,7 @@ bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index)
   std::pair<uint32_t, uint32_t> position;
   const SerializedDataObject *serialized = index->Serialized.get();
   uint32_t prefix[2] = { Magic_, index->SerializedBlockSize };
-  if (!blockStorageWriter.write(prefix, sizeof(prefix), serialized->data(), static_cast<uint32_t>(serialized->size()), position))
+  if (!BlockStorage_.append2(prefix, sizeof(prefix), serialized->data(), static_cast<uint32_t>(serialized->size()), position))
     return false;
 
   // Serialize index for storage
@@ -786,7 +785,7 @@ bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index)
   indexData.reset();
   BC::serialize(indexData, *index);
   uint32_t serializedSize = static_cast<uint32_t>(indexData.sizeOf());
-  if (!indexStorageWriter.write(&serializedSize, sizeof(serializedSize), indexData.data(), static_cast<uint32_t>(indexData.sizeOf()), position))
+  if (!IndexStorage_.append2(&serializedSize, sizeof(serializedSize), indexData.data(), static_cast<uint32_t>(indexData.sizeOf()), position))
     return false;
 
   return true;
