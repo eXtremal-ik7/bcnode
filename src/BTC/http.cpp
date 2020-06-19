@@ -269,7 +269,7 @@ void BC::Network::HttpApiConnection::OnGetInfo()
   size_t offset = StartChunk(stream);
   stream.write("{}", 2);
   FinishChunk(stream, offset);
-  aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::OnBlockByHash()
@@ -295,7 +295,7 @@ void BC::Network::HttpApiConnection::OnBlockByHash()
   size_t offset = StartChunk(stream);
   serializeJson(stream, *index, block);
   FinishChunk(stream, offset);
-  aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::OnBlockByHeight()
@@ -325,7 +325,7 @@ void BC::Network::HttpApiConnection::OnBlockByHeight()
   size_t offset = StartChunk(stream);
   serializeJson(stream, *It->second, block);
   FinishChunk(stream, offset);
-  aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::OnTx()
@@ -349,7 +349,7 @@ void BC::Network::HttpApiConnection::OnTx()
     stream.write('}');
 
     FinishChunk(stream, offset);
-    aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+    aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
   } else {
     if (!result.DataCorrupted)
       Reply404();
@@ -379,7 +379,7 @@ void BC::Network::HttpApiConnection::OnGetBalance()
 
     stream.write('}');
     FinishChunk(stream, offset);
-    aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+    aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
   } else {
     Reply404();
   }
@@ -405,7 +405,7 @@ void BC::Network::HttpApiConnection::OnGetAddrTxid()
 
     stream.write('}');
     FinishChunk(stream, offset);
-    aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+    aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
   } else {
     Reply404();
   }
@@ -465,7 +465,7 @@ void BC::Network::HttpApiConnection::OnGetAddrTx()
   stream.write(']');
   stream.write('}');
   FinishChunk(stream, offset);
-  aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::OnPeerInfo()
@@ -484,7 +484,7 @@ void BC::Network::HttpApiConnection::OnPeerInfo()
   stream.write(']');
 
   FinishChunk(stream, offset);
-  aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::Build200(xmstream &stream)
@@ -506,7 +506,7 @@ void BC::Network::HttpApiConnection::Reply404()
   stream.write(html);
   FinishChunk(stream, offset);
 
-  aioWrite(Socket, stream.data(), stream.sizeOf(), afNone, 0, writeCb, this);
+  aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 size_t BC::Network::HttpApiConnection::StartChunk(xmstream &stream)
