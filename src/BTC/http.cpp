@@ -258,7 +258,8 @@ void BC::Network::HttpApiConnection::OnRead(AsyncOpStatus status, size_t)
 void BC::Network::HttpApiConnection::OnWrite()
 {
   // TODO: check keep alive
-  HttpNode_->removeConnection(this);
+  socketShutdown(aioObjectSocket(this->Socket), SOCKET_SHUTDOWN_READWRITE);
+  aioRead(Socket, buffer, sizeof(buffer), afNone, 0, readCb, this);
 }
 
 void BC::Network::HttpApiConnection::OnGetInfo()
