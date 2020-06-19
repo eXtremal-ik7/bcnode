@@ -423,7 +423,6 @@ void BC::Network::HttpApiConnection::OnGetAddrTx()
   xmstream stream;
   Build200(stream);
   size_t offset = StartChunk(stream);
-  stream.write('{');
   stream.write('[');
 
   if (Storage_->balancedb().storeFullTx()) {
@@ -463,7 +462,6 @@ void BC::Network::HttpApiConnection::OnGetAddrTx()
   }
 
   stream.write(']');
-  stream.write('}');
   FinishChunk(stream, offset);
   aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
