@@ -4,7 +4,7 @@
 #include "common/intrusive_ptr.h"
 #include <asyncio/asyncio.h>
 #include <p2putils/HttpRequestParse.h>
-#include <tbb/concurrent_hash_map.h>
+#include <unordered_map>
 
 #include "BC/bc.h"
 
@@ -29,14 +29,17 @@ public:
 private:
   enum FunctionTy {
     fnUnknown = 0,
-    fnGetInfo,
+    fnInfo,
     fnBlockByHash,
     fnBlockByHeight,
     fnTx,
-    fnGetBalance,
-    fnGetAddrTxid,
+    fnBalance,
+    fnAddrTxId,
+    fnAddrTx,
     fnPeerInfo
   };
+
+  static std::unordered_map<std::string, std::pair<int, HttpApiConnection::FunctionTy>> FunctionNameMap_;
 
   BlockInMemoryIndex &BlockIndex_;
   BC::Common::ChainParams &ChainParams_;
@@ -96,6 +99,7 @@ public:
   void OnTx();
   void OnGetBalance();
   void OnGetAddrTxid();
+  void OnGetAddrTx();
   void OnPeerInfo();
 
   // Helpers

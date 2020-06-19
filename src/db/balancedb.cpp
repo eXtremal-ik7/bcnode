@@ -122,7 +122,7 @@ void BalanceDb::getConfiguration(config4cpp::Configuration *cfg)
     return;
 
   Cfg_.ShardsNum = static_cast<unsigned>(cfg->lookupInt("balancedb", "shardsNum", 1));
-  Cfg_.StoreFullAddress = cfg->lookupBoolean("balancedb", "storeFullAddress", true);
+  Cfg_.StoreFullTx = cfg->lookupBoolean("balancedb", "storeFullTx", false);
 }
 
 bool BalanceDb::initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, BC::DB::Archive &archive, BC::Common::BlockIndex **forConnect, IndexDbMap &forDisconnect)
@@ -166,7 +166,7 @@ bool BalanceDb::initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockD
       if (db->Get(rocksdb::ReadOptions(), key, &value).ok() && value.size() >= Configuration::Size[0]) {
         const Configuration *storedCfg = reinterpret_cast<const Configuration*>(value.data());
         if (storedCfg->ShardsNum != Cfg_.ShardsNum ||
-            storedCfg->StoreFullAddress != Cfg_.StoreFullAddress) {
+            storedCfg->StoreFullTx != Cfg_.StoreFullTx) {
           LOG_F(ERROR, "transaction db configuration not compatible with requested configuration, rerun with --reindex=addrdb");
           return false;
         }
@@ -272,7 +272,8 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
       // Best way: use UTXO cache
       // Now UTXO cache not implemented yet, use txdb database (SLOW!)
       BC::DB::TxDb::QueryResult result;
-      if (TxDb_->find(input.previousOutputHash, *BlockIndex_, *BlockDb_, result) && input.previousOutputIndex < result.Tx.txOut.size()) {
+      TxDb_->find(input.previousOutputHash, *BlockIndex_, *BlockDb_, result);
+      if (result.Found && input.previousOutputIndex < result.Tx.txOut.size()) {
         BC::Proto::AddressTy address;
         int64_t delta = result.Tx.txOut[input.previousOutputIndex].value;
         if (actionType == Connect)
@@ -320,34 +321,29 @@ bool BalanceDb::find(const BC::Proto::AddressTy &address, QueryResult *result)
   Value cachedValue;
   cachedValue.BatchId = shardData.BatchId;
 
-  if (Cfg_.StoreFullAddress) {
-    {
-      // Get cached delta
-      std::shared_lock lock(shardData.Mutex);
-      auto It = shardData.Cache.find(address);
+  {
+    // Get cached delta
+    std::shared_lock lock(shardData.Mutex);
+    auto It = shardData.Cache.find(address);
 
-      if (It != shardData.Cache.end()) {
-        cachedValue = It->second;
-        hasCachedValue = true;
-      }
+    if (It != shardData.Cache.end()) {
+      cachedValue = It->second;
+      hasCachedValue = true;
     }
+  }
 
-    // Get stored balance
-    rocksdb::DB *db = Databases_[shardNum].get();
-    rocksdb::Slice key(reinterpret_cast<const char*>(address.begin()), sizeof(BC::Proto::AddressTy));
-    std::string data;
-    if (db->Get(rocksdb::ReadOptions(), key, &data).ok() && data.size() >= sizeof(Value)) {
-      const Value *dbValue = reinterpret_cast<const Value*>(data.data());
-      if (cachedValue.BatchId != dbValue->BatchId) {
-        cachedValue.TotalSent += dbValue->TotalSent;
-        cachedValue.TotalReceived += dbValue->TotalReceived;
-        cachedValue.TransactionsNum += dbValue->TransactionsNum;
-      }
-      hasStoredValue = true;
+  // Get stored balance
+  rocksdb::DB *db = Databases_[shardNum].get();
+  rocksdb::Slice key(reinterpret_cast<const char*>(address.begin()), sizeof(BC::Proto::AddressTy));
+  std::string data;
+  if (db->Get(rocksdb::ReadOptions(), key, &data).ok() && data.size() >= sizeof(Value)) {
+    const Value *dbValue = reinterpret_cast<const Value*>(data.data());
+    if (cachedValue.BatchId != dbValue->BatchId) {
+      cachedValue.TotalSent += dbValue->TotalSent;
+      cachedValue.TotalReceived += dbValue->TotalReceived;
+      cachedValue.TransactionsNum += dbValue->TransactionsNum;
     }
-  } else {
-    LOG_F(ERROR, "Not supported now");
-    abort();
+    hasStoredValue = true;
   }
 
   result->Balance = cachedValue.TotalReceived - cachedValue.TotalSent;
@@ -490,61 +486,57 @@ void BalanceDb::flush(unsigned shardNum)
     return;
 
   Shard &shardData = ShardData_[shardNum];
-  if (Cfg_.StoreFullAddress) {
-    rocksdb::DB *db = Databases_[shardNum].get();
 
-    size_t keysNum = shardData.Cache.size();
-    std::vector<rocksdb::Slice> keys;
-    std::vector<const CachedValue*> cachedValues;
-    std::vector<std::string> values;
-    keys.resize(keysNum);
-    cachedValues.resize(keysNum);
-    size_t i = 0;
-    for (const auto &addrDeltaPair: shardData.Cache) {
-      keys[i] = rocksdb::Slice(reinterpret_cast<const char*>(addrDeltaPair.first.begin()), sizeof(BC::Proto::AddressTy));
-      cachedValues[i] = &addrDeltaPair.second;
-      i++;
-    }
+  rocksdb::DB *db = Databases_[shardNum].get();
 
-    auto status = db->MultiGet(rocksdb::ReadOptions(), keys, &values);
-
-    rocksdb::WriteBatch batch;
-
-    for (size_t i = 0; i < keysNum; i++) {
-      size_t incomingTxNum = cachedValues[i]->TxData.sizeOf() / sizeof(BC::Proto::TxHashTy);
-      const BC::Proto::TxHashTy *incomingTxData = cachedValues[i]->TxData.data<BC::Proto::TxHashTy>();
-
-      if (status[i].ok()) {
-        Value *dbValue = reinterpret_cast<Value*>(values[i].data());
-        assert(shardData.BatchId > dbValue->BatchId);
-
-        dbValue->BatchId = shardData.BatchId;
-        dbValue->TransactionsNum += cachedValues[i]->TransactionsNum;
-        dbValue->TotalSent += cachedValues[i]->TotalSent;
-        dbValue->TotalReceived += cachedValues[i]->TotalReceived;
-
-        batch.Put(keys[i], rocksdb::Slice(reinterpret_cast<const char*>(dbValue), sizeof(Value)));
-        mergeTx(batch, keys[i].data(), dbValue->TransactionsNum - incomingTxNum, incomingTxData, incomingTxNum);
-      } else {
-        // First occurence of address
-        assert(cachedValues[i]->BatchId == shardData.BatchId);
-        batch.Put(keys[i], rocksdb::Slice(reinterpret_cast<const char*>(cachedValues[i]), sizeof(Value)));
-        mergeTx(batch, keys[i].data(), 0, incomingTxData, incomingTxNum);
-      }
-    }
-
-    {
-      Stamp stamp;
-      stamp.Hash = LastAdded_->Header.GetHash();
-      stamp.BatchId = shardData.BatchId;
-      batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(&stamp), sizeof(stamp)));
-    }
-
-    db->Write(rocksdb::WriteOptions(), &batch);
-  } else {
-    LOG_F(ERROR, "Not supported now");
-    abort();
+  size_t keysNum = shardData.Cache.size();
+  std::vector<rocksdb::Slice> keys;
+  std::vector<const CachedValue*> cachedValues;
+  std::vector<std::string> values;
+  keys.resize(keysNum);
+  cachedValues.resize(keysNum);
+  size_t i = 0;
+  for (const auto &addrDeltaPair: shardData.Cache) {
+    keys[i] = rocksdb::Slice(reinterpret_cast<const char*>(addrDeltaPair.first.begin()), sizeof(BC::Proto::AddressTy));
+    cachedValues[i] = &addrDeltaPair.second;
+    i++;
   }
+
+  auto status = db->MultiGet(rocksdb::ReadOptions(), keys, &values);
+
+  rocksdb::WriteBatch batch;
+
+  for (size_t i = 0; i < keysNum; i++) {
+    size_t incomingTxNum = cachedValues[i]->TxData.sizeOf() / sizeof(BC::Proto::TxHashTy);
+    const BC::Proto::TxHashTy *incomingTxData = cachedValues[i]->TxData.data<BC::Proto::TxHashTy>();
+
+    if (status[i].ok()) {
+      Value *dbValue = reinterpret_cast<Value*>(values[i].data());
+      assert(shardData.BatchId > dbValue->BatchId);
+
+      dbValue->BatchId = shardData.BatchId;
+      dbValue->TransactionsNum += cachedValues[i]->TransactionsNum;
+      dbValue->TotalSent += cachedValues[i]->TotalSent;
+      dbValue->TotalReceived += cachedValues[i]->TotalReceived;
+
+      batch.Put(keys[i], rocksdb::Slice(reinterpret_cast<const char*>(dbValue), sizeof(Value)));
+      mergeTx(batch, keys[i].data(), dbValue->TransactionsNum - incomingTxNum, incomingTxData, incomingTxNum);
+    } else {
+      // First occurence of address
+      assert(cachedValues[i]->BatchId == shardData.BatchId);
+      batch.Put(keys[i], rocksdb::Slice(reinterpret_cast<const char*>(cachedValues[i]), sizeof(Value)));
+      mergeTx(batch, keys[i].data(), 0, incomingTxData, incomingTxNum);
+    }
+  }
+
+  {
+    Stamp stamp;
+    stamp.Hash = LastAdded_->Header.GetHash();
+    stamp.BatchId = shardData.BatchId;
+    batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(&stamp), sizeof(stamp)));
+  }
+
+  db->Write(rocksdb::WriteOptions(), &batch);
 
   {
     std::lock_guard lock(shardData.Mutex);

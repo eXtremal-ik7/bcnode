@@ -154,7 +154,7 @@ void TxDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, Act
   }
 }
 
-bool TxDb::find(const BC::Proto::BlockHashTy &hash, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, QueryResult &result)
+void TxDb::find(const BC::Proto::TxHashTy &hash, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, QueryResult &result)
 {
   unsigned shardNum = hash.GetUint64(0) % Cfg_.ShardsNum;
   Shard &shardData = ShardData_[shardNum];
@@ -179,25 +179,26 @@ bool TxDb::find(const BC::Proto::BlockHashTy &hash, BlockInMemoryIndex &blockInd
         BC::unserialize(src, result.TxNum);
         if (Cfg_.StoreFullTx) {
           result.DataCorrupted = !BC::unserializeAndCheck(src, result.Tx);
-          return !result.DataCorrupted;
+          result.Found = !result.DataCorrupted;
+          return;
         }
 
         BC::unserialize(src, dataOffset);
         BC::unserialize(src, dataSize);
         if (src.remaining() || src.eof()) {
           result.DataCorrupted = true;
-          return false;
+          return;
         }
 
         auto It = blockIndex.blockIndex().find(result.Block);
         if (It == blockIndex.blockIndex().end()) {
           result.DataCorrupted = true;
-          return false;
+          return;
         }
 
         index = It->second;
       } else {
-        return false;
+        return;
       }
     }
   } else {
@@ -210,10 +211,11 @@ bool TxDb::find(const BC::Proto::BlockHashTy &hash, BlockInMemoryIndex &blockInd
     BC::Proto::Block *block = static_cast<BC::Proto::Block*>(serializedPtr.get()->unpackedData());
     if (result.TxNum <= block->vtx.size()) {
       result.Tx = block->vtx[result.TxNum];
-      return true;
+      result.Found = true;
+      return;
     } else {
       result.DataCorrupted = true;
-      return false;
+      return;
     }
   }
 
@@ -222,11 +224,19 @@ bool TxDb::find(const BC::Proto::BlockHashTy &hash, BlockInMemoryIndex &blockInd
   stream.seekSet(0);
   if (blockDb.blockReader().read(index->FileNo, index->FileOffset + dataOffset + 8, stream.data(), dataSize)) {
     result.DataCorrupted = !unserializeAndCheck(stream, result.Tx);
-    return !result.DataCorrupted;
+    result.Found = !result.DataCorrupted;
+    return;
   } else {
     result.DataCorrupted = true;
-    return false;
+    return;
   }
+}
+
+void TxDb::find(const std::vector<BC::Proto::TxHashTy> &txHashes, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, std::vector<QueryResult> &result)
+{
+  result.resize(txHashes.size());
+  for (size_t i = 0, ie = txHashes.size(); i != ie; i++)
+    find(txHashes[i], blockIndex, blockDb, result[i]);
 }
 
 void TxDb::flush(unsigned shardNum)

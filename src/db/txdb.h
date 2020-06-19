@@ -25,8 +25,9 @@ public:
 
   struct QueryResult {
     BC::Proto::Transaction Tx;
-    BC::Proto::BlockHashTy Block;
+    BC::Proto::TxHashTy Block;
     uint32_t TxNum;
+    bool Found = false;
     bool DataCorrupted = false;
   };
 
@@ -37,7 +38,8 @@ public:
   bool initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, BC::DB::Archive &archive, BC::Common::BlockIndex **forConnect, IndexDbMap &forDisconnect);
 
   void add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, ActionTy actionType, bool doFlush = false);
-  bool find(const BC::Proto::BlockHashTy &hash, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, QueryResult &result);
+  void find(const BC::Proto::TxHashTy &hash, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, QueryResult &result);
+  void find(const std::vector<BC::Proto::TxHashTy> &txHashes, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, std::vector<QueryResult> &result);
 
   void flush(unsigned shardNum);
   void flush() {

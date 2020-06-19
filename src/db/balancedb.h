@@ -37,6 +37,7 @@ public:
 public:
   ~BalanceDb();
   bool enabled() { return Enabled_; }
+  bool storeFullTx() { return Cfg_.StoreFullTx; }
   void getConfiguration(config4cpp::Configuration *cfg);
   bool initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, BC::DB::Archive &archive, BC::Common::BlockIndex **forConnect, IndexDbMap &forDisconnect);
 
@@ -87,7 +88,7 @@ private:
   struct Configuration {
     uint32_t Version = 1;
     uint32_t ShardsNum = 1;
-    uint32_t StoreFullAddress = 1;
+    uint32_t StoreFullTx = 0;
 
     static constexpr size_t Size[] = {12};
   };
