@@ -74,9 +74,35 @@ make -j8
 ###### Functionality
 
 - Synchronization and block seeding
-- HTTP API
-  - http://HOST:PORT/peerInfo
-  - http://HOST:PORT/blockByHeight/1000000
-  - http://HOST:PORT/blockByHash/a4b2e3f5f77f28e4e2cad9205ec725ef684e311aceb384352818670d38f9fdf8
-  - http://HOST:PORT/tx/d163b06b81b4252bb9b6295bff77754c33bcd65ae22fc91910ee51fca8a21f29 (requires txdb enabled)
-  - http://HOST:PORT/getBalance/AcK38iDzEuYUUm79ngqtH6gvUsMfMbHHpa (requires balances db enabled)
+
+- HTTP API (function names is case sensitive, lower case used)
+
+```http://HOST:PORT/peerinfo```
+  
+  Returns information about connected peers and traffic statistics.
+  
+```
+http://HOST:PORT/blockbyheight/1000000
+http://HOST:PORT/blockbyhash/a4b2e3f5f77f28e4e2cad9205ec725ef684e311aceb384352818670d38f9fdf8
+```
+  
+  View block structure (header and transactions), caller can use height or hash for identify blocks.
+  
+```http://HOST:PORT/tx/d163b06b81b4252bb9b6295bff77754c33bcd65ae22fc91910ee51fca8a21f29 (requires txdb enabled)```
+  
+  View transaction structure (inputs, outputs, etc), txid used as a key in database. For BTC-based clients: additional information for standard txout (P2PK, P2PKH, P2SH, ...) will be implemented in next commits.
+  
+```http://HOST:PORT/balance/AcK38iDzEuYUUm79ngqtH6gvUsMfMbHHpa (requires balances db enabled)```
+  
+  Function displays user balance and transactions count
+  
+```http://HOST:PORT/addrtxid/ASiq2qtKTzQ7sbERFE8Jp8HjsgVMhmk7yL?from=517740&count=5 (requires balances db enabled)```
+  
+  View transactions id for a specific address. All transactions belongs to address have unique numeric identifier starts from zero.
+
+* from: first transaction id
+* count: number of transactions to search for
+
+```http://HOST:PORT/addrtx/ASiq2qtKTzQ7sbERFE8Jp8HjsgVMhmk7yL?from=517740&count=5 (requires balances db enabled)```
+  
+  This function likes addrtxid, but returns entire transaction data, not only ids.
