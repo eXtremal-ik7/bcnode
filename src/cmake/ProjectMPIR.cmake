@@ -6,7 +6,6 @@ set(MPIR_INSTALL_DIRECTORY "${CMAKE_SOURCE_DIR}/../dependencies/install")
 if (NOT MSVC)
   ExternalProject_Add(mpir
     GIT_REPOSITORY https://github.com/BrianGladman/mpir
-    GIT_TAG 45eb8dabbd3115a515f181e158c945a10f378b9d
     GIT_SHALLOW 1
     SOURCE_DIR ${MPIR_DIRECTORY}
     BINARY_DIR ${MPIR_DIRECTORY}

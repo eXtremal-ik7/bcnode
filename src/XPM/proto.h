@@ -63,7 +63,7 @@ public:
   using TxIn = BTC::Proto::TxIn;
   using TxOut = BTC::Proto::TxOut;
   using TxWitness = BTC::Proto::TxWitness;
-  using Transaction = BTC::Proto::TransactionTy<XPM::Proto>;
+  using Transaction = BTC::Proto::Transaction;
   using Block = BTC::Proto::BlockTy<XPM::Proto>;
 
   using BlockHeaderNet = BTC::Proto::BlockHeaderNetTy<XPM::Proto>;

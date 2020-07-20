@@ -23,13 +23,13 @@ namespace Network {
 
 std::unordered_map<std::string, std::pair<int, HttpApiConnection::FunctionTy>> HttpApiConnection::FunctionNameMap_ = {
   {"info", {hmGet, fnInfo}},
-  {"blockbyhash", {hmGet, fnBlockByHash}},
-  {"blockbyheight", {hmGet, fnBlockByHeight}},
+  {"blockByHash", {hmGet, fnBlockByHash}},
+  {"blockByHeight", {hmGet, fnBlockByHeight}},
   {"tx", {hmGet, fnTx}},
   {"balance", {hmGet, fnBalance}},
-  {"addrtxid", {hmGet, fnAddrTxId}},
-  {"addrtx", {hmGet, fnAddrTx}},
-  {"peerinfo", {hmGet, fnPeerInfo}},
+  {"addrTxId", {hmGet, fnAddrTxId}},
+  {"addrTx", {hmGet, fnAddrTx}},
+  {"peerInfo", {hmGet, fnPeerInfo}},
 };
 
 // HttpApiConnection
@@ -267,7 +267,11 @@ void BC::Network::HttpApiConnection::OnGetInfo()
   xmstream stream;
   Build200(stream);
   size_t offset = StartChunk(stream);
-  stream.write("{}", 2);
+  stream.write("{");
+  serializeJson(stream, "bestBlockHeight", BlockIndex_.best()->Height);
+    stream.write(",");
+  serializeJson(stream, "bestBlockHash", BlockIndex_.best()->Header.GetHash().ToString());
+  stream.write("}");
   FinishChunk(stream, offset);
   aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
