@@ -121,6 +121,109 @@ void Io<Proto::TxOut>::unpackFinalize(DynamicPtr<BTC::Proto::TxOut> dst)
   BTC::unpackFinalize(DynamicPtr<decltype (dst->pkScript)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxOut, pkScript)));
 }
 
+void Io<Proto::Transaction>::serialize(xmstream &dst, const BTC::Proto::Transaction &data)
+{
+  uint8_t flags = 0;
+  BTC::serialize(dst, data.version);
+  if (data.hasWitness()) {
+    flags = 1;
+    BTC::serializeVarSize(dst, 0);
+    BTC::serialize(dst, flags);
+  }
+
+  BTC::serialize(dst, data.txIn);
+  BTC::serialize(dst, data.txOut);
+
+  if (flags) {
+    for (size_t i = 0; i < data.txIn.size(); i++)
+      BTC::serialize(dst, data.txIn[i].witnessStack);
+  }
+
+  BTC::serialize(dst, data.lockTime);
+}
+
+void Io<Proto::Transaction>::unserialize(xmstream &src, BTC::Proto::Transaction &data)
+{
+  uint8_t flags = 0;
+  BTC::unserialize(src, data.version);
+  BTC::unserialize(src, data.txIn);
+  if (data.txIn.empty()) {
+    BTC::unserialize(src, flags);
+    if (flags != 0) {
+      BTC::unserialize(src, data.txIn);
+      BTC::unserialize(src, data.txOut);
+    }
+  } else {
+    BTC::unserialize(src, data.txOut);
+  }
+
+  if (flags & 1) {
+    flags ^= 1;
+
+    for (size_t i = 0; i < data.txIn.size(); i++)
+      BTC::unserialize(src, data.txIn[i].witnessStack);
+
+    if (!data.hasWitness()) {
+      src.seekEnd(0, true);
+      return;
+    }
+  }
+
+  if (flags) {
+    src.seekEnd(0, true);
+    return;
+  }
+
+  BTC::unserialize(src, data.lockTime);
+}
+
+void Io<Proto::Transaction>::unpack(xmstream &src, DynamicPtr<BTC::Proto::Transaction> dst)
+{
+  uint8_t flags = 0;
+
+  BTC::unserialize(src, dst->version);
+  BTC::unpack(src, DynamicPtr<decltype(dst->txIn)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txIn)));
+
+  if (dst->txIn.empty()) {
+    BTC::unserialize(src, flags);
+    if (flags) {
+      BTC::unpack(src, DynamicPtr<decltype(dst->txIn)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txIn)));
+      BTC::unpack(src, DynamicPtr<decltype(dst->txOut)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txOut)));
+    }
+  } else {
+    BTC::unpack(src, DynamicPtr<decltype(dst->txOut)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txOut)));
+  }
+
+  if (flags & 1) {
+    flags ^= 1;
+
+    bool hasWitness = false;
+    for (size_t i = 0, ie = dst->txIn.size(); i < ie; i++) {
+      size_t txInDataOffset = reinterpret_cast<size_t>(dst->txIn.data());
+      size_t txInOffset = txInDataOffset + sizeof(BTC::Proto::TxIn)*i;
+      hasWitness |= BTC::Proto::TxIn::unpackWitnessStack(src, DynamicPtr<Proto::TxIn>(dst.stream(), txInOffset));
+    }
+
+    if (!hasWitness) {
+      src.seekEnd(0, true);
+      return;
+    }
+  }
+
+  if (flags) {
+    src.seekEnd(0, true);
+    return;
+  }
+
+  BTC::unserialize(src, dst->lockTime);
+}
+
+void Io<Proto::Transaction>::unpackFinalize(DynamicPtr<BTC::Proto::Transaction> dst)
+{
+  BTC::unpackFinalize(DynamicPtr<decltype(dst->txIn)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txIn)));
+  BTC::unpackFinalize(DynamicPtr<decltype(dst->txOut)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txOut)));
+}
+
 void Io<Proto::InventoryVector>::serialize(xmstream &dst, const BTC::Proto::InventoryVector &data)
 {
   BTC::serialize(dst, data.type);
@@ -298,6 +401,21 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tx
   stream.write('{');
   serializeJson(stream, "value", txout.value); stream.write(',');
   serializeJson(stream, "pkscript", txout.pkScript);
+  stream.write('}');
+}
+
+void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Transaction &data) {
+  if (fieldName) {
+    stream.write('\"');
+    stream.write(fieldName, strlen(fieldName));
+    stream.write("\":", 2);
+  }
+
+  stream.write('{');
+  serializeJson(stream, "version", data.version); stream.write(',');
+  serializeJson(stream, "txin", data.txIn); stream.write(',');
+  serializeJson(stream, "txout", data.txOut); stream.write(',');
+  serializeJson(stream, "lockTime", data.lockTime);
   stream.write('}');
 }
 

@@ -112,17 +112,10 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     typename T::BlockHeader header;
   };
 
-  template<typename T>
-  struct BlockTy {
-    typename T::BlockHeader header;
-    xvector<typename T::Transaction> vtx;
-  };
-
-  template<typename T>
-  struct TransactionTy {
+  struct Transaction {
     int32_t version;
-    xvector<typename T::TxIn> txIn;
-    xvector<typename T::TxOut> txOut;
+    xvector<TxIn> txIn;
+    xvector<TxOut> txOut;
     uint32_t lockTime;
 
     // Memory only
@@ -156,88 +149,93 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     }
   };
 
-struct MessageVersion {
-  uint32_t version;
-  uint64_t services;
-  uint64_t timestamp;
-  NetworkAddressWithoutTime addr_recv;
-  NetworkAddressWithoutTime addr_from;
-  uint64_t nonce;
-  std::string user_agent;
-  uint32_t start_height;
-  bool relay;
-};
-
-struct InventoryVector {
-  enum {
-    ERROR = 0,
-    MSG_TX = 1,
-    MSG_BLOCK = 2,
-    MSG_FILTERED_BLOCK = 3,
-    MSG_CMPCT_BLOCK = 4
+  template<typename T>
+  struct BlockTy {
+    typename T::BlockHeader header;
+    xvector<typename T::Transaction> vtx;
   };
 
-  uint32_t type;
-  uint256 hash;
-};
-
-// Template messages
-template<typename T>
-struct MessageHeadersTy {
-  xvector<BlockHeaderNetTy<T>> headers;
-};
-
-// BTC messages
-struct MessagePing {
-  uint64_t nonce;
-};
-
-struct MessagePong {
-  uint64_t nonce;
-};
-
-struct MessageAddr {
-  xvector<NetworkAddress> addr_list;
-};
-
-struct MessageGetHeaders {
-  uint32_t version;
-  xvector<uint256> BlockLocatorHashes;
-  uint256 HashStop;
-};
-
-struct MessageGetBlocks {
-  uint32_t version;
-  xvector<uint256> BlockLocatorHashes;
-  uint256 HashStop;
-};
-
-struct MessageInv {
-  enum {
-    ERROR = 0,
-    MSG_TX = 1,
-    MSG_BLOCK = 2,
-    MSG_FILTERED_BLOCK = 3,
-    MSG_CMPCT_BLOCK = 4
+  struct MessageVersion {
+    uint32_t version;
+    uint64_t services;
+    uint64_t timestamp;
+    NetworkAddressWithoutTime addr_recv;
+    NetworkAddressWithoutTime addr_from;
+    uint64_t nonce;
+    std::string user_agent;
+    uint32_t start_height;
+    bool relay;
   };
 
-  xvector<InventoryVector> Inventory;
-};
+  struct InventoryVector {
+    enum {
+      ERROR = 0,
+      MSG_TX = 1,
+      MSG_BLOCK = 2,
+      MSG_FILTERED_BLOCK = 3,
+      MSG_CMPCT_BLOCK = 4
+    };
 
-struct MessageGetData {
-  xvector<InventoryVector> inventory;
-};
+    uint32_t type;
+    uint256 hash;
+  };
 
-struct MessageReject {
-  std::string message;
-  int8_t ccode;
-  std::string reason;
-  uint8_t data[32];
-};
+  // Template messages
+  template<typename T>
+  struct MessageHeadersTy {
+    xvector<BlockHeaderNetTy<T>> headers;
+  };
+
+  // BTC messages
+  struct MessagePing {
+    uint64_t nonce;
+  };
+
+  struct MessagePong {
+    uint64_t nonce;
+  };
+
+  struct MessageAddr {
+    xvector<NetworkAddress> addr_list;
+  };
+
+  struct MessageGetHeaders {
+    uint32_t version;
+    xvector<uint256> BlockLocatorHashes;
+    uint256 HashStop;
+  };
+
+  struct MessageGetBlocks {
+    uint32_t version;
+    xvector<uint256> BlockLocatorHashes;
+    uint256 HashStop;
+  };
+
+  struct MessageInv {
+    enum {
+      ERROR = 0,
+      MSG_TX = 1,
+      MSG_BLOCK = 2,
+      MSG_FILTERED_BLOCK = 3,
+      MSG_CMPCT_BLOCK = 4
+    };
+
+    xvector<InventoryVector> Inventory;
+  };
+
+  struct MessageGetData {
+    xvector<InventoryVector> inventory;
+  };
+
+  struct MessageReject {
+    std::string message;
+    int8_t ccode;
+    std::string reason;
+    uint8_t data[32];
+  };
 
   using BlockHeaderNet = BlockHeaderNetTy<BTC::Proto>;
   using Block = BlockTy<BTC::Proto>;
-  using Transaction = TransactionTy<BTC::Proto>;
   using MessageHeaders = MessageHeadersTy<BTC::Proto>;
   using MessageBlock = Block;
 };
@@ -270,105 +268,11 @@ template<> struct Io<Proto::TxOut> {
 };
 
 // Transaction
-template<typename T> struct Io<Proto::TransactionTy<T>> {
-  static inline void serialize(xmstream &dst, const BTC::Proto::TransactionTy<T> &data) {
-    uint8_t flags = 0;
-    BTC::serialize(dst, data.version);
-    if (data.hasWitness()) {
-      flags = 1;
-      BTC::serializeVarSize(dst, 0);
-      BTC::serialize(dst, flags);
-    }
-
-    BTC::serialize(dst, data.txIn);
-    BTC::serialize(dst, data.txOut);
-
-    if (flags) {
-      for (size_t i = 0; i < data.txIn.size(); i++)
-        BTC::serialize(dst, data.txIn[i].witnessStack);
-    }
-
-    BTC::serialize(dst, data.lockTime);
-  }
-
-  static inline void unserialize(xmstream &src, BTC::Proto::TransactionTy<T> &data) {
-    uint8_t flags = 0;
-    BTC::unserialize(src, data.version);
-    BTC::unserialize(src, data.txIn);
-    if (data.txIn.empty()) {
-      BTC::unserialize(src, flags);
-      if (flags != 0) {
-        BTC::unserialize(src, data.txIn);
-        BTC::unserialize(src, data.txOut);
-      }
-    } else {
-      BTC::unserialize(src, data.txOut);
-    }
-
-    if (flags & 1) {
-      flags ^= 1;
-
-      for (size_t i = 0; i < data.txIn.size(); i++)
-        BTC::unserialize(src, data.txIn[i].witnessStack);
-
-      if (!data.hasWitness()) {
-        src.seekEnd(0, true);
-        return;
-      }
-    }
-
-    if (flags) {
-      src.seekEnd(0, true);
-      return;
-    }
-
-    BTC::unserialize(src, data.lockTime);
-  }
-
-  static inline void unpack(xmstream &src, DynamicPtr<BTC::Proto::TransactionTy<T>> dst) {
-    uint8_t flags = 0;
-
-    BTC::unserialize(src, dst->version);
-    BTC::unpack(src, DynamicPtr<decltype(dst->txIn)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::TransactionTy<T>, txIn)));
-
-    if (dst->txIn.empty()) {
-      BTC::unserialize(src, flags);
-      if (flags) {
-        BTC::unpack(src, DynamicPtr<decltype(dst->txIn)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::TransactionTy<T>, txIn)));
-        BTC::unpack(src, DynamicPtr<decltype(dst->txOut)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::TransactionTy<T>, txOut)));
-      }
-    } else {
-      BTC::unpack(src, DynamicPtr<decltype(dst->txOut)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::TransactionTy<T>, txOut)));
-    }
-
-    if (flags & 1) {
-      flags ^= 1;
-
-      bool hasWitness = false;
-      for (size_t i = 0, ie = dst->txIn.size(); i < ie; i++) {
-        size_t txInDataOffset = reinterpret_cast<size_t>(dst->txIn.data());
-        size_t txInOffset = txInDataOffset + sizeof(typename T::TxIn)*i;
-        hasWitness |= BTC::Proto::TxIn::unpackWitnessStack(src, DynamicPtr<Proto::TxIn>(dst.stream(), txInOffset));
-      }
-
-      if (!hasWitness) {
-        src.seekEnd(0, true);
-        return;
-      }
-    }
-
-    if (flags) {
-      src.seekEnd(0, true);
-      return;
-    }
-
-    BTC::unserialize(src, dst->lockTime);
-  }
-
-  static inline void unpackFinalize(DynamicPtr<BTC::Proto::TransactionTy<T>> dst) {
-    BTC::unpackFinalize(DynamicPtr<decltype(dst->txIn)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::TransactionTy<T>, txIn)));
-    BTC::unpackFinalize(DynamicPtr<decltype(dst->txOut)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::TransactionTy<T>, txOut)));
-  }
+template<> struct Io<Proto::Transaction> {
+  static void serialize(xmstream &dst, const BTC::Proto::Transaction &data);
+  static void unserialize(xmstream &src, BTC::Proto::Transaction &data);
+  static void unpack(xmstream &src, DynamicPtr<BTC::Proto::Transaction> dst);
+  static void unpackFinalize(DynamicPtr<BTC::Proto::Transaction> dst);
 };
 
 // Block
@@ -547,25 +451,10 @@ template<> struct Io<Proto::MessageReject> {
 }
 
 // For HTTP API
-template<typename T>
-void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TransactionTy<T> &data) {
-  if (fieldName) {
-    stream.write('\"');
-    stream.write(fieldName, strlen(fieldName));
-    stream.write("\":", 2);
-  }
-
-  stream.write('{');
-  serializeJson(stream, "version", data.version); stream.write(',');
-  serializeJson(stream, "txin", data.txIn); stream.write(',');
-  serializeJson(stream, "txout", data.txOut); stream.write(',');
-  serializeJson(stream, "lockTime", data.lockTime);
-  stream.write('}');
-}
-
 void serializeJsonInside(xmstream &stream, const BTC::Proto::BlockHeader &header);
 void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TxIn &txin);
 void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TxOut &txout);
+void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Transaction &data);
 
 std::string makeHumanReadableAddress(uint8_t pubkeyAddressPrefix, const BTC::Proto::AddressTy &address);
 bool decodeHumanReadableAddress(const std::string &hrAddress, uint8_t pubkeyAddressPrefix, BTC::Proto::AddressTy &address);
