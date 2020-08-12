@@ -13,7 +13,7 @@ BC::Proto::BlockHashTy calculateMerkleRoot(const xvector<BC::Proto::Transaction>
 
   // Get hashes for all transactions
   for (size_t i = 0; i < txNum; i++)
-    hashes[i] = vtx[i].GetHash();
+    hashes[i] = vtx[i].getTxId();
 
   SHA256_CTX sha256;
   while (txNum > 1) {

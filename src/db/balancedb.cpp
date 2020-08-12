@@ -258,14 +258,14 @@ void BalanceDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block
 
     if (BC::Script::decodeStandardOutput(coinbaseTx.txOut[0], address)) {
       unsigned shardNum = address.GetUint64(0) % Cfg_.ShardsNum;
-      auto hash = coinbaseTx.GetHash();
+      auto hash = coinbaseTx.getHash();
       modify(ShardData_[shardNum], address, 0, delta, txDelta, &hash);
     }
   }
 
   for (size_t i = 1, ie = block.vtx.size(); i != ie; i++) {
     auto tx = block.vtx[i];
-    auto txHash = tx.GetHash();
+    auto txHash = tx.getHash();
     std::set<BC::Proto::AddressTy> knownAddresses;
     for (const auto &input: tx.txIn) {
       // Here we need find referenced output

@@ -17,6 +17,14 @@ public:
   using TxHashTy = ::uint256;
   using AddressTy = ::uint160;
 
+  enum class ServicesTy : uint64_t {
+    Network = 1,
+    GetUTXO = 2,
+    Bloom = 4,
+    Witness = 8,
+    NetworkLimited = 1024
+  };
+
 struct NetworkAddress {
   uint32_t time;
   uint64_t services;
@@ -131,22 +139,8 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
       return false;
     }
 
-    BlockHashTy GetHash() const {
-      uint256 result;
-      uint8_t buffer[4096];
-      xmstream stream(buffer, sizeof(buffer));
-      stream.reset();
-      BTC::serialize(stream, *this);
-
-      SHA256_CTX sha256;
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, stream.data(), stream.sizeOf());
-      SHA256_Final(result.begin(), &sha256);
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, result.begin(), sizeof(result));
-      SHA256_Final(result.begin(), &sha256);
-      return result;
-    }
+    BlockHashTy getHash() const;
+    BlockHashTy getTxId() const;
   };
 
   template<typename T>
@@ -169,11 +163,16 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
 
   struct InventoryVector {
     enum {
+      MSG_WITNESS_FLAG = 1 << 30,
+
       ERROR = 0,
       MSG_TX = 1,
       MSG_BLOCK = 2,
       MSG_FILTERED_BLOCK = 3,
-      MSG_CMPCT_BLOCK = 4
+      MSG_CMPCT_BLOCK = 4,
+      MSG_WITNESS_BLOCK = MSG_BLOCK | MSG_WITNESS_FLAG,
+      MSG_WITNESS_TX = MSG_TX | MSG_WITNESS_FLAG,
+      MSG_FILTERED_WITNESS_BLOCK = MSG_FILTERED_BLOCK | MSG_WITNESS_FLAG
     };
 
     uint32_t type;
@@ -212,14 +211,6 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
   };
 
   struct MessageInv {
-    enum {
-      ERROR = 0,
-      MSG_TX = 1,
-      MSG_BLOCK = 2,
-      MSG_FILTERED_BLOCK = 3,
-      MSG_CMPCT_BLOCK = 4
-    };
-
     xvector<InventoryVector> Inventory;
   };
 
@@ -269,7 +260,7 @@ template<> struct Io<Proto::TxOut> {
 
 // Transaction
 template<> struct Io<Proto::Transaction> {
-  static void serialize(xmstream &dst, const BTC::Proto::Transaction &data);
+  static void serialize(xmstream &dst, const BTC::Proto::Transaction &data, bool serializeWitness=true);
   static void unserialize(xmstream &src, BTC::Proto::Transaction &data);
   static void unpack(xmstream &src, DynamicPtr<BTC::Proto::Transaction> dst);
   static void unpackFinalize(DynamicPtr<BTC::Proto::Transaction> dst);

@@ -32,6 +32,9 @@ namespace Common {
   static constexpr const char *TickerName = "XPM";
   static constexpr const char *DefaultDataDir = "bcnodexpm";
   static constexpr const char *UserAgent = "/bcnode/xpm-0.1/";
+  static constexpr uint32_t ProtocolVersion = 70002;
+  static constexpr uint64_t ServicesEnabled = static_cast<uint64_t>(BTC::Proto::ServicesTy::Network);
+
 
   static constexpr size_t MaxBlockSize = BTC::Common::MaxBlockSize;
   static constexpr uint32_t BlocksFileLimit = BTC::Common::BlocksFileLimit;
@@ -177,8 +180,8 @@ namespace Common {
     return true;
   }
 
+  static bool hasWitness() { return false; }
   arith_uint256 GetBlockProof(const XPM::Proto::BlockHeader &header, const ChainParams &chainParams);
-
   static inline bool checkBlockSize(const XPM::Proto::Block &block, size_t serializedSize) { return BTC::Common::checkBlockSize(block, serializedSize); }
 
   // Consensus (PoW)

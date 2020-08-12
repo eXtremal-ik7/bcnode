@@ -22,6 +22,10 @@ namespace Common {
   static constexpr const char *TickerName = "BTC";
   static constexpr const char *DefaultDataDir = "bcnodebtc";
   static constexpr const char *UserAgent = "/bcnode/btc-0.1/";
+  static constexpr uint32_t ProtocolVersion = 70015;
+  static constexpr uint64_t ServicesEnabled =
+    static_cast<uint64_t>(BTC::Proto::ServicesTy::Network) |
+    static_cast<uint64_t>(BTC::Proto::ServicesTy::Witness);
 
   enum NetwordIdTy {
     NetworkIdMain = 0,
@@ -241,6 +245,7 @@ namespace Common {
     return true;
   }
 
+  static bool hasWitness() { return true; }
   arith_uint256 GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams &chainParams);
 
   // Check functions

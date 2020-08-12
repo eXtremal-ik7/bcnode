@@ -22,11 +22,12 @@ namespace LTC {
 
 namespace LTC {
 namespace Common {
-
   static constexpr const char *ProjectName = "Litecoin";
   static constexpr const char *TickerName = "LTC";
   static constexpr const char *DefaultDataDir = "bcnodeltc";
   static constexpr const char *UserAgent = "/bcnode/ltc-0.1/";
+  static constexpr uint32_t ProtocolVersion = BTC::Common::ProtocolVersion;
+  static constexpr uint64_t ServicesEnabled = BTC::Common::ServicesEnabled;
 
   static constexpr size_t MaxBlockSize = BTC::Common::MaxBlockSize;
   static constexpr uint32_t BlocksFileLimit = BTC::Common::BlocksFileLimit;
@@ -177,6 +178,7 @@ namespace Common {
     return true;
   }
 
+  static bool hasWitness() { return true; }
   arith_uint256 GetBlockProof(const LTC::Proto::BlockHeader &header, const ChainParams &chainParams);
 
   static inline bool checkBlockSize(const LTC::Proto::Block &block, size_t serializedSize) { return BTC::Common::checkBlockSize(block, serializedSize); }

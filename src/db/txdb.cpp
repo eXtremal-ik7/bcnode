@@ -112,12 +112,12 @@ void TxDb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, Act
   for (size_t i = 0, ie = block.vtx.size(); i != ie; i++) {
     auto tx = block.vtx[i];
 
-    BC::Proto::BlockHashTy hash = tx.GetHash();
+    BC::Proto::BlockHashTy hash = tx.getHash();
     unsigned shardNum = hash.GetUint64(0) % Cfg_.ShardsNum;
     Shard &shardData = ShardData_[shardNum];
 
     TxData txData;
-    txData.Hash = tx.GetHash();
+    txData.Hash = tx.getHash();
     if (actionType == Connect) {
       TxLink link;
       link.block = index;

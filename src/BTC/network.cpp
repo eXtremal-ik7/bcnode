@@ -163,13 +163,13 @@ void Peer::onConnect(AsyncOpStatus status)
 
   // Send version message
   BC::Proto::MessageVersion msg;
-  msg.version = 70002;
+  msg.version = BC::Common::ProtocolVersion;
   msg.services = 1; // NODE
   msg.timestamp = static_cast<uint64_t>(time(nullptr));
   msg.addr_recv.services = 0;
   msg.addr_recv.setIpv4(0);
   msg.addr_recv.port = 0;
-  msg.addr_from.services = 0; // NODE
+  msg.addr_from.services = BC::Common::ServicesEnabled;
   msg.addr_from.reset();
   msg.addr_from.port = 0;
   msg.nonce = ParentNode->localHostNonce();
@@ -476,7 +476,7 @@ void Peer::onGetBlocks(BC::Proto::MessageGetBlocks &getblocks)
         if (index->Header.GetHash() == getblocks.HashStop)
           break;
         BC::Proto::InventoryVector iv;
-        iv.type = BC::Proto::MessageInv::MSG_BLOCK;
+        iv.type = BC::Proto::InventoryVector::MSG_BLOCK;
         iv.hash = index->Header.GetHash();
         inv.Inventory.emplace_back(iv);
         index = index->Next;
@@ -500,7 +500,7 @@ void Peer::onGetData(BC::Proto::MessageGetData &getdata)
   {
     BlockSearcher searcher(Storage_.blockDb(), handler, [this](){ postQuitOperation(Base); });
     for (const auto &inv: getdata.inventory) {
-      if (inv.type == BC::Proto::MessageInv::MSG_BLOCK) {
+      if (inv.type == BC::Proto::InventoryVector::MSG_BLOCK) {
         searcher.add(BlockIndex_, inv.hash);
       } else {
         // Other data types not supported now
@@ -512,7 +512,7 @@ void Peer::onGetData(BC::Proto::MessageGetData &getdata)
     xmstream &stream = LocalStream();
     BC::Proto::MessageInv inv;
     inv.Inventory.resize(1);
-    inv.Inventory[0].type = BC::Proto::MessageInv::MSG_BLOCK;
+    inv.Inventory[0].type = BC::Proto::InventoryVector::MSG_BLOCK;
     inv.Inventory[0].hash = BlockIndex_.best()->Header.GetHash();
     BC::serialize(stream, inv);
     sendMessage(MessageTy::inv, stream.data(), stream.sizeOf());
@@ -551,25 +551,27 @@ void Peer::onInv(BC::Proto::MessageInv &inv)
   BC::Proto::MessageGetData getBlocks;
   for (const auto &element: inv.Inventory) {
     switch (element.type) {
-      case BC::Proto::MessageInv::ERROR :
+      case BC::Proto::InventoryVector::ERROR :
         LOG_F(WARNING, "Peer %s send error: %s", Name.c_str(), element.hash.ToString().c_str());
         break;
-      case BC::Proto::MessageInv::MSG_TX :
+      case BC::Proto::InventoryVector::MSG_TX :
+      case BC::Proto::InventoryVector::MSG_WITNESS_TX :
         break;
-      case BC::Proto::MessageInv::MSG_BLOCK : {
+      case BC::Proto::InventoryVector::MSG_BLOCK :
+      case BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : {
         // Check presense of this block
         auto it = BlockIndex_.blockIndex().find(element.hash);
         if (it == BlockIndex_.blockIndex().end() || it->second->IndexState != BSBlock) {
           BC::Proto::InventoryVector iv;
-          iv.type = BC::Proto::MessageInv::MSG_BLOCK;
+          iv.type = BC::Proto::InventoryVector::MSG_BLOCK;
           iv.hash = element.hash;
           getBlocks.inventory.emplace_back(iv);
         }
         break;
       }
-      case BC::Proto::MessageInv::MSG_FILTERED_BLOCK :
+      case BC::Proto::InventoryVector::MSG_FILTERED_BLOCK :
         break;
-      case BC::Proto::MessageInv::MSG_CMPCT_BLOCK :
+      case BC::Proto::InventoryVector::MSG_CMPCT_BLOCK :
         break;
 
     }
@@ -685,7 +687,7 @@ void Peer::downloadBlocks(std::vector<BC::Proto::BlockHashTy> &hashes)
   for (const auto &hash: hashes) {
     ScheduledToDownload_.insert(hash);
     BC::Proto::InventoryVector inv;
-    inv.type = BC::Proto::InventoryVector::MSG_BLOCK;
+    inv.type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
     inv.hash = hash;
     msg.inventory.emplace_back(inv);
   }

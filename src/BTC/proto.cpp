@@ -9,6 +9,42 @@
 
 namespace BTC {
 
+Proto::BlockHashTy Proto::Transaction::getHash() const
+{
+  uint256 result;
+  uint8_t buffer[4096];
+  xmstream stream(buffer, sizeof(buffer));
+  stream.reset();
+  BTC::Io<Proto::Transaction>::serialize(stream, *this);
+
+  SHA256_CTX sha256;
+  SHA256_Init(&sha256);
+  SHA256_Update(&sha256, stream.data(), stream.sizeOf());
+  SHA256_Final(result.begin(), &sha256);
+  SHA256_Init(&sha256);
+  SHA256_Update(&sha256, result.begin(), sizeof(result));
+  SHA256_Final(result.begin(), &sha256);
+  return result;
+}
+
+Proto::BlockHashTy Proto::Transaction::getTxId() const
+{
+  uint256 result;
+  uint8_t buffer[4096];
+  xmstream stream(buffer, sizeof(buffer));
+  stream.reset();
+  BTC::Io<Proto::Transaction>::serialize(stream, *this, false);
+
+  SHA256_CTX sha256;
+  SHA256_Init(&sha256);
+  SHA256_Update(&sha256, stream.data(), stream.sizeOf());
+  SHA256_Final(result.begin(), &sha256);
+  SHA256_Init(&sha256);
+  SHA256_Update(&sha256, result.begin(), sizeof(result));
+  SHA256_Final(result.begin(), &sha256);
+  return result;
+}
+
 void Io<Proto::NetworkAddress>::serialize(xmstream &dst, const BTC::Proto::NetworkAddress &data)
 {
   BTC::serialize(dst, data.time);
@@ -121,11 +157,11 @@ void Io<Proto::TxOut>::unpackFinalize(DynamicPtr<BTC::Proto::TxOut> dst)
   BTC::unpackFinalize(DynamicPtr<decltype (dst->pkScript)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxOut, pkScript)));
 }
 
-void Io<Proto::Transaction>::serialize(xmstream &dst, const BTC::Proto::Transaction &data)
+void Io<Proto::Transaction>::serialize(xmstream &dst, const BTC::Proto::Transaction &data, bool serializeWitness)
 {
   uint8_t flags = 0;
   BTC::serialize(dst, data.version);
-  if (data.hasWitness()) {
+  if (data.hasWitness() && serializeWitness) {
     flags = 1;
     BTC::serializeVarSize(dst, 0);
     BTC::serialize(dst, flags);
