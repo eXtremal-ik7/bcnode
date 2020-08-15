@@ -202,6 +202,7 @@ add_executable(bcnode-btc
 
 add_executable(bcterminal-btc
   bcterminal.cpp
+  BTC/btc.cpp
   BTC/proto.cpp
   common/merkleTree.cpp
 )
@@ -220,12 +221,14 @@ prepare_bc_env(LTC)
 add_executable(bcnode-ltc
   ${BASE_SOURCES}
   ${BTC_SOURCES}
+  BTC/btc.cpp
   LTC/ltc.cpp
 )
 
 add_executable(bcterminal-ltc
   bcterminal.cpp
   BTC/proto.cpp
+  LTC/ltc.cpp
   common/merkleTree.cpp
 )
 
@@ -235,7 +238,7 @@ target_link_libraries(bcnode-ltc ${COMMON_LIBRARIES} bcnodecrypto)
 
 target_include_directories(bcterminal-ltc PUBLIC ${CMAKE_BINARY_DIR}/LTC)
 target_compile_definitions(bcterminal-ltc PUBLIC -DBC=LTC)
-target_link_libraries(bcterminal-ltc ${COMMON_LIBRARIES})
+target_link_libraries(bcterminal-ltc ${COMMON_LIBRARIES} bcnodecrypto)
 
 # XPM
 prepare_bc_env(XPM)
@@ -250,6 +253,7 @@ add_executable(bcnode-xpm
 add_executable(bcterminal-xpm
   bcterminal.cpp
   BTC/proto.cpp
+  XPM/xpm.cpp
   XPM/proto.cpp
   common/merkleTree.cpp
 )

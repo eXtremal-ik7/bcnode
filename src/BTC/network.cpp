@@ -163,17 +163,17 @@ void Peer::onConnect(AsyncOpStatus status)
 
   // Send version message
   BC::Proto::MessageVersion msg;
-  msg.version = BC::Common::ProtocolVersion;
+  msg.version = BC::Configuration::ProtocolVersion;
   msg.services = 1; // NODE
   msg.timestamp = static_cast<uint64_t>(time(nullptr));
   msg.addr_recv.services = 0;
   msg.addr_recv.setIpv4(0);
   msg.addr_recv.port = 0;
-  msg.addr_from.services = BC::Common::ServicesEnabled;
+  msg.addr_from.services = BC::Configuration::ServicesEnabled;
   msg.addr_from.reset();
   msg.addr_from.port = 0;
   msg.nonce = ParentNode->localHostNonce();
-  msg.user_agent = BC::Common::UserAgent;
+  msg.user_agent = BC::Configuration::UserAgent;
   msg.start_height = BlockIndex_.best()->Height;
   msg.relay = 1;
 
@@ -476,7 +476,7 @@ void Peer::onGetBlocks(BC::Proto::MessageGetBlocks &getblocks)
         if (index->Header.GetHash() == getblocks.HashStop)
           break;
         BC::Proto::InventoryVector iv;
-        iv.type = BC::Proto::InventoryVector::MSG_BLOCK;
+        iv.type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
         iv.hash = index->Header.GetHash();
         inv.Inventory.emplace_back(iv);
         index = index->Next;
@@ -500,7 +500,8 @@ void Peer::onGetData(BC::Proto::MessageGetData &getdata)
   {
     BlockSearcher searcher(Storage_.blockDb(), handler, [this](){ postQuitOperation(Base); });
     for (const auto &inv: getdata.inventory) {
-      if (inv.type == BC::Proto::InventoryVector::MSG_BLOCK) {
+      if (inv.type == BC::Proto::InventoryVector::MSG_BLOCK || inv.type == BC::Proto::InventoryVector::MSG_WITNESS_BLOCK) {
+        // TODO: don't send witness data on MSG_BLOCK request
         searcher.add(BlockIndex_, inv.hash);
       } else {
         // Other data types not supported now
@@ -512,7 +513,7 @@ void Peer::onGetData(BC::Proto::MessageGetData &getdata)
     xmstream &stream = LocalStream();
     BC::Proto::MessageInv inv;
     inv.Inventory.resize(1);
-    inv.Inventory[0].type = BC::Proto::InventoryVector::MSG_BLOCK;
+    inv.Inventory[0].type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
     inv.Inventory[0].hash = BlockIndex_.best()->Header.GetHash();
     BC::serialize(stream, inv);
     sendMessage(MessageTy::inv, stream.data(), stream.sizeOf());
@@ -563,7 +564,7 @@ void Peer::onInv(BC::Proto::MessageInv &inv)
         auto it = BlockIndex_.blockIndex().find(element.hash);
         if (it == BlockIndex_.blockIndex().end() || it->second->IndexState != BSBlock) {
           BC::Proto::InventoryVector iv;
-          iv.type = BC::Proto::InventoryVector::MSG_BLOCK;
+          iv.type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
           iv.hash = element.hash;
           getBlocks.inventory.emplace_back(iv);
         }
@@ -641,7 +642,7 @@ void Peer::inv(const xvector<BC::Proto::BlockHashTy> &hashes)
   BC::Proto::MessageInv inv;
   inv.Inventory.resize(hashes.size());
   for (size_t i = 0, ie = hashes.size(); i < ie; i++) {
-    inv.Inventory[i].type = BC::Proto::InventoryVector::MSG_BLOCK;
+    inv.Inventory[i].type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
     inv.Inventory[i].hash = hashes[i];
   }
 

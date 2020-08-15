@@ -2,10 +2,9 @@
 #include "openssl/ripemd.h"
 #include "openssl/sha.h"
 
-namespace BC {
-namespace Script {
+namespace BTC {
 
-bool decodeStandardOutput(const BC::Proto::TxOut &out, BC::Proto::AddressTy &address)
+bool Script::decodeStandardOutput(const BC::Proto::TxOut &out, BC::Proto::AddressTy &address)
 {
   if (out.pkScript.size() == 35 || out.pkScript.size() == 67) {
     // Pay to public key
@@ -43,5 +42,4 @@ bool decodeStandardOutput(const BC::Proto::TxOut &out, BC::Proto::AddressTy &add
   return false;
 }
 
-}
 }

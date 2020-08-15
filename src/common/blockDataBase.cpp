@@ -140,11 +140,22 @@ static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPar
   while (!queue.empty()) {
     BC::Common::BlockIndex *current = queue.front();
     BC::Common::BlockIndex *prev = current->Prev;
+    BC::Proto::Block *block = static_cast<BC::Proto::Block*>(current->Serialized.get()->unpackedData());
 
     current->OnChain = prev->OnChain;
     if (current->Height == std::numeric_limits<uint32_t>::max()) {
       current->Height = prev->Height + 1;
       current->ChainWork = prev->ChainWork + BC::Common::GetBlockProof(current->Header, chainParams);
+    }
+
+    // Contextual block check
+    std::string error;
+    if (!BC::Common::checkBlockContextual(*current, *block, chainParams, error)) {
+      LOG_F(WARNING, "block %s (%u) check failed, error: %s", current->Header.GetHash().ToString().c_str(), current->Height, error.c_str());
+      current->IndexState = BSInvalid;
+      QueueNextBlocks(queue, current);
+      queue.pop_front();
+      continue;
     }
 
     if (current->ChainWork > blockIndex.best()->ChainWork) {
@@ -198,7 +209,6 @@ static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPar
 
     // drop block data cache for connected block
     acceptedBlocks.push_back(current);
-//    blockDb.add(current);
     storage.add(BC::DB::WriteData, current);
 
     QueueNextBlocks(queue, current);
@@ -312,12 +322,12 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
     }
   }
 
-  {
-    // Other checks
-    if (calculateMerkleRoot(block->vtx) != block->header.hashMerkleRoot) {
-      LOG_F(ERROR, "Merkle root invalid for block %s", hash.ToString().c_str());
-      return nullptr;
-    }
+  // Validate block
+  std::string error;
+  unsigned blockGeneration = BC::Common::checkBlockStandalone(*block, chainParams, error);
+  if (blockGeneration == 0) {
+    LOG_F(WARNING, "block %s check failed, error: %s", block->header.GetHash().ToString().c_str(), error.c_str());
+    return nullptr;
   }
 
   // Prepare block index structure for predecessor block
@@ -621,7 +631,7 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
 
   // Initialize local index storage
   LinearDataStorage indexStorage;
-  indexStorage.init(indexPath, "index%05u.dat", BC::Common::BlocksFileLimit);
+  indexStorage.init(indexPath, "index%05u.dat", BC::Configuration::BlocksFileLimit);
 
   auto indexWriter = std::async(std::launch::async, [&storage, &indexStorage]() -> bool {
     xmstream stream;
@@ -748,9 +758,9 @@ bool BlockDatabase::init(std::filesystem::path &dataDir, BC::Common::ChainParams
   Magic_ = chainParams.magic;
   DataDir_ = dataDir;
 
-  if (!BlockStorage_.init(dataDir / "blocks", "blk%05u.dat", BC::Common::BlocksFileLimit))
+  if (!BlockStorage_.init(dataDir / "blocks", "blk%05u.dat", BC::Configuration::BlocksFileLimit))
     return false;
-  if (!IndexStorage_.init(dataDir / "index", "index%05u.dat", BC::Common::BlocksFileLimit))
+  if (!IndexStorage_.init(dataDir / "index", "index%05u.dat", BC::Configuration::BlocksFileLimit))
     return false;
 
   if (BlockStorage_.empty()) {

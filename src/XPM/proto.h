@@ -88,6 +88,7 @@ public:
 // Serialize
 namespace BTC {
 template<> struct Io<mpz_class> {
+  static size_t getSerializedSize(const mpz_class &data);
   static void serialize(xmstream &dst, const mpz_class &data);
   static void unserialize(xmstream &src, mpz_class &data);
   static void unpack(xmstream &src, DynamicPtr<mpz_class> dst);
@@ -95,6 +96,7 @@ template<> struct Io<mpz_class> {
 };
 
 template<> struct Io<XPM::Proto::BlockHeader> {
+  static size_t getSerializedSize(const XPM::Proto::BlockHeader &data);
   static void serialize(xmstream &dst, const XPM::Proto::BlockHeader &data);
   static void unserialize(xmstream &src, XPM::Proto::BlockHeader &data);
   static void unpack(xmstream &src, DynamicPtr<XPM::Proto::BlockHeader> dst);

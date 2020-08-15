@@ -11,18 +11,33 @@ namespace BTC {
 
 template<typename T, typename Enable=void>
 struct Io {
+  static inline size_t getSerializedSize(const T &data);
   static inline void serialize(xmstream &src, const T &data);
   static inline void unserialize(xmstream &dst, T &data);
   static inline void unpack(xmstream &src, DynamicPtr<T> dst);
   static inline void unpackFinalize(DynamicPtr<T> dst);
 };
 
+template<typename T> static inline size_t getSerializedSize(const T &data) { return Io<T>::getSerializedSize(data); }
 template<typename T> static inline void serialize(xmstream &src, const T &data) { Io<T>::serialize(src, data); }
 template<typename T> static inline void unserialize(xmstream &dst, T &data) { Io<T>::unserialize(dst, data); }
 template<typename T> static inline void unpack(xmstream &src, DynamicPtr<T> dst) { Io<T>::unpack(src, dst); }
 template<typename T> static inline void unpackFinalize(DynamicPtr<T> dst) { Io<T>::unpackFinalize(dst); }
 
 // variable size
+static inline size_t getSerializedVarSizeSize(uint64_t value)
+{
+  if (value < 0xFD) {
+    return 1;
+  } else if (value <= 0xFFFF) {
+    return 3;
+  } else if (value <= 0xFFFFFFFF) {
+    return 5;
+  } else {
+    return 9;
+  }
+}
+
 static inline void serializeVarSize(xmstream &stream, uint64_t value)
 {
   if (value < 0xFD) {
@@ -70,23 +85,27 @@ struct is_simple_numeric : std::integral_constant<bool,
 // Serialization for simple integer types
 template<typename T>
 struct Io<T, typename std::enable_if<is_simple_numeric<T>::value, void>::type> {
+  static inline size_t getSerializedSize(const T&) { return sizeof(T); }
   static inline void serialize(xmstream &stream, const T &data) { stream.writele<T>(data); }
   static inline void unserialize(xmstream &stream, T &data) { data = stream.readle<T>(); }
 };
 
 // Serialization for bool
 template<> struct Io<bool> {
+  static inline size_t getSerializedSize(const bool&) { return 1; }
   static inline void serialize(xmstream &stream, const bool &data) { stream.writele(static_cast<uint8_t>(data)); }
   static inline void unserialize(xmstream &stream, bool &data) { data = stream.readle<uint8_t>(); }
 };
 
 // Serialization for *int256 types
 template<> struct Io<uint256> {
+  static inline size_t getSerializedSize(const uint256&) { return sizeof(uint256); }
   static inline void serialize(xmstream &stream, const uint256 &data) { stream.write(data.begin(), 32); }
   static inline void unserialize(xmstream &stream, uint256 &data) { stream.read(data.begin(), 32); }
 };
 
 template<> struct Io<arith_uint256> {
+  static inline size_t getSerializedSize(const arith_uint256&) { return sizeof(uint256); }
   static inline void serialize(xmstream &stream, const arith_uint256 &data) { stream.write(data.begin(), 32); }
   static inline void unserialize(xmstream &stream, arith_uint256 &data) { stream.read(data.begin(), 32); }
 };
@@ -95,6 +114,10 @@ template<> struct Io<arith_uint256> {
 // Serialization for std::string
 // NOTE: unpacking not supported
 template<> struct Io<std::string> {
+  static inline size_t getSerializedSize(const std::string &data) {
+    return getSerializedVarSizeSize(data.size()) + data.size();
+  }
+
   static inline void serialize(xmstream &dst, const std::string &data) {
     serializeVarSize(dst, data.size());
     dst.write(data.data(), data.size());
@@ -108,6 +131,13 @@ template<> struct Io<std::string> {
 
 // xvector
 template<typename T> struct Io<xvector<T>> {
+  static inline size_t getSerializedSize(const xvector<T> &data) {
+    size_t size = getSerializedVarSizeSize(data.size());
+    for (const auto &v: data)
+      size += Io<T>::getSerializedSize(v);
+    return size;
+  }
+
   static inline void serialize(xmstream &dst, const xvector<T> &data) {
     serializeVarSize(dst, data.size());
     for (const auto &v: data)
@@ -155,6 +185,10 @@ template<typename T> struct Io<xvector<T>> {
 
 // Special case: xvector<uint8_t>
 template<> struct Io<xvector<uint8_t>> {
+  static inline size_t getSerializedSize(const xvector<uint8_t> &data) {
+    return getSerializedVarSizeSize(data.size()) + data.size();
+  }
+
   static inline void serialize(xmstream &dst, const xvector<uint8_t> &data) {
     serializeVarSize(dst, data.size());
     dst.write(data.data(), data.size());

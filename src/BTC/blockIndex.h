@@ -12,7 +12,8 @@
 enum BlockStatus {
   BSEmpty = 0,
   BSHeader,
-  BSBlock
+  BSBlock,
+  BSInvalid
 };
 
 namespace BTC {
@@ -30,7 +31,7 @@ public:
   uint32_t Height = std::numeric_limits<uint32_t>::max();;
   uint32_t FileNo = std::numeric_limits<uint32_t>::max();;
   uint32_t FileOffset = std::numeric_limits<uint32_t>::max();;
-  uint32_t SerializedBlockSize = std::numeric_limits<uint32_t>::max();;
+  uint32_t SerializedBlockSize = std::numeric_limits<uint32_t>::max();
 
   BlockIndexTy *Prev = nullptr;
   BlockIndexTy *Next = nullptr;
@@ -43,6 +44,7 @@ public:
   std::chrono::time_point<std::chrono::steady_clock> DownloadingStartTime = std::chrono::time_point<std::chrono::steady_clock>::max();
 
   // queue to chainstate
+  // TODO: don't use intrusive container
   atomic_tagged_ptr<BlockIndexTy, 3> SuccessorHeaders;
   atomic_tagged_ptr<BlockIndexTy, 3> SuccessorBlocks;
   atomic_tagged_ptr<BlockIndexTy, 3> ConcurrentHeaderNext;

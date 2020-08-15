@@ -120,7 +120,7 @@ void printHelpMessage()
 #ifndef WIN32
   defaultDataDir.append(".");
 #endif
-  defaultDataDir.append(BC::Common::DefaultDataDir);
+  defaultDataDir.append(BC::Configuration::DefaultDataDir);
   auto defaultPath = userHomeDir().append(defaultDataDir);
 
   puts("bcnode options");
@@ -188,7 +188,7 @@ int main(int argc, char **argv)
   if (!dataDir.empty())
     context.DataDir = dataDir;
 
-  LOG_F(INFO, "Starting for %s/%s", BC::Common::ProjectName, BC::Common::TickerName);
+  LOG_F(INFO, "Starting for %s/%s", BC::Configuration::ProjectName, BC::Configuration::TickerName);
 
   // Check network id
   if (!BC::Common::setupChainParams(&context.ChainParams, gNetwork)) {
@@ -227,7 +227,7 @@ int main(int argc, char **argv)
 #ifndef WIN32
       defaultDataDir.append(".");
 #endif
-      defaultDataDir.append(BC::Common::DefaultDataDir);
+      defaultDataDir.append(BC::Configuration::DefaultDataDir);
       context.DataDir = userHomeDir().append(defaultDataDir);
     }
 
@@ -303,7 +303,7 @@ int main(int argc, char **argv)
     workerThreadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
   unsigned totalThreadsNum = workerThreadsNum + rtThreadsNum;
 
-  context.Storage.cache().setLimit(BC::Common::DefaultBlockCacheSize);
+  context.Storage.cache().setLimit(BC::Configuration::DefaultBlockCacheSize);
 
   // Lookup peers (DNS seeds and user defined nodes)
   // TODO: do it asynchronously (now using std::async)

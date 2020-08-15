@@ -6,6 +6,119 @@
 #include "xpm.h"
 #include "common/uint256.h"
 
+
+bool XPM::Common::setupChainParams(ChainParams *params, const char *network)
+{
+  if (strcmp(network, "main") == 0) {
+    // Setup for mainnet
+    params->networkId = NetworkIdMain;
+    params->magic = 0xE7E5E7E4;
+    params->DefaultPort = 9911;
+    params->DefaultRPCPort = 9912;
+
+    params->PublicKeyPrefix = 23;
+
+    // TODO: do correct BIP34 checking
+    params->BIP34Height = 17;
+
+    {
+      // Genesis block
+      // TODO: build it correct way
+      params->GenesisBlock.header.nVersion = 2;
+      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.nTime = 1373064429;
+      params->GenesisBlock.header.nBits = 0x06000000;
+      params->GenesisBlock.header.nNonce = 383;
+      params->GenesisBlock.header.bnPrimeChainMultiplier = ((uint64_t) 532541) * (uint64_t)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+
+      XPM::Proto::Transaction tx;
+      tx.version = 1;
+      tx.lockTime = 0;
+      tx.txIn.resize(1);
+      tx.txOut.resize(1);
+      tx.txIn[0].sequence = -1;
+      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputIndex = -1;
+      xmstream scriptSig;
+      serialize(scriptSig, static_cast<uint8_t>(0));
+      XPM::serialize(scriptSig, mpz_class(999));
+      serialize(scriptSig, static_cast<uint8_t>(0x4C)); // OP_PUSHDATA1
+      serialize(scriptSig, std::string("Sunny King - dedicated to Satoshi Nakamoto and all who have fought for the freedom of mankind"));
+      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
+      tx.txOut[0].value = 100000000;
+      params->GenesisBlock.vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq(params->GenesisBlock.header, "963d17ba4dc753138078a2f56afb3af9674e2546822badff26837db9a0152106");
+    }
+
+    params->minimalChainLength = 6;
+
+    // DNS seeds
+    params->DNSSeeds.assign({
+      "seed.primecoin.info",
+      "primeseed.muuttuja.org",
+      "seed.primecoin.org",
+      "xpm.dnsseed.coinsforall.io"
+    });
+
+  } else if (strcmp(network, "testnet") == 0) {
+    // Setup for testnet
+    params->networkId = NetworkIdTestnet;
+    params->magic = 0xC3CBFEFB;
+    params->DefaultPort = 9913;
+    params->DefaultRPCPort = 9914;
+
+    params->PublicKeyPrefix = 111;
+
+    // TODO: do correct BIP34 checking
+    params->BIP34Height = 17;
+
+    {
+      // Genesis block
+      // TODO: build it correct way
+      params->GenesisBlock.header.nVersion = 2;
+      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.nTime = 1373063882;
+      params->GenesisBlock.header.nBits = 0x06000000;
+      params->GenesisBlock.header.nNonce = 1513;
+      params->GenesisBlock.header.bnPrimeChainMultiplier = ((uint64_t) 585641) * (uint64_t)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+
+      XPM::Proto::Transaction tx;
+      tx.version = 1;
+      tx.lockTime = 0;
+      tx.txIn.resize(1);
+      tx.txOut.resize(1);
+      xmstream scriptSig;
+      tx.txIn[0].sequence = -1;
+      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputIndex = -1;
+      serialize(scriptSig, static_cast<uint8_t>(0));
+      XPM::serialize(scriptSig, mpz_class(999));
+      serialize(scriptSig, static_cast<uint8_t>(0x4C)); // OP_PUSHDATA1
+      serialize(scriptSig, std::string("Sunny King - dedicated to Satoshi Nakamoto and all who have fought for the freedom of mankind"));
+      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
+      tx.txOut[0].value = 100000000;
+      params->GenesisBlock.vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq(params->GenesisBlock.header, "221156cf301bc3585e72de34fe1efdb6fbd703bc27cfc468faa1cdd889d0efa0");
+    }
+
+    params->minimalChainLength = 2;
+
+    // DNS seeds
+    params->DNSSeeds.assign({
+      "testseed.primecoin.info",
+      "primeseedtn.muuttuja.org",
+      "seed.testnet.primecoin.org",
+      "xpmtestnet.dnsseed.coinsforall.io"
+    });
+  } else {
+    return false;
+  }
+
+  return true;
+}
+
 // header.nBits is a fixed point number xxxxxxxx.yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy where is
 //   y: fractional part (low 24 bit), minimal unit is 0.000000059604644775390625
 //   x: rational part (high 8 bit)
@@ -240,4 +353,19 @@ bool XPM::Common::checkConsensus(const Proto::BlockHeader &header, XPM::Common::
 
   // TODO: store chain length and type (for what?)
   return true;
+}
+
+unsigned XPM::Common::checkBlockStandalone(const Proto::Block &block, const ChainParams &chainParams, std::string &error)
+{
+  bool isValid = true;
+  applyValidation(validateBlockSize<XPM::X>, block, chainParams, error, &isValid);
+  applyValidation(validateMerkleRoot<XPM::X>, block, chainParams, error, &isValid);
+  return isValid;
+}
+
+bool XPM::Common::checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error)
+{
+  bool isValid = true;
+  applyContextualValidation(validateBIP34<XPM::X>, index, block, chainParams, error, &isValid);
+  return isValid;
 }

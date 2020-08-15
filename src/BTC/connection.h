@@ -164,7 +164,7 @@ private:
     msg.addr_from.reset();
     msg.addr_from.port = 0;
     msg.nonce = rand();
-    msg.user_agent = BC::Common::UserAgent;
+    msg.user_agent = BC::Configuration::UserAgent;
     msg.start_height = 1;
     msg.relay = 1;
 

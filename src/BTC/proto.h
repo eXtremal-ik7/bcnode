@@ -59,6 +59,10 @@ struct NetworkAddress {
 
 struct NetworkAddressWithoutTime : public NetworkAddress {};
 
+  struct ValidationData {
+    uint64_t HasWitness : 1;
+  };
+
 #pragma pack(push, 1)
   struct BlockHeader {
     int32_t nVersion;
@@ -139,14 +143,15 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
       return false;
     }
 
-    BlockHashTy getHash() const;
     BlockHashTy getTxId() const;
+    BlockHashTy getWTxid() const;
   };
 
   template<typename T>
   struct BlockTy {
     typename T::BlockHeader header;
     xvector<typename T::Transaction> vtx;
+    mutable ValidationData validationData;
   };
 
   struct MessageVersion {
@@ -236,6 +241,7 @@ namespace BTC {
 
 // Header
 template<> struct Io<Proto::BlockHeader> {
+  static inline size_t getSerializedSize(const BTC::Proto::BlockHeader&) { return 80; }
   static void serialize(xmstream &dst, const BTC::Proto::BlockHeader &data);
   static void unserialize(xmstream &src, BTC::Proto::BlockHeader &data);
   static void unpack(xmstream &src, DynamicPtr<BTC::Proto::BlockHeader> dst) { unserialize(src, *dst.ptr()); }
@@ -244,6 +250,7 @@ template<> struct Io<Proto::BlockHeader> {
 
 // TxIn
 template<> struct Io<Proto::TxIn> {
+  static inline size_t getSerializedSize(const BTC::Proto::TxIn &data);
   static void serialize(xmstream &dst, const BTC::Proto::TxIn &data);
   static void unserialize(xmstream &src, BTC::Proto::TxIn &data);
   static void unpack(xmstream &src, DynamicPtr<BTC::Proto::TxIn> dst);
@@ -252,6 +259,7 @@ template<> struct Io<Proto::TxIn> {
 
 // TxOut
 template<> struct Io<Proto::TxOut> {
+  static inline size_t getSerializedSize(const BTC::Proto::TxOut &data);
   static void serialize(xmstream &dst, const BTC::Proto::TxOut &data);
   static void unserialize(xmstream &src, BTC::Proto::TxOut &data);
   static void unpack(xmstream &src, DynamicPtr<BTC::Proto::TxOut> dst);
@@ -260,6 +268,7 @@ template<> struct Io<Proto::TxOut> {
 
 // Transaction
 template<> struct Io<Proto::Transaction> {
+  static size_t getSerializedSize(const BTC::Proto::Transaction &data, bool serializeWitness=true);
   static void serialize(xmstream &dst, const BTC::Proto::Transaction &data, bool serializeWitness=true);
   static void unserialize(xmstream &src, BTC::Proto::Transaction &data);
   static void unpack(xmstream &src, DynamicPtr<BTC::Proto::Transaction> dst);
@@ -268,6 +277,13 @@ template<> struct Io<Proto::Transaction> {
 
 // Block
 template<typename T> struct Io<Proto::BlockTy<T>> {
+  static inline size_t getSerializedSize(const BTC::Proto::BlockTy<T> &data, bool serializeWitness=true) {
+    size_t size = Io<decltype(data.header)>::getSerializedSize(data.header) + getSerializedVarSizeSize(data.vtx.size());
+    for (const auto &tx: data.vtx)
+      size += Io<Proto::Transaction>::getSerializedSize(tx, serializeWitness);
+    return size;
+  }
+
   static inline void serialize(xmstream &dst, const BTC::Proto::BlockTy<T> &data) {
     BTC::serialize(dst, data.header);
     BTC::serialize(dst, data.vtx);

@@ -8,6 +8,25 @@
 
 namespace BTC {
 
+size_t Io<mpz_class>::getSerializedSize(const mpz_class &data)
+{
+  size_t size = 0;
+  constexpr mp_limb_t one = 1;
+  auto bnSize = mpz_sizeinbase(data.get_mpz_t(), 256);
+  auto serializedSize = bnSize;
+  if (data.get_mpz_t()->_mp_size) {
+      mp_limb_t signBit = one << (8*(bnSize % sizeof(mp_limb_t)) - 1);
+      if (data.get_mpz_t()->_mp_d[data.get_mpz_t()->_mp_size-1] & signBit)
+          serializedSize++;
+  }
+
+  size += getSerializedVarSizeSize(serializedSize);
+  size += bnSize;
+  if (serializedSize > bnSize)
+    size += 1;
+  return size;
+}
+
 void Io<mpz_class>::serialize(xmstream &dst, const mpz_class &data)
 {
   constexpr mp_limb_t one = 1;
@@ -60,6 +79,11 @@ void Io<mpz_class>::unpackFinalize(DynamicPtr<mpz_class> dst)
 {
   mpz_class *mpz = dst.ptr();
   mpz->get_mpz_t()->_mp_d = reinterpret_cast<mp_limb_t*>(dst.stream().data<uint8_t>() + reinterpret_cast<size_t>(mpz->get_mpz_t()->_mp_d));
+}
+
+size_t Io<XPM::Proto::BlockHeader>::getSerializedSize(const XPM::Proto::BlockHeader &data)
+{
+  return 80 + BTC::getSerializedSize(data.bnPrimeChainMultiplier);
 }
 
 void Io<XPM::Proto::BlockHeader>::serialize(xmstream &dst, const XPM::Proto::BlockHeader &data)

@@ -9,13 +9,13 @@
 
 namespace BTC {
 
-Proto::BlockHashTy Proto::Transaction::getHash() const
+Proto::BlockHashTy Proto::Transaction::getTxId() const
 {
   uint256 result;
   uint8_t buffer[4096];
   xmstream stream(buffer, sizeof(buffer));
   stream.reset();
-  BTC::Io<Proto::Transaction>::serialize(stream, *this);
+  BTC::Io<Proto::Transaction>::serialize(stream, *this, false);
 
   SHA256_CTX sha256;
   SHA256_Init(&sha256);
@@ -27,13 +27,13 @@ Proto::BlockHashTy Proto::Transaction::getHash() const
   return result;
 }
 
-Proto::BlockHashTy Proto::Transaction::getTxId() const
+Proto::BlockHashTy Proto::Transaction::getWTxid() const
 {
   uint256 result;
   uint8_t buffer[4096];
   xmstream stream(buffer, sizeof(buffer));
   stream.reset();
-  BTC::Io<Proto::Transaction>::serialize(stream, *this, false);
+  BTC::Io<Proto::Transaction>::serialize(stream, *this);
 
   SHA256_CTX sha256;
   SHA256_Init(&sha256);
@@ -96,6 +96,16 @@ void Io<Proto::BlockHeader>::unserialize(xmstream &src, BTC::Proto::BlockHeader 
   BTC::unserialize(src, data.nNonce);
 }
 
+size_t Io<Proto::TxIn>::getSerializedSize(const BTC::Proto::TxIn &data)
+{
+  size_t size = 0;
+  size += BTC::getSerializedSize(data.previousOutputHash);
+  size += BTC::getSerializedSize(data.previousOutputIndex);
+  size += BTC::getSerializedSize(data.scriptSig);
+  size += BTC::getSerializedSize(data.sequence);
+  return size;
+}
+
 void Io<Proto::TxIn>::serialize(xmstream &stream, const BTC::Proto::TxIn &data)
 {
   BTC::serialize(stream, data.previousOutputHash);
@@ -134,6 +144,14 @@ void Io<Proto::TxIn>::unpackFinalize(DynamicPtr<BTC::Proto::TxIn> dst)
   BTC::unpackFinalize(DynamicPtr<decltype (dst->witnessStack)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxIn, witnessStack)));
 }
 
+size_t Io<Proto::TxOut>::getSerializedSize(const BTC::Proto::TxOut &data)
+{
+  size_t size = 0;
+  size += BTC::getSerializedSize(data.value);
+  size += BTC::getSerializedSize(data.pkScript);
+  return size;
+}
+
 void Io<Proto::TxOut>::serialize(xmstream &src, const BTC::Proto::TxOut &data)
 {
   BTC::serialize(src, data.value);
@@ -155,6 +173,30 @@ void Io<Proto::TxOut>::unpack(xmstream &src, DynamicPtr<BTC::Proto::TxOut> dst)
 void Io<Proto::TxOut>::unpackFinalize(DynamicPtr<BTC::Proto::TxOut> dst)
 {
   BTC::unpackFinalize(DynamicPtr<decltype (dst->pkScript)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxOut, pkScript)));
+}
+
+size_t Io<Proto::Transaction>::getSerializedSize(const BTC::Proto::Transaction &data, bool serializeWitness)
+{
+  size_t size = 0;
+  uint8_t flags = 0;
+  size += BTC::getSerializedSize(data.version);
+
+  if (data.hasWitness() && serializeWitness) {
+    flags = 1;
+    size += BTC::getSerializedVarSizeSize(0);
+    size += BTC::getSerializedSize(flags);
+  }
+
+  size += BTC::getSerializedSize(data.txIn);
+  size += BTC::getSerializedSize(data.txOut);
+
+  if (flags) {
+    for (size_t i = 0; i < data.txIn.size(); i++)
+      size += BTC::getSerializedSize(data.txIn[i].witnessStack);
+  }
+
+  size += BTC::getSerializedSize(data.lockTime);
+  return size;
 }
 
 void Io<Proto::Transaction>::serialize(xmstream &dst, const BTC::Proto::Transaction &data, bool serializeWitness)
@@ -423,6 +465,10 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tx
   serializeJson(stream, "previousOutputIndex", txin.previousOutputIndex); stream.write(',');
   serializeJson(stream, "scriptsig", txin.scriptSig); stream.write(',');
   serializeJson(stream, "sequence", txin.sequence);
+  if (!txin.witnessStack.empty()) {
+    stream.write(',');
+    serializeJson(stream, "witnessStack", txin.witnessStack);
+  }
   stream.write('}');
 }
 
@@ -448,6 +494,7 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tr
   }
 
   stream.write('{');
+  serializeJson(stream, "txid", data.getTxId()); stream.write(',');
   serializeJson(stream, "version", data.version); stream.write(',');
   serializeJson(stream, "txin", data.txIn); stream.write(',');
   serializeJson(stream, "txout", data.txOut); stream.write(',');
