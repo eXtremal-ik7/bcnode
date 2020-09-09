@@ -15,9 +15,8 @@ namespace LTC {
   using BTC::Io;
   using BTC::serialize;
   using BTC::unserialize;
-  using BTC::unpack;
-  using BTC::unpackFinalize;
   using BTC::unserializeAndCheck;
+  using BTC::unpack2;
 }
 
 namespace LTC {
@@ -57,9 +56,9 @@ namespace Common {
   unsigned checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error);
   bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
 
-  arith_uint256 GetBlockProof(const LTC::Proto::BlockHeader &header, const ChainParams &chainParams);
+  arith_uint256 GetBlockProof(const Proto::BlockHeader &header, const ChainParams &chainParams);
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
-  bool checkConsensus(const LTC::Proto::BlockHeader &header, CheckConsensusCtx &ctx, BC::Common::ChainParams &chainParams);
+  bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
 };
 
 class X {

@@ -93,26 +93,11 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     xvector<uint8_t> scriptSig;
     xvector<xvector<uint8_t>> witnessStack;
     uint32_t sequence;
-
-    static bool unpackWitnessStack(xmstream &src, DynamicPtr<BTC::Proto::TxIn> dst) {
-      BTC::unpack(src, DynamicPtr<decltype (dst->witnessStack)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxIn, witnessStack)));
-      return !dst->witnessStack.empty();
-    }
-
-    void serialize(xmstream &stream) const;
-    void unserialize(xmstream &stream);
-    static void unpack(xmstream &stream, xmstream &out, size_t offset);
-    static void unpackFinalize(xmstream &out, size_t offset);
   };
 
   struct TxOut {
     int64_t value;
     xvector<uint8_t> pkScript;
-
-    void serialize(xmstream &stream) const;
-    void unserialize(xmstream &stream);
-    static void unpack(xmstream &stream, xmstream &out, size_t offset);
-    static void unpackFinalize(xmstream &out, size_t offset);
   };
 
   struct TxWitness {
@@ -242,37 +227,40 @@ namespace BTC {
 // Header
 template<> struct Io<Proto::BlockHeader> {
   static inline size_t getSerializedSize(const BTC::Proto::BlockHeader&) { return 80; }
+  static inline size_t getUnpackedExtraSize(xmstream &src) {
+    src.seek(80);
+    return 0;
+  }
   static void serialize(xmstream &dst, const BTC::Proto::BlockHeader &data);
   static void unserialize(xmstream &src, BTC::Proto::BlockHeader &data);
-  static void unpack(xmstream &src, DynamicPtr<BTC::Proto::BlockHeader> dst) { unserialize(src, *dst.ptr()); }
-  static void unpackFinalize(DynamicPtr<BTC::Proto::BlockHeader>) {}
+  static inline void unpack2(xmstream &src, Proto::BlockHeader *dst, uint8_t **) { unserialize(src, *dst); }
 };
 
 // TxIn
 template<> struct Io<Proto::TxIn> {
   static inline size_t getSerializedSize(const BTC::Proto::TxIn &data);
+  static inline size_t getUnpackedExtraSize(xmstream &src);
   static void serialize(xmstream &dst, const BTC::Proto::TxIn &data);
   static void unserialize(xmstream &src, BTC::Proto::TxIn &data);
-  static void unpack(xmstream &src, DynamicPtr<BTC::Proto::TxIn> dst);
-  static void unpackFinalize(DynamicPtr<BTC::Proto::TxIn> dst);
+  static void unpack2(xmstream &src, Proto::TxIn *data, uint8_t **extraData);
 };
 
 // TxOut
 template<> struct Io<Proto::TxOut> {
   static inline size_t getSerializedSize(const BTC::Proto::TxOut &data);
+  static inline size_t getUnpackedExtraSize(xmstream &src);
   static void serialize(xmstream &dst, const BTC::Proto::TxOut &data);
   static void unserialize(xmstream &src, BTC::Proto::TxOut &data);
-  static void unpack(xmstream &src, DynamicPtr<BTC::Proto::TxOut> dst);
-  static void unpackFinalize(DynamicPtr<BTC::Proto::TxOut> dst);
+  static void unpack2(xmstream &src, Proto::TxOut *data, uint8_t **extraData);
 };
 
 // Transaction
 template<> struct Io<Proto::Transaction> {
   static size_t getSerializedSize(const BTC::Proto::Transaction &data, bool serializeWitness=true);
+  static size_t getUnpackedExtraSize(xmstream &src);
   static void serialize(xmstream &dst, const BTC::Proto::Transaction &data, bool serializeWitness=true);
   static void unserialize(xmstream &src, BTC::Proto::Transaction &data);
-  static void unpack(xmstream &src, DynamicPtr<BTC::Proto::Transaction> dst);
-  static void unpackFinalize(DynamicPtr<BTC::Proto::Transaction> dst);
+  static void unpack2(xmstream &src, Proto::Transaction *data, uint8_t **extraData);
 };
 
 // Block
@@ -282,6 +270,11 @@ template<typename T> struct Io<Proto::BlockTy<T>> {
     for (const auto &tx: data.vtx)
       size += Io<Proto::Transaction>::getSerializedSize(tx, serializeWitness);
     return size;
+  }
+
+  static inline size_t getUnpackedExtraSize(xmstream &src) {
+    return Io<decltype(Proto::BlockTy<T>::header)>::getUnpackedExtraSize(src) +
+           Io<decltype(Proto::BlockTy<T>::vtx)>::getUnpackedExtraSize(src);
   }
 
   static inline void serialize(xmstream &dst, const BTC::Proto::BlockTy<T> &data) {
@@ -309,30 +302,9 @@ template<typename T> struct Io<Proto::BlockTy<T>> {
     }
   }
 
-  static inline void unpack(xmstream &src, DynamicPtr<BTC::Proto::BlockTy<T>> dst) {
-    size_t blockDataOffset = src.offsetOf();
-    BTC::unpack(src, DynamicPtr<decltype (dst->header)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, header)));
-
-    {
-      auto vtxDst = DynamicPtr<decltype (dst->vtx)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, vtx));
-      uint64_t txNum;
-      unserializeVarSize(src, txNum);
-      size_t dataOffset = vtxDst.stream().offsetOf();
-      vtxDst.stream().reserve(txNum*sizeof(typename T::Transaction));
-
-      new (vtxDst.ptr()) xvector<typename T::Transaction>(reinterpret_cast<typename T::Transaction*>(dataOffset), txNum, false);
-      for (uint64_t i = 0; i < txNum; i++) {
-        auto txPtr = DynamicPtr<typename T::Transaction>(vtxDst.stream(), dataOffset + sizeof(typename T::Transaction)*i);
-        txPtr->SerializedDataOffset = static_cast<uint32_t>(src.offsetOf() - blockDataOffset);
-        BTC::unpack(src, txPtr);
-        txPtr->SerializedDataSize = static_cast<uint32_t>(src.offsetOf() - txPtr->SerializedDataOffset);
-      }
-    }
-  }
-
-  static inline void unpackFinalize(DynamicPtr<BTC::Proto::BlockTy<T>> dst) {
-    BTC::unpackFinalize(DynamicPtr<decltype (dst->header)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, header)));
-    BTC::unpackFinalize(DynamicPtr<decltype (dst->vtx)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, vtx)));
+  static inline void unpack2(xmstream &src, Proto::BlockTy<T> *data, uint8_t **extraData) {
+    BTC::Io<decltype(data->header)>::unpack2(src, &data->header, extraData);
+    BTC::Io<decltype(data->vtx)>::unpack2(src, &data->vtx, extraData);
   }
 };
 
@@ -341,19 +313,22 @@ template<typename T> struct Io<Proto::BlockTy<T>> {
 template<> struct Io<Proto::NetworkAddress> {
   static void serialize(xmstream &dst, const BTC::Proto::NetworkAddress &data);
   static void unserialize(xmstream &src, BTC::Proto::NetworkAddress &data);
-  static void unpack(xmstream &src, DynamicPtr<BTC::Proto::NetworkAddress> dst) { unserialize(src, *dst.ptr()); }
-  static void unpackFinalize(DynamicPtr<BTC::Proto::NetworkAddress>) {}
 };
 
 template<> struct Io<Proto::NetworkAddressWithoutTime> {
   static void serialize(xmstream &dst, const BTC::Proto::NetworkAddressWithoutTime &data);
   static void unserialize(xmstream &src, BTC::Proto::NetworkAddressWithoutTime &data);
-  static void unpack(xmstream &src, DynamicPtr<BTC::Proto::NetworkAddressWithoutTime> dst) { unserialize(src, *dst.ptr()); }
-  static void unpackFinalize(DynamicPtr<BTC::Proto::NetworkAddressWithoutTime>) {}
 };
 
 // Block header network message
 template<typename T> struct Io<Proto::BlockHeaderNetTy<T>> {
+  static inline size_t getUnpackedExtraSize(xmstream &src) {
+    uint64_t txNum;
+    size_t result = Io<decltype(Proto::BlockHeaderNetTy<T>::header)>::getUnpackedExtraSize(src);
+    BTC::unserializeVarSize(src, txNum);
+    return result;
+  }
+
   static inline void serialize(xmstream &dst, const BTC::Proto::BlockHeaderNetTy<T> &data) {
     BTC::serialize(dst, data.header);
     BTC::serializeVarSize(dst, 0);
@@ -365,14 +340,10 @@ template<typename T> struct Io<Proto::BlockHeaderNetTy<T>> {
     BTC::unserializeVarSize(src, txNum);
   }
 
-  static inline void unpack(xmstream &src, DynamicPtr<BTC::Proto::BlockHeaderNetTy<T>> dst) {
+  static inline void unpack2(xmstream &src, Proto::BlockHeaderNetTy<T> *data, uint8_t **extraData) {
     uint64_t txNum;
-    BTC::unpack(src, DynamicPtr<decltype (dst->header)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, header)));
+    Io<decltype(Proto::BlockHeaderNetTy<T>::header)>::unpack2(src, &data->header, extraData);
     BTC::unserializeVarSize(src, txNum);
-  }
-
-  static inline void unpackFinalize(DynamicPtr<BTC::Proto::BlockHeaderNetTy<T>> dst) {
-    BTC::unpackFinalize(DynamicPtr<decltype (dst->header)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, header)));
   }
 };
 
@@ -390,6 +361,10 @@ template<> struct Io<Proto::MessageVersion> {
 
 // Headers
 template<typename T> struct Io<Proto::MessageHeadersTy<T>> {
+  static inline size_t getUnpackedExtraSize(xmstream &src) {
+    return Io<decltype(Proto::MessageHeadersTy<T>::headers)>::getUnpackedExtraSize(src);
+  }
+
   static inline void serialize(xmstream &dst, const BTC::Proto::MessageHeadersTy<T> &data) {
     BTC::serialize(dst, data.headers);
   }
@@ -398,12 +373,8 @@ template<typename T> struct Io<Proto::MessageHeadersTy<T>> {
     BTC::unserialize(src, data.headers);
   }
 
-  static inline void unpack(xmstream &src, DynamicPtr<BTC::Proto::MessageHeadersTy<T>> dst) {
-    BTC::unpack(src, DynamicPtr<decltype (dst->headers)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, header)));
-  }
-
-  static inline void unpackFinalize(DynamicPtr<BTC::Proto::MessageHeadersTy<T>> dst) {
-    BTC::unpackFinalize(DynamicPtr<decltype (dst->headers)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::BlockTy<T>, header)));
+  static inline void unpack2(xmstream &src, Proto::MessageHeadersTy<T> *data, uint8_t **extraData) {
+    Io<decltype(Proto::MessageHeadersTy<T>::headers)>::unpack2(src, &data->headers, extraData);
   }
 };
 

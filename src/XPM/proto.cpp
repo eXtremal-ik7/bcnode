@@ -27,6 +27,19 @@ size_t Io<mpz_class>::getSerializedSize(const mpz_class &data)
   return size;
 }
 
+size_t Io<mpz_class>::getUnpackedExtraSize(xmstream &src)
+{
+  uint64_t size;
+  unserializeVarSize(src, size);
+  if (src.seek<uint8_t>(size)) {
+    size_t alignedSize = size % sizeof(mp_limb_t) ? size + (sizeof(mp_limb_t) - size % sizeof(mp_limb_t)) : size;
+    size_t limbsNum = alignedSize / sizeof(mp_limb_t);
+    return limbsNum * sizeof(mp_limb_t);
+  } else {
+    return 0;
+  }
+}
+
 void Io<mpz_class>::serialize(xmstream &dst, const mpz_class &data)
 {
   constexpr mp_limb_t one = 1;
@@ -52,38 +65,32 @@ void Io<mpz_class>::unserialize(xmstream &src, mpz_class &data)
     mpz_import(data.get_mpz_t(), size, -1, 1, -1, 0, p);
 }
 
-void Io<mpz_class>::unpack(xmstream &src, DynamicPtr<mpz_class> dst)
+void Io<mpz_class>::unpack2(xmstream &src, mpz_class *data, uint8_t **extraData)
 {
   uint64_t size;
   unserializeVarSize(src, size);
   if (const uint8_t *p = src.seek<uint8_t>(size)) {
     size_t alignedSize = size % sizeof(mp_limb_t) ? size + (sizeof(mp_limb_t) - size % sizeof(mp_limb_t)) : size;
     size_t limbsNum = alignedSize / sizeof(mp_limb_t);
-    size_t dataOffset = dst.stream().offsetOf();
+    mp_limb_t *limbs = reinterpret_cast<mp_limb_t*>(*extraData);
+    (*extraData) += limbsNum*sizeof(mp_limb_t);
 
-    dst.stream().reserve<mp_limb_t>(limbsNum);
-
-    mpz_class *mpz = dst.ptr();
-    mp_limb_t *data = reinterpret_cast<mp_limb_t*>(dst.stream().data<uint8_t>() + dataOffset);
-    mpz->get_mpz_t()->_mp_d = data;
-    mpz->get_mpz_t()->_mp_size = static_cast<int>(limbsNum);
-    mpz->get_mpz_t()->_mp_alloc = static_cast<int>(limbsNum);
-    mpz_import(mpz->get_mpz_t(), size, -1, 1, -1, 0, p);
-
-    // Change address to stream offset
-    mpz->get_mpz_t()->_mp_d = reinterpret_cast<mp_limb_t*>(dataOffset);
+    data->get_mpz_t()->_mp_d = limbs;
+    data->get_mpz_t()->_mp_size = static_cast<int>(limbsNum);
+    data->get_mpz_t()->_mp_alloc = static_cast<int>(limbsNum);
+    mpz_import(data->get_mpz_t(), size, -1, 1, -1, 0, p);
   }
-}
-
-void Io<mpz_class>::unpackFinalize(DynamicPtr<mpz_class> dst)
-{
-  mpz_class *mpz = dst.ptr();
-  mpz->get_mpz_t()->_mp_d = reinterpret_cast<mp_limb_t*>(dst.stream().data<uint8_t>() + reinterpret_cast<size_t>(mpz->get_mpz_t()->_mp_d));
 }
 
 size_t Io<XPM::Proto::BlockHeader>::getSerializedSize(const XPM::Proto::BlockHeader &data)
 {
   return 80 + BTC::getSerializedSize(data.bnPrimeChainMultiplier);
+}
+
+size_t Io<XPM::Proto::BlockHeader>::getUnpackedExtraSize(xmstream &src)
+{
+  src.seek(80);
+  return Io<mpz_class>::getUnpackedExtraSize(src);
 }
 
 void Io<XPM::Proto::BlockHeader>::serialize(xmstream &dst, const XPM::Proto::BlockHeader &data)
@@ -108,25 +115,15 @@ void Io<XPM::Proto::BlockHeader>::unserialize(xmstream &src, XPM::Proto::BlockHe
   BTC::unserialize(src, data.bnPrimeChainMultiplier);
 }
 
-void Io<XPM::Proto::BlockHeader>::unpack(xmstream &src, DynamicPtr<XPM::Proto::BlockHeader> dst)
+void Io<XPM::Proto::BlockHeader>::unpack2(xmstream &src, XPM::Proto::BlockHeader *data, uint8_t **extraData)
 {
-  XPM::Proto::BlockHeader *ptr = dst.ptr();
-
-  // TODO: memcpy on little-endian
-  BTC::unserialize(src, ptr->nVersion);
-  BTC::unserialize(src, ptr->hashPrevBlock);
-  BTC::unserialize(src, ptr->hashMerkleRoot);
-  BTC::unserialize(src, ptr->nTime);
-  BTC::unserialize(src, ptr->nBits);
-  BTC::unserialize(src, ptr->nNonce);
-
-  // unserialize prime chain multiplier
-  BTC::unpack(src, DynamicPtr<mpz_class>(dst.stream(), dst.offset()+offsetof(XPM::Proto::BlockHeader, bnPrimeChainMultiplier)));
-}
-
-void Io<XPM::Proto::BlockHeader>::unpackFinalize(DynamicPtr<XPM::Proto::BlockHeader> dst)
-{
-  BTC::unpackFinalize(DynamicPtr<mpz_class>(dst.stream(), dst.offset()+offsetof(XPM::Proto::BlockHeader, bnPrimeChainMultiplier)));
+  BTC::unserialize(src, data->nVersion);
+  BTC::unserialize(src, data->hashPrevBlock);
+  BTC::unserialize(src, data->hashMerkleRoot);
+  BTC::unserialize(src, data->nTime);
+  BTC::unserialize(src, data->nBits);
+  BTC::unserialize(src, data->nNonce);
+  Io<mpz_class>::unpack2(src, &data->bnPrimeChainMultiplier, extraData);
 }
 
 void Io<XPM::Proto::MessageVersion>::serialize(xmstream &stream, const XPM::Proto::MessageVersion &data)

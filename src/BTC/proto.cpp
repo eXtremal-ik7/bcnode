@@ -106,6 +106,16 @@ size_t Io<Proto::TxIn>::getSerializedSize(const BTC::Proto::TxIn &data)
   return size;
 }
 
+size_t Io<Proto::TxIn>::getUnpackedExtraSize(xmstream &src)
+{
+  size_t scriptSigSize = 0;
+  src.seek(sizeof(Proto::TxIn::previousOutputHash) +
+           sizeof(Proto::TxIn::previousOutputIndex));
+  scriptSigSize = Io<decltype (Proto::TxIn::scriptSig)>::getUnpackedExtraSize(src);
+  src.seek(sizeof(Proto::TxIn::sequence));
+  return scriptSigSize;
+}
+
 void Io<Proto::TxIn>::serialize(xmstream &stream, const BTC::Proto::TxIn &data)
 {
   BTC::serialize(stream, data.previousOutputHash);
@@ -122,26 +132,13 @@ void Io<Proto::TxIn>::unserialize(xmstream &stream, BTC::Proto::TxIn &data)
   BTC::unserialize(stream, data.sequence);
 }
 
-void Io<Proto::TxIn>::unpack(xmstream &src, DynamicPtr<BTC::Proto::TxIn> dst)
+void Io<Proto::TxIn>::unpack2(xmstream &src, Proto::TxIn *data, uint8_t **extraData)
 {
-  {
-    BTC::Proto::TxIn *ptr = dst.ptr();
-    BTC::unserialize(src, ptr->previousOutputHash);
-    BTC::unserialize(src, ptr->previousOutputIndex);
-  }
-
-  BTC::unpack(src, DynamicPtr<decltype (dst->scriptSig)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxIn, scriptSig)));
-  {
-    BTC::Proto::TxIn *ptr = dst.ptr();
-    new (&ptr->witnessStack) decltype(ptr->witnessStack)();
-    BTC::unserialize(src, ptr->sequence);
-  }
-}
-
-void Io<Proto::TxIn>::unpackFinalize(DynamicPtr<BTC::Proto::TxIn> dst)
-{
-  BTC::unpackFinalize(DynamicPtr<decltype (dst->scriptSig)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxIn, scriptSig)));
-  BTC::unpackFinalize(DynamicPtr<decltype (dst->witnessStack)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxIn, witnessStack)));
+  new (&data->witnessStack) decltype(data->witnessStack)();
+  BTC::unserialize(src, data->previousOutputHash);
+  BTC::unserialize(src, data->previousOutputIndex);
+  Io<decltype (data->scriptSig)>::unpack2(src, &data->scriptSig, extraData);
+  BTC::unserialize(src, data->sequence);
 }
 
 size_t Io<Proto::TxOut>::getSerializedSize(const BTC::Proto::TxOut &data)
@@ -150,6 +147,12 @@ size_t Io<Proto::TxOut>::getSerializedSize(const BTC::Proto::TxOut &data)
   size += BTC::getSerializedSize(data.value);
   size += BTC::getSerializedSize(data.pkScript);
   return size;
+}
+
+size_t Io<Proto::TxOut>::getUnpackedExtraSize(xmstream &src)
+{
+  src.seek(sizeof(Proto::TxOut::value));
+  return Io<decltype (Proto::TxOut::pkScript)>::getUnpackedExtraSize(src);
 }
 
 void Io<Proto::TxOut>::serialize(xmstream &src, const BTC::Proto::TxOut &data)
@@ -164,15 +167,10 @@ void Io<Proto::TxOut>::unserialize(xmstream &dst, BTC::Proto::TxOut &data)
   BTC::unserialize(dst, data.pkScript);
 }
 
-void Io<Proto::TxOut>::unpack(xmstream &src, DynamicPtr<BTC::Proto::TxOut> dst)
+void Io<Proto::TxOut>::unpack2(xmstream &src, Proto::TxOut *data, uint8_t **extraData)
 {
-  BTC::unserialize(src, dst->value);
-  BTC::unpack(src, DynamicPtr<decltype (dst->pkScript)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxOut, pkScript)));
-}
-
-void Io<Proto::TxOut>::unpackFinalize(DynamicPtr<BTC::Proto::TxOut> dst)
-{
-  BTC::unpackFinalize(DynamicPtr<decltype (dst->pkScript)>(dst.stream(), dst.offset() + offsetof(BTC::Proto::TxOut, pkScript)));
+  BTC::unserialize(src, data->value);
+  Io<decltype (Proto::TxOut::pkScript)>::unpack2(src, &data->pkScript, extraData);
 }
 
 size_t Io<Proto::Transaction>::getSerializedSize(const BTC::Proto::Transaction &data, bool serializeWitness)
@@ -197,6 +195,45 @@ size_t Io<Proto::Transaction>::getSerializedSize(const BTC::Proto::Transaction &
 
   size += BTC::getSerializedSize(data.lockTime);
   return size;
+}
+
+size_t Io<Proto::Transaction>::getUnpackedExtraSize(xmstream &src)
+{
+  size_t result = 0;
+  uint8_t flags = 0;
+  src.seek(sizeof(Proto::Transaction::version));
+
+  uint64_t txInCount = 0;
+  result += Io<decltype (Proto::Transaction::txIn)>::getUnpackedExtraSize(src, &txInCount);
+  if (txInCount == 0) {
+    BTC::unserialize(src, flags);
+    if (flags != 0) {
+      result += Io<decltype (Proto::Transaction::txIn)>::getUnpackedExtraSize(src, &txInCount);
+      result += Io<decltype (Proto::Transaction::txOut)>::getUnpackedExtraSize(src);
+    }
+  } else {
+    result += Io<decltype (Proto::Transaction::txOut)>::getUnpackedExtraSize(src);
+  }
+
+  if (flags & 1) {
+    flags ^= 1;
+    bool hasWitness = false;
+    for (size_t i = 0; i < txInCount; i++) {
+      size_t witnessCount = 0;
+      result += Io<decltype (Proto::TxIn::witnessStack)>::getUnpackedExtraSize(src, &witnessCount);
+      if (witnessCount != 0)
+        hasWitness = true;
+    }
+
+    if (!hasWitness)
+      src.seekEnd(0, true);
+  }
+
+  if (flags)
+    src.seekEnd(0, true);
+
+  src.seek(sizeof(Proto::Transaction::lockTime));
+  return result;
 }
 
 void Io<Proto::Transaction>::serialize(xmstream &dst, const BTC::Proto::Transaction &data, bool serializeWitness)
@@ -255,34 +292,28 @@ void Io<Proto::Transaction>::unserialize(xmstream &src, BTC::Proto::Transaction 
   BTC::unserialize(src, data.lockTime);
 }
 
-void Io<Proto::Transaction>::unpack(xmstream &src, DynamicPtr<BTC::Proto::Transaction> dst)
+void Io<Proto::Transaction>::unpack2(xmstream &src, Proto::Transaction *data, uint8_t **extraData)
 {
   uint8_t flags = 0;
-
-  BTC::unserialize(src, dst->version);
-  BTC::unpack(src, DynamicPtr<decltype(dst->txIn)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txIn)));
-
-  if (dst->txIn.empty()) {
+  BTC::unserialize(src, data->version);
+  Io<decltype (data->txIn)>::unpack2(src, &data->txIn, extraData);
+  if (data->txIn.empty()) {
     BTC::unserialize(src, flags);
-    if (flags) {
-      BTC::unpack(src, DynamicPtr<decltype(dst->txIn)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txIn)));
-      BTC::unpack(src, DynamicPtr<decltype(dst->txOut)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txOut)));
+    if (flags != 0) {
+      Io<decltype (data->txIn)>::unpack2(src, &data->txIn, extraData);
+      Io<decltype (data->txOut)>::unpack2(src, &data->txOut, extraData);
     }
   } else {
-    BTC::unpack(src, DynamicPtr<decltype(dst->txOut)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txOut)));
+    Io<decltype (data->txOut)>::unpack2(src, &data->txOut, extraData);
   }
 
   if (flags & 1) {
     flags ^= 1;
 
-    bool hasWitness = false;
-    for (size_t i = 0, ie = dst->txIn.size(); i < ie; i++) {
-      size_t txInDataOffset = reinterpret_cast<size_t>(dst->txIn.data());
-      size_t txInOffset = txInDataOffset + sizeof(BTC::Proto::TxIn)*i;
-      hasWitness |= BTC::Proto::TxIn::unpackWitnessStack(src, DynamicPtr<Proto::TxIn>(dst.stream(), txInOffset));
-    }
+    for (size_t i = 0; i < data->txIn.size(); i++)
+      Io<decltype (data->txIn[i].witnessStack)>::unpack2(src, &data->txIn[i].witnessStack, extraData);
 
-    if (!hasWitness) {
+    if (!data->hasWitness()) {
       src.seekEnd(0, true);
       return;
     }
@@ -293,13 +324,7 @@ void Io<Proto::Transaction>::unpack(xmstream &src, DynamicPtr<BTC::Proto::Transa
     return;
   }
 
-  BTC::unserialize(src, dst->lockTime);
-}
-
-void Io<Proto::Transaction>::unpackFinalize(DynamicPtr<BTC::Proto::Transaction> dst)
-{
-  BTC::unpackFinalize(DynamicPtr<decltype(dst->txIn)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txIn)));
-  BTC::unpackFinalize(DynamicPtr<decltype(dst->txOut)>(dst.stream(), dst.offset()+ offsetof(BTC::Proto::Transaction, txOut)));
+  BTC::unserialize(src, data->lockTime);
 }
 
 void Io<Proto::InventoryVector>::serialize(xmstream &dst, const BTC::Proto::InventoryVector &data)

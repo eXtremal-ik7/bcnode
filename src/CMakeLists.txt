@@ -10,6 +10,7 @@ project(bcnode)
 set (CMAKE_CXX_STANDARD 17)
 option(SANITIZER_ENABLED "Build with address sanitizer" OFF)
 option(PROFILE_ENABLED "Build for profiling" OFF)
+option(BCNODE_DOGE "Build bcnode for dogecoin" OFF)
 
 if (SANITIZER_ENABLED)
   set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
@@ -265,3 +266,31 @@ target_link_libraries(bcnode-xpm ${COMMON_LIBRARIES})
 target_include_directories(bcterminal-xpm PUBLIC ${CMAKE_BINARY_DIR}/XPM)
 target_compile_definitions(bcterminal-xpm PUBLIC -DBC=XPM)
 target_link_libraries(bcterminal-xpm ${COMMON_LIBRARIES})
+
+# DOGE
+if (BCNODE_DOGE)
+  prepare_bc_env(DOGE)
+
+  add_executable(bcnode-doge
+    ${BASE_SOURCES}
+    ${BTC_SOURCES}
+    LTC/ltc.cpp
+    DOGE/doge.cpp
+  )
+
+  add_executable(bcterminal-doge
+    bcterminal.cpp
+    LTC/ltc.cpp
+    DOGE/doge.cpp
+    BTC/proto.cpp
+    common/merkleTree.cpp
+  )
+
+  target_include_directories(bcnode-doge PUBLIC ${CMAKE_BINARY_DIR}/DOGE)
+  target_compile_definitions(bcnode-doge PUBLIC -DBC=DOGE)
+  target_link_libraries(bcnode-doge ${COMMON_LIBRARIES} bcnodecrypto)
+
+  target_include_directories(bcterminal-doge PUBLIC ${CMAKE_BINARY_DIR}/DOGE)
+  target_compile_definitions(bcterminal-doge PUBLIC -DBC=DOGE)
+  target_link_libraries(bcterminal-doge ${COMMON_LIBRARIES} bcnodecrypto)
+endif()

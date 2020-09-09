@@ -409,16 +409,15 @@ bool loadBlocks(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainPa
   BC::Common::checkConsensusInitialize(ccCtx);
 
   for (size_t i = 0; i < blocksNum; i++) {
+    size_t unpackedSize = 0;
     xmstream stream(data + position[i].offset + 8, position[i].size);
-    xmstream unpacked(stream.sizeOf()*2);
-    BC::unpack<BC::Proto::Block>(stream, unpacked);
-    if (stream.eof() || stream.remaining() != 0) {
+    BC::Proto::Block *block = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
+    if (!block || stream.remaining() != 0) {
       LOG_F(ERROR, "Can't parse block file %s (invalid block structure)", path);
       return false;
     }
 
-    size_t unpackedMemorySize = unpacked.capacity();
-    auto object = storage.cache().add(nullptr, stream.sizeOf(), 0, unpacked.capture(), unpackedMemorySize);
+    auto object = storage.cache().add(nullptr, stream.sizeOf(), 0, block, unpackedSize);
     if (!AddBlock(blockIndex, chainParams, storage, object.get(), ccCtx, nullptr, fileNo, position[i].offset)) {
       LOG_F(ERROR, "Can't parse block file %s (invalid block structure)", path);
       return false;

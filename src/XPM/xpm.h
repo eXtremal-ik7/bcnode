@@ -21,9 +21,8 @@ namespace XPM {
   using BTC::Io;
   using BTC::serialize;
   using BTC::unserialize;
-  using BTC::unpack;
-  using BTC::unpackFinalize;
   using BTC::unserializeAndCheck;
+  using BTC::unpack2;
 }
 
 namespace XPM {

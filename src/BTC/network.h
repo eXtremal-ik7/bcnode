@@ -87,7 +87,11 @@ private:
     size_t Size;
     size_t MemorySize;
     std::chrono::time_point<std::chrono::steady_clock> Time;
-    InternalMessage(Peer *peer) : Source(peer) {}
+    InternalMessage() : Data(nullptr) {}
+    InternalMessage(Peer *peer, MessageTy type, void *data, size_t size, size_t memorySize) : Source(peer), Type(type), Data(data), Size(size), MemorySize(memorySize) {}
+    ~InternalMessage() {
+      operator delete(Data);
+    }
   };
 
   static constexpr const char *messageName(MessageTy type);
@@ -292,20 +296,14 @@ private:
   }
 
   template<typename Msg> inline bool pushInternalMessage(const char *cmd, MessageTy type) {
-    uint8_t *memory = static_cast<uint8_t*>(operator new(sizeof(InternalMessage) + sizeof(Msg)));
-    InternalMessage *internalMsg = reinterpret_cast<InternalMessage*>(memory);
-    Msg *msg = reinterpret_cast<Msg*>(memory + sizeof(InternalMessage));
-    new (internalMsg) InternalMessage(this);
-    new (msg) Msg;
+    Msg *msg = static_cast<Msg*>(operator new(sizeof(Msg)));
     if (unserializeAndCheck(ReceiveStream, *msg)) {
       aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
-      internalMsg->Type = type;
-      internalMsg->Data = msg;
-      MessageQueue_.push(internalMsg);
+      MessageQueue_.push(new InternalMessage(this, type, msg, sizeof(Msg), 0));
       return true;
     } else {
       LOG_F(INFO, "Can't unserialize message %s", cmd);
-      operator delete(memory);
+      operator delete(msg);
       return false;
     }
   }

@@ -89,18 +89,18 @@ public:
 namespace BTC {
 template<> struct Io<mpz_class> {
   static size_t getSerializedSize(const mpz_class &data);
+  static size_t getUnpackedExtraSize(xmstream &src);
   static void serialize(xmstream &dst, const mpz_class &data);
   static void unserialize(xmstream &src, mpz_class &data);
-  static void unpack(xmstream &src, DynamicPtr<mpz_class> dst);
-  static void unpackFinalize(DynamicPtr<mpz_class> dst);
+  static void unpack2(xmstream &src, mpz_class *data, uint8_t **extraData);
 };
 
 template<> struct Io<XPM::Proto::BlockHeader> {
   static size_t getSerializedSize(const XPM::Proto::BlockHeader &data);
+  static size_t getUnpackedExtraSize(xmstream &src);
   static void serialize(xmstream &dst, const XPM::Proto::BlockHeader &data);
   static void unserialize(xmstream &src, XPM::Proto::BlockHeader &data);
-  static void unpack(xmstream &src, DynamicPtr<XPM::Proto::BlockHeader> dst);
-  static void unpackFinalize(DynamicPtr<XPM::Proto::BlockHeader> dst);
+  static void unpack2(xmstream &src, XPM::Proto::BlockHeader *data, uint8_t **extraData);
 };
 
 // XPM does not have 'relay' field in version message

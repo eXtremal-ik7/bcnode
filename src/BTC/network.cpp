@@ -264,51 +264,44 @@ void Peer::onMessage(AsyncOpStatus status)
 
       if (startHeavyOperation(&heavyOperation, &heavyOperationStarted)) {
         // Unpacking block
+        size_t unpackedSize = 0;
         xmstream serialized(data, size);
-        xmstream unpacked(size*2);
-        result = BC::unpack<BC::Proto::Block>(serialized, unpacked);
-        if (result) {
-          size_t unpackedMemorySize = unpacked.capacity();
-          intrusive_ptr<SerializedDataObject> object = Storage_.cache().add(data, size, msize, unpacked.capture(), unpackedMemorySize);
+        BC::Proto::Block *unpacked = BC::unpack2<BC::Proto::Block>(serialized, &unpackedSize);
+        bool hasRemainingData = serialized.remaining();
+        if (unpacked && !hasRemainingData) {
+          intrusive_ptr<SerializedDataObject> object = Storage_.cache().add(data, size, msize, unpacked, unpackedSize);
           onBlock(object.get(), std::chrono::steady_clock::now());
         } else {
           LOG_F(ERROR, "Peer %s: can't unserialize block", Name.c_str());
           operator delete(data);
         }
       } else {
-        InternalMessage *internalMsg = static_cast<InternalMessage*>(operator new(sizeof(InternalMessage)));
-        new (internalMsg) InternalMessage(this);
-        internalMsg->Data = data;
-        internalMsg->Size = size;
-        internalMsg->MemorySize = msize;
-        internalMsg->Type = MessageTy::block;
-        internalMsg->Time = std::chrono::steady_clock::now();
-        MessageQueue_.push(internalMsg);
+        MessageQueue_.push(new InternalMessage(this, MessageTy::block, data, size, msize));
       }
 
       break;
     }
 
     case MessageTy::headers : {
-      xmstream unpacked(ReceiveStream.sizeOf()*2);
       if (startHeavyOperation(&heavyOperation, &heavyOperationStarted)) {
-        result = BC::unpack<BC::Proto::MessageHeaders>(ReceiveStream, unpacked);
+        size_t unpackedSize = 0;
+        BC::Proto::MessageHeaders *unpacked = BC::unpack2<BC::Proto::MessageHeaders>(ReceiveStream, &unpackedSize);
+        bool hasRemainingData = ReceiveStream.remaining();
         aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
-
-        if (result) {
-          onHeaders(*unpacked.data<BC::Proto::MessageHeaders>());
+        if (unpacked && !hasRemainingData) {
+          onHeaders(*unpacked);
         } else {
           LOG_F(ERROR, "Peer %s: can't unserialize headers message", Name.c_str());
         }
+
+        operator delete(unpacked);
       } else {
-        unpacked.reserve<InternalMessage>(1);
-        result = BC::unpack<BC::Proto::MessageHeaders>(ReceiveStream, unpacked);
+        size_t unpackedSize = 0;
+        BC::Proto::MessageHeaders *unpacked = BC::unpack2<BC::Proto::MessageHeaders>(ReceiveStream, &unpackedSize);
+        bool hasRemainingData = ReceiveStream.remaining();
         aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
-        if (result) {
-          InternalMessage *internalMsg = new (unpacked.data<InternalMessage>()) InternalMessage(this);
-          internalMsg->Type = MessageTy::headers;
-          internalMsg->Data = unpacked.data<uint8_t>() + sizeof(InternalMessage);
-          MessageQueue_.push(static_cast<InternalMessage*>(unpacked.capture()));
+        if (unpacked && !hasRemainingData) {
+          MessageQueue_.push(new InternalMessage(this, MessageTy::headers, unpacked, unpackedSize, 0));
         } else {
           LOG_F(ERROR, "Peer %s: can't unserialize headers message", Name.c_str());
         }
@@ -335,37 +328,34 @@ void Peer::processMessageQueue()
   InternalMessage *internalMsg;
   while (MessageQueue_.try_pop(internalMsg)) {
     Peer *peer = internalMsg->Source.get();
-    void *data = reinterpret_cast<uint8_t*>(internalMsg) + sizeof(InternalMessage);
-
     switch (internalMsg->Type) {
       // CPU bound operation
       case MessageTy::getblocks :
-        peer->onGetBlocks(*static_cast<BC::Proto::MessageGetBlocks*>(data));
+        peer->onGetBlocks(*static_cast<BC::Proto::MessageGetBlocks*>(internalMsg->Data));
         break;
       case MessageTy::getdata :
-        peer->onGetData(*static_cast<BC::Proto::MessageGetData*>(data));
+        peer->onGetData(*static_cast<BC::Proto::MessageGetData*>(internalMsg->Data));
         break;
 
       // Special handlers
       case MessageTy::block : {
         // Unpacking block
         xmstream serialized(internalMsg->Data, internalMsg->Size);
-        xmstream unpacked(internalMsg->Size*2);
-        bool result = BC::unpack<BC::Proto::Block>(serialized, unpacked);
-        if (result) {
-          size_t unpackedMemorySize = unpacked.capacity();
-          intrusive_ptr<SerializedDataObject> object = peer->Storage_.cache().add(internalMsg->Data, internalMsg->Size, internalMsg->MemorySize, unpacked.capture(), unpackedMemorySize);
+        size_t unpackedSize = 0;
+        BC::Proto::Block *unpacked = BC::unpack2<BC::Proto::Block>(serialized, &unpackedSize);
+        if (unpacked && !serialized.remaining()) {
+          intrusive_ptr<SerializedDataObject> object = peer->Storage_.cache().add(internalMsg->Data, internalMsg->Size, internalMsg->MemorySize, unpacked, unpackedSize);
+          internalMsg->Data = nullptr;
           peer->onBlock(object.get(), internalMsg->Time);
         } else {
           LOG_F(ERROR, "Peer %s: can't unserialize block", peer->Name.c_str());
           peer->ParentNode->RemovePeer(peer);
-          operator delete(internalMsg->Data);
         }
 
         break;
       }
       case MessageTy::headers :
-        peer->onHeaders(*static_cast<BC::Proto::MessageHeaders*>(data));
+        peer->onHeaders(*static_cast<BC::Proto::MessageHeaders*>(internalMsg->Data));
         break;
 
       default :
@@ -373,8 +363,7 @@ void Peer::processMessageQueue()
         break;
     }
 
-    internalMsg->~InternalMessage();
-    operator delete(internalMsg);
+    delete internalMsg;
   }
 }
 

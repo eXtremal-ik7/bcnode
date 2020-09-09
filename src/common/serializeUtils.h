@@ -8,27 +8,6 @@
 #include "p2putils/xmstream.h"
 #include "xvector.h"
 
-template<typename T> class DynamicPtr;
-
-template<typename T>
-T *staticPtr(xmstream &stream, size_t offset) {
-  return reinterpret_cast<T*>(stream.data<uint8_t>() + offset);
-}
-
-template<typename T>
-class DynamicPtr {
-private:
-  xmstream &Stream_;
-  size_t Offset_;
-
-public:
-  DynamicPtr(xmstream &stream, size_t offset) : Stream_(stream), Offset_(offset) {}
-  xmstream &stream() { return Stream_; }
-  size_t offset() { return Offset_; }
-  T *ptr() { return staticPtr<T>(Stream_, Offset_); }
-  T *operator->() { return ptr(); }
-};
-
 template<typename T>
 static inline void xvectorFromStream(xmstream &&src, xvector<T> &dst) {
   size_t size = src.sizeOf();

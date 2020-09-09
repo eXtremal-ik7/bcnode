@@ -7,22 +7,43 @@
 #include "p2putils/xmstream.h"
 #include <string>
 
+static inline size_t aligned(size_t size, size_t align) { return (size + align - 1) & ~(align-1); }
+static constexpr size_t UnpackAlignment = 8;
+
 namespace BTC {
 
 template<typename T, typename Enable=void>
 struct Io {
   static inline size_t getSerializedSize(const T &data);
+  static inline size_t getUnpackedExtraSize(xmstream &src);
   static inline void serialize(xmstream &src, const T &data);
   static inline void unserialize(xmstream &dst, T &data);
-  static inline void unpack(xmstream &src, DynamicPtr<T> dst);
-  static inline void unpackFinalize(DynamicPtr<T> dst);
+  static inline void unpack2(xmstream &src, T *data, uint8_t **extraData);
 };
 
 template<typename T> static inline size_t getSerializedSize(const T &data) { return Io<T>::getSerializedSize(data); }
 template<typename T> static inline void serialize(xmstream &src, const T &data) { Io<T>::serialize(src, data); }
 template<typename T> static inline void unserialize(xmstream &dst, T &data) { Io<T>::unserialize(dst, data); }
-template<typename T> static inline void unpack(xmstream &src, DynamicPtr<T> dst) { Io<T>::unpack(src, dst); }
-template<typename T> static inline void unpackFinalize(DynamicPtr<T> dst) { Io<T>::unpackFinalize(dst); }
+template<typename T> static inline T *unpack2(xmstream &src, size_t *size) {
+  size_t dataOnlySize = aligned(sizeof(T), UnpackAlignment);
+  {
+    xmstream stream(src.ptr<uint8_t>(), src.remaining());
+    *size = dataOnlySize + Io<T>::getUnpackedExtraSize(stream);
+    if (stream.eof())
+      return nullptr;
+  }
+
+  uint8_t *data = static_cast<uint8_t*>(operator new(*size));
+  uint8_t *extraData = data + dataOnlySize;
+  Io<T>::unpack2(src, reinterpret_cast<T*>(data), &extraData);
+  assert(extraData-data == *size && "Unpack failed");
+  if (!src.eof()) {
+    return reinterpret_cast<T*>(data);
+  } else {
+    operator delete(data);
+    return nullptr;
+  }
+}
 
 // variable size
 static inline size_t getSerializedVarSizeSize(uint64_t value)
@@ -138,6 +159,20 @@ template<typename T> struct Io<xvector<T>> {
     return size;
   }
 
+  static inline size_t getUnpackedExtraSize(xmstream &src, uint64_t *count) {
+    unserializeVarSize(src, *count);
+
+    size_t result = 0;
+    for (size_t i = 0; i < *count; i++)
+      result += Io<T>::getUnpackedExtraSize(src);
+    return *count*sizeof(T) + result;
+  }
+
+  static inline size_t getUnpackedExtraSize(xmstream &src) {
+    uint64_t size;
+    return getUnpackedExtraSize(src, &size);
+  }
+
   static inline void serialize(xmstream &dst, const xvector<T> &data) {
     serializeVarSize(dst, data.size());
     for (const auto &v: data)
@@ -157,29 +192,15 @@ template<typename T> struct Io<xvector<T>> {
       BTC::unserialize(src, data[i]);
   }
 
-  static inline void unpack(xmstream &src, DynamicPtr<xvector<T>> dst) {
+  static inline void unpack2(xmstream &src, xvector<T> *data, uint8_t **extraData) {
     uint64_t size;
     unserializeVarSize(src, size);
 
-    size_t dataOffset = dst.stream().offsetOf();
-    dst.stream().reserve(size*sizeof(T));
-
-    new (dst.ptr()) xvector<T>(reinterpret_cast<T*>(dataOffset), size, false);
-    for (uint64_t i = 0; i < size; i++)
-      BTC::unpack(src, DynamicPtr<T>(dst.stream(), dataOffset + sizeof(T)*i));
-  }
-
-  static inline void unpackFinalize(DynamicPtr<xvector<T>> dst) {
-    xvector<T> *ptr = dst.ptr();
-
-    // Change offset to absolute address for xvector data
-    size_t size = ptr->size();
-    size_t dataOffset = reinterpret_cast<size_t>(ptr->data());
-    new (ptr) xvector<T>(reinterpret_cast<T*>(dst.stream().template data<uint8_t>() + dataOffset), size);
-
-    // finalize unpacking for all vector elements
+    T *elementsData = reinterpret_cast<T*>(*extraData);
+    new (data) xvector<T>(elementsData, size);
+    (*extraData) += sizeof(T)*size;
     for (size_t i = 0; i < size; i++)
-      BTC::unpackFinalize(DynamicPtr<T>(dst.stream(), dataOffset + sizeof(T)*i));
+      BTC::Io<T>::unpack2(src, &elementsData[i], extraData);
   }
 };
 
@@ -187,6 +208,13 @@ template<typename T> struct Io<xvector<T>> {
 template<> struct Io<xvector<uint8_t>> {
   static inline size_t getSerializedSize(const xvector<uint8_t> &data) {
     return getSerializedVarSizeSize(data.size()) + data.size();
+  }
+
+  static inline size_t getUnpackedExtraSize(xmstream &src) {
+    uint64_t size;
+    unserializeVarSize(src, size);
+    src.seek(size);
+    return aligned(size, UnpackAlignment);
   }
 
   static inline void serialize(xmstream &dst, const xvector<uint8_t> &data) {
@@ -206,39 +234,17 @@ template<> struct Io<xvector<uint8_t>> {
     src.read(data.data(), size);
   }
 
-  static inline void unpack(xmstream &src, DynamicPtr<xvector<uint8_t>> dst) {
+  static inline void unpack2(xmstream &src, xvector<uint8_t> *data, uint8_t **extraData) {
     uint64_t size;
     unserializeVarSize(src, size);
 
-    size_t dataOffset = dst.stream().offsetOf();
-    void *data = src.seek(size);
-    if (data)
-      dst.stream().write(data, size);
-
-    new (dst.ptr()) xvector<uint8_t>(reinterpret_cast<uint8_t*>(dataOffset), size);
-  }
-
-  static inline void unpackFinalize(DynamicPtr<xvector<uint8_t>> dst) {
-    xvector<uint8_t> *ptr = dst.ptr();
-
-    // Change offset to absolute address for xvector data
-    size_t size = ptr->size();
-    size_t dataOffset = reinterpret_cast<size_t>(ptr->data());
-    new (ptr) xvector<uint8_t>(dst.stream().data<uint8_t>() + dataOffset, size);
+    new (data) xvector<uint8_t>(*extraData, size);
+    void *srcData = src.seek(size);
+    if (srcData)
+      memcpy(*extraData, srcData, size);
+    (*extraData) += aligned(size, UnpackAlignment);
   }
 };
-
-template<typename T>
-static inline bool unpack(xmstream &src, xmstream &dst) {
-  size_t offset = dst.offsetOf();
-  dst.reserve(sizeof(T));
-  DynamicPtr<T> ptr(dst, offset);
-  BTC::Io<T>::unpack(src, ptr);
-  if (src.eof())
-    return false;
-  BTC::Io<T>::unpackFinalize(ptr);
-  return true;
-}
 
 // unserialize & check
 template<typename T>
