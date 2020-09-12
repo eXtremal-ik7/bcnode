@@ -7,8 +7,8 @@
 
 #include "BC/bc.h"
 #include <common/combiner.h>
-#include <common/spmc_unbounded_queue.h>
 #include <common/intrusive_ptr.h>
+#include <tbb/concurrent_queue.h>
 #include <memory>
 #include <unordered_map>
 
@@ -32,8 +32,7 @@ public:
   struct TaskHP {
   public:
     enum Type {
-      Enqueue = 0,
-      ProcessStalledBlocks
+      ProcessStalledBlocks = 0
     };
 
   public:
@@ -65,8 +64,8 @@ private:
   bool DownloadingFinished_ = false;
   BC::Common::BlockIndex *LastKnownIndex_ = nullptr;
   std::unordered_map<BC::Common::BlockIndex*, std::vector<BC::Common::BlockIndex*>> EnqueuedTasks_;
-  spmc_unbounded_queue<BC::Common::BlockIndex*> DownloadQueue_;
-  spmc_unbounded_queue<BC::Common::BlockIndex*> HighPriorityDownloadQueue_;
+  tbb::concurrent_queue<BC::Common::BlockIndex*> DownloadQueue_;
+  tbb::concurrent_queue<BC::Common::BlockIndex*> HighPriorityDownloadQueue_;
   std::unique_ptr<BC::Common::BlockIndex*[]> LastDequeued_;
 
 private:
@@ -76,8 +75,6 @@ private:
 public:
   BlockSource(unsigned threadsNum) :
     ThreadsNum_(threadsNum),
-    DownloadQueue_(65536),
-    HighPriorityDownloadQueue_(4096),
     LastDequeued_(new BC::Common::BlockIndex* [threadsNum]) {
     std::fill(LastDequeued_.get(), LastDequeued_.get() + threadsNum, nullptr);
   }

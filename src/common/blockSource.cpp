@@ -6,17 +6,6 @@
 #include "blockSource.h"
 #include "common/thread.h"
 
-typedef BC::Common::BlockIndex* BlockIndexPtr;
-
-template<>
-bool lfAdapterIsNull(const BlockIndexPtr &index) {
-  return index == nullptr;
-}
-
-template<>
-void lfAdapterSetNull(BlockIndexPtr &index) {
-  index = nullptr;
-}
 
 intrusive_ptr<BlockSource> BlockSource::getOrCreateBlockSource(atomic_intrusive_ptr<BlockSource> &blockSource,
                                                                unsigned threadsNum,
@@ -55,13 +44,15 @@ void BlockSource::processTask(Task *task)
 
   BC::Common::BlockIndex *first = task->Indexes.front();
   if ((!LastKnownIndex_ && first->Prev && first->Prev->OnChain) || LastKnownIndex_ == task->Prev) {
-    DownloadQueue_.enqueue(task->Indexes);
+    for (auto index: task->Indexes)
+      DownloadQueue_.push(index);
     LastKnownIndex_ = task->Indexes.back();
 
     decltype(EnqueuedTasks_)::iterator I;
     while ( (I = EnqueuedTasks_.find(LastKnownIndex_)) != EnqueuedTasks_.end()) {
       std::vector<BC::Common::BlockIndex*> &indexes = I->second;
-      DownloadQueue_.enqueue(indexes);
+      for (auto index: indexes)
+        DownloadQueue_.push(index);
       LastKnownIndex_ = indexes.back();
       EnqueuedTasks_.erase(I);
     }
@@ -72,9 +63,7 @@ void BlockSource::processTask(Task *task)
 
 void BlockSource::processTask(TaskHP *task)
 {
-  if (task->TaskType == TaskHP::Enqueue) {
-    HighPriorityDownloadQueue_.enqueue(task->Indexes);
-  } else if (task->TaskType == TaskHP::ProcessStalledBlocks && HighPriorityDownloadQueue_.empty()) {
+  if (task->TaskType == TaskHP::ProcessStalledBlocks && HighPriorityDownloadQueue_.empty()) {
     // Find last dequeued block for all threads
     BC::Common::BlockIndex *index = nullptr;
     for (unsigned i = 0; i < ThreadsNum_; i++) {
@@ -101,7 +90,8 @@ void BlockSource::processTask(TaskHP *task)
             stalledBlocks.back()->Header.GetHash().ToString().c_str(),
             stalledBlocks.back()->Height);
 
-    HighPriorityDownloadQueue_.enqueue(stalledBlocks);
+    for (auto index: stalledBlocks)
+      HighPriorityDownloadQueue_.push(index);
   }
 }
 
@@ -137,13 +127,8 @@ void BlockSource::enqueue(std::vector<BC::Common::BlockIndex*> &&indexes)
 
 void BlockSource::enqueueHighPriority(std::vector<BC::Common::BlockIndex*> &&indexes)
 {
-  if (!indexes.empty()) {
-    TaskHP *task = new TaskHP;
-    task->TaskType = TaskHP::Enqueue;
-    task->Owner = this;
-    task->Indexes = indexes;
-    CombinerHP_.call(task, [this](TaskHP *task) { processTask(task); });
-  }
+  for (auto index: indexes)
+    HighPriorityDownloadQueue_.push(index);
 }
 
 void BlockSource::processStalledBlocks()
@@ -156,12 +141,25 @@ void BlockSource::processStalledBlocks()
 
 bool BlockSource::dequeue(std::vector<BC::Common::BlockIndex*> &indexes, size_t indexesNum, bool highPriorityOnly)
 {
-  bool result = HighPriorityDownloadQueue_.dequeue(indexes, indexesNum);
-  if (!result && !highPriorityOnly)
-    result = DownloadQueue_.dequeue(indexes, indexesNum);
-  if (result && !indexes.empty())
+  for (size_t i = 0; i < indexesNum; i++) {
+    BC::Common::BlockIndex *index;
+    if (!HighPriorityDownloadQueue_.try_pop(index))
+      break;
+    indexes.push_back(index);
+  }
+
+  if (indexes.empty() && !highPriorityOnly) {
+    for (size_t i = 0; i < indexesNum; i++) {
+      BC::Common::BlockIndex *index;
+      if (!DownloadQueue_.try_pop(index))
+        break;
+      indexes.push_back(index);
+    }
+  }
+
+  if (!indexes.empty())
     LastDequeued_[GetWorkerThreadId()] = indexes.back();
-  return result;
+  return !indexes.empty();
 }
 
 intrusive_ptr<BlockSource> BlockSource::next(unsigned threadsNum, bool createNew, bool &newSourceCreated)
