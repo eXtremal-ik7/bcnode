@@ -276,12 +276,14 @@ if (BCNODE_DOGE)
     ${BTC_SOURCES}
     LTC/ltc.cpp
     DOGE/doge.cpp
+    DOGE/proto.cpp
   )
 
   add_executable(bcterminal-doge
     bcterminal.cpp
     LTC/ltc.cpp
     DOGE/doge.cpp
+    DOGE/proto.cpp
     BTC/proto.cpp
     common/merkleTree.cpp
   )

@@ -67,7 +67,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
       params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
+      genesis_block_hash_assert_eq<BTC::X>(params->GenesisBlock.header, "0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
     }
 
     // DNS seeds
@@ -135,7 +135,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       tx.txOut[0].value = 50*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
       params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "0x000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943");
+      genesis_block_hash_assert_eq<BTC::X>(params->GenesisBlock.header, "0x000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943");
     }
 
     // DNS seeds
@@ -200,7 +200,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       tx.txOut[0].value = 50*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
       params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "0x0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206");
+      genesis_block_hash_assert_eq<BTC::X>(params->GenesisBlock.header, "0x0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206");
     }
   } else {
     return false;

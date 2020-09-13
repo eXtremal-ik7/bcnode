@@ -48,7 +48,7 @@ bool XPM::Common::setupChainParams(ChainParams *params, const char *network)
       tx.txOut[0].value = 100000000;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
       params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "963d17ba4dc753138078a2f56afb3af9674e2546822badff26837db9a0152106");
+      genesis_block_hash_assert_eq<XPM::X>(params->GenesisBlock.header, "963d17ba4dc753138078a2f56afb3af9674e2546822badff26837db9a0152106");
     }
 
     params->minimalChainLength = 6;
@@ -100,7 +100,7 @@ bool XPM::Common::setupChainParams(ChainParams *params, const char *network)
       tx.txOut[0].value = 100000000;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
       params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "221156cf301bc3585e72de34fe1efdb6fbd703bc27cfc468faa1cdd889d0efa0");
+      genesis_block_hash_assert_eq<XPM::X>(params->GenesisBlock.header, "221156cf301bc3585e72de34fe1efdb6fbd703bc27cfc468faa1cdd889d0efa0");
     }
 
     params->minimalChainLength = 2;

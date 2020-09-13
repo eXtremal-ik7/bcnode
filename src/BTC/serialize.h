@@ -121,8 +121,13 @@ template<> struct Io<bool> {
 // Serialization for *int256 types
 template<> struct Io<uint256> {
   static inline size_t getSerializedSize(const uint256&) { return sizeof(uint256); }
+  static inline size_t getUnpackedExtraSize(xmstream &src) {
+    src.seek(32);
+    return 0;
+  }
   static inline void serialize(xmstream &stream, const uint256 &data) { stream.write(data.begin(), 32); }
   static inline void unserialize(xmstream &stream, uint256 &data) { stream.read(data.begin(), 32); }
+  static inline void unpack2(xmstream &src, uint256 *data, uint8_t**) { unserialize(src, *data); }
 };
 
 template<> struct Io<arith_uint256> {

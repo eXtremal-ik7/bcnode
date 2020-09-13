@@ -64,7 +64,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
       tx.txOut[0].value = 88*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
       params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "1a91e3dace36e2be3bf030a65679fe821aa1d6ef92e7c9902eb318182c355691");
+      genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.header, "1a91e3dace36e2be3bf030a65679fe821aa1d6ef92e7c9902eb318182c355691");
     }
 
     // DNS seeds
@@ -125,7 +125,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
       tx.txOut[0].value = 88*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
       params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "bb0a78264637406b6360aad926284d544d7049f45189db5664f3c4d07350559e");
+      genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.header, "bb0a78264637406b6360aad926284d544d7049f45189db5664f3c4d07350559e");
     }
 
     // DNS seeds
@@ -143,7 +143,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->SegwitHeight = std::numeric_limits<uint32_t>::max();
 
     {
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
+      genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
     }
   } else {
     return false;

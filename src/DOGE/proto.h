@@ -13,15 +13,33 @@ public:
   using BlockHashTy = LTC::Proto::BlockHashTy;
   using TxHashTy = LTC::Proto::TxHashTy;
   using AddressTy = LTC::Proto::AddressTy;
-  using BlockHeader = LTC::Proto::BlockHeader;
-  using BlockHeaderNet = LTC::Proto::BlockHeaderNet;
-  using Block = LTC::Proto::Block;
-  using NetworkAddress = LTC::Proto::NetworkAddress;
-  using InventoryVector = LTC::Proto::InventoryVector;
+
+  // Transaction format same as LTC
   using TxIn = LTC::Proto::TxIn;
   using TxOut = LTC::Proto::TxOut;
   using TxWitness = LTC::Proto::TxWitness;
   using Transaction = LTC::Proto::Transaction;
+
+  using PureBlockHeader = LTC::Proto::BlockHeader;
+
+  struct BlockHeader: public PureBlockHeader {
+  public:
+    static const int32_t VERSION_AUXPOW = (1 << 8);
+    // AuxPow
+    Transaction ParentBlockCoinbaseTx;
+    uint256 HashBlock;
+    xvector<uint256> MerkleBranch;
+    int Index;
+    xvector<uint256> ChainMerkleBranch;
+    int ChainIndex;
+    PureBlockHeader ParentBlock;
+  };
+
+  using BlockHeaderNet = BTC::Proto::BlockHeaderNetTy<DOGE::Proto>;
+  using Block = BTC::Proto::BlockTy<DOGE::Proto>;
+  using NetworkAddress = LTC::Proto::NetworkAddress;
+  using InventoryVector = LTC::Proto::InventoryVector;
+
 
   using MessageVersion = LTC::Proto::MessageVersion;
   using MessagePing = LTC::Proto::MessagePing;
@@ -30,9 +48,20 @@ public:
   using MessageGetHeaders = LTC::Proto::MessageGetHeaders;
   using MessageGetBlocks = LTC::Proto::MessageGetBlocks;
   using MessageInv = LTC::Proto::MessageInv;
-  using MessageBlock = LTC::Proto::MessageBlock;
+  using MessageBlock = Block;
   using MessageGetData = LTC::Proto::MessageGetData;
   using MessageReject = LTC::Proto::MessageReject;
-  using MessageHeaders = LTC::Proto::MessageHeaders;
+  using MessageHeaders = BTC::Proto::MessageHeadersTy<DOGE::Proto>;
+};
+}
+
+namespace BTC {
+// Header
+template<> struct Io<DOGE::Proto::BlockHeader> {
+  static size_t getSerializedSize(const DOGE::Proto::BlockHeader&);
+  static size_t getUnpackedExtraSize(xmstream &src);
+  static void serialize(xmstream &dst, const DOGE::Proto::BlockHeader &data);
+  static void unserialize(xmstream &src, DOGE::Proto::BlockHeader &data);
+  static void unpack2(xmstream &src, DOGE::Proto::BlockHeader *dst, uint8_t **);
 };
 }

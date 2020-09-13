@@ -60,7 +60,7 @@ bool LTC::Common::setupChainParams(ChainParams *params, const char *network)
       tx.txOut[0].value = 50*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
       params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2");
+      genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.header, "12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2");
     }
 
     // DNS seeds
@@ -123,7 +123,7 @@ bool LTC::Common::setupChainParams(ChainParams *params, const char *network)
       tx.txOut[0].value = 50*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
       params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "4966625a4b2851d9fdee139e56211a0d88575f59ed816ff5e6a63deb4e3e29a0");
+      genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.header, "4966625a4b2851d9fdee139e56211a0d88575f59ed816ff5e6a63deb4e3e29a0");
     }
 
     // DNS seeds
@@ -143,7 +143,7 @@ bool LTC::Common::setupChainParams(ChainParams *params, const char *network)
     params->SegwitHeight = std::numeric_limits<uint32_t>::max();
 
     {
-      genesis_block_hash_assert_eq(params->GenesisBlock.header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
+      genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
     }
   } else {
     return false;
@@ -152,7 +152,7 @@ bool LTC::Common::setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-bool LTC::Common::checkConsensus(const LTC::Proto::BlockHeader &header, CheckConsensusCtx&, LTC::Common::ChainParams &chainParams)
+bool LTC::Common::checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, uint256 &powLimit)
 {
   uint256 scryptHash;
   scrypt_1024_1_1_256(reinterpret_cast<const char*>(&header), reinterpret_cast<char*>(scryptHash.begin()));
@@ -161,10 +161,10 @@ bool LTC::Common::checkConsensus(const LTC::Proto::BlockHeader &header, CheckCon
   bool fOverflow;
   arith_uint256 bnTarget;
 
-  bnTarget.SetCompact(header.nBits, &fNegative, &fOverflow);
+  bnTarget.SetCompact(nBits, &fNegative, &fOverflow);
 
   // Check range
-  if (fNegative || bnTarget == 0 || fOverflow || bnTarget > UintToArith256(chainParams.powLimit))
+  if (fNegative || bnTarget == 0 || fOverflow || bnTarget > UintToArith256(powLimit))
       return false;
 
   // Check proof of work matches claimed amount
@@ -174,7 +174,7 @@ bool LTC::Common::checkConsensus(const LTC::Proto::BlockHeader &header, CheckCon
   return true;
 }
 
-arith_uint256 LTC::Common::GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams&)
+arith_uint256 LTC::Common::GetBlockProof(const Proto::BlockHeader &header)
 {
   arith_uint256 bnTarget;
   bool fNegative;

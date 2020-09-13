@@ -5,9 +5,11 @@
 
 #pragma once
 
-#include "BC/proto.h"
+#include "common/uint256.h"
+#include "loguru.hpp"
 
-static inline void genesis_block_hash_assert_eq(const BC::Proto::BlockHeader &header, const char *targetHash)
+template<typename X>
+static inline void genesis_block_hash_assert_eq(const typename X::Proto::BlockHeader &header, const char *targetHash)
 {
   uint256 hash;
   hash.SetHex(targetHash);

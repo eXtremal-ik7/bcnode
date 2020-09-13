@@ -38,7 +38,7 @@ using Script = LTC::Script;
 
 namespace Common {
   // Inherit BTC chain params
-  using ChainParams = LTC::Common::ChainParams;
+  using ChainParams = BTC::Common::ChainParamsTy<DOGE::Proto>;
 
   enum NetwordIdTy {
     NetworkIdMain = 0,
@@ -46,19 +46,38 @@ namespace Common {
     NetworkIdRegtest
   };
 
-  using BlockIndex = LTC::Common::BlockIndex;
+  using BlockIndex = BTC::Common::BlockIndexTy<DOGE::Proto>;
   using CheckConsensusCtx = LTC::Common::CheckConsensusCtx;
 
   bool setupChainParams(ChainParams *params, const char *network);
   static inline bool hasWitness() { return true; }
 
+  // Validation functions
+  using ValidateStandaloneTy = std::function<bool(const Proto::Block&, const ChainParams&, std::string &error)>;
+  using ValidateContextualTy = std::function<bool(const Common::BlockIndex&, const Proto::Block&, const ChainParams&, std::string &error)>;
+  static inline void applyStandaloneValidation(ValidateStandaloneTy function, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
+    if (*isValid)
+      *isValid = function(block, chainParams, error);
+  }
+  static inline void applyContextualValidation(ValidateContextualTy function, const Common::BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
+    if (*isValid)
+      *isValid = function(index, block, chainParams, error);
+  }
+
   unsigned getBlockGeneration(const ChainParams &chainParams, BlockIndex *index);
   unsigned checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error);
   bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
 
-  static inline arith_uint256 GetBlockProof(const Proto::BlockHeader &header, const ChainParams &chainParams) { return LTC::Common::GetBlockProof(header, chainParams); }
+  static inline arith_uint256 GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) {
+    return LTC::Common::GetBlockProof(header);
+  }
+
   static inline void checkConsensusInitialize(CheckConsensusCtx &ctx) { LTC::Common::checkConsensusInitialize(ctx); }
-  static inline bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) { return LTC::Common::checkConsensus(header, ctx, chainParams); }
+  static inline bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) {
+    return header.nVersion & Proto::BlockHeader::VERSION_AUXPOW ?
+      LTC::Common::checkPow(header.ParentBlock, header.nBits, ctx, chainParams.powLimit) :
+      LTC::Common::checkPow(header, header.nBits, ctx, chainParams.powLimit);
+  }
 };
 
 class X {
