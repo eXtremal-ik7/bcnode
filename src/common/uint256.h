@@ -89,34 +89,16 @@ public:
                ((uint64_t)ptr[6]) << 48 | \
                ((uint64_t)ptr[7]) << 56;
     }
-};
 
-/** 160-bit opaque blob.
- * @note This type is called uint160 for historical reasons only. It is an opaque
- * blob of 160 bits and has no integer operations.
- */
-class uint160 : public base_blob<160> {
-public:
-    uint160() {}
-    explicit uint160(const std::vector<unsigned char>& vch) : base_blob<160>(vch) {}
-};
-
-/** 256-bit opaque blob.
- * @note This type is called uint256 for historical reasons only. It is an
- * opaque blob of 256 bits and has no integer operations. Use arith_uint256 if
- * those are required.
- */
-class uint256 : public base_blob<256> {
-public:
-    uint256() {}
-    explicit uint256(const std::vector<unsigned char>& vch) : base_blob<256>(vch) {}
-
-    static uint256 getNull() {
-      uint256 v;
+    static base_blob<BITS> getNull() {
+      base_blob<BITS> v;
       v.SetNull();
       return v;
     }
 };
+
+using uint160 = base_blob<160>;
+using uint256 = base_blob<256>;
 
 /* uint256 from const char *.
  * This is a separate function because the constructor uint256(const char*) can result

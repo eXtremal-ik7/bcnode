@@ -11,6 +11,7 @@ set (CMAKE_CXX_STANDARD 17)
 option(SANITIZER_ENABLED "Build with address sanitizer" OFF)
 option(PROFILE_ENABLED "Build for profiling" OFF)
 option(BCNODE_DOGE "Build bcnode for dogecoin" OFF)
+option(BCNODE_ZEC "Build bcnode for ZCash" OFF)
 
 if (SANITIZER_ENABLED)
   set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
@@ -52,11 +53,10 @@ else(MSVC)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcx16")
 endif(MSVC)
 
-# TODO: don't use this code, it depends on unstable api https://api.github.com
-set(_tbb_cmake_module_path ${CMAKE_SOURCE_DIR}/cmake)
+set(_tbb_cmake_module_path ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(${_tbb_cmake_module_path}/TBBGet.cmake)
 include(${_tbb_cmake_module_path}/TBBBuild.cmake)
-tbb_get(TBB_ROOT tbb_root SOURCE_CODE)
+tbb_get(TBB_ROOT tbb_root SOURCE_CODE RELEASE_TAG v2020.3)
 tbb_build(TBB_ROOT ${tbb_root} CONFIG_DIR TBB_DIR)
 find_package(TBB REQUIRED tbb)
 
@@ -295,4 +295,32 @@ if (BCNODE_DOGE)
   target_include_directories(bcterminal-doge PUBLIC ${CMAKE_BINARY_DIR}/DOGE)
   target_compile_definitions(bcterminal-doge PUBLIC -DBC=DOGE)
   target_link_libraries(bcterminal-doge ${COMMON_LIBRARIES} bcnodecrypto)
+endif()
+
+# ZEC
+if (BCNODE_ZEC)
+  prepare_bc_env(ZEC)
+
+  add_executable(bcnode-zec
+    ${BASE_SOURCES}
+    ${BTC_SOURCES}
+    ZEC/zec.cpp
+    ZEC/proto.cpp
+  )
+
+  add_executable(bcterminal-zec
+    bcterminal.cpp
+    ZEC/zec.cpp
+    ZEC/proto.cpp
+    BTC/proto.cpp
+    common/merkleTree.cpp
+  )
+
+  target_include_directories(bcnode-zec PUBLIC ${CMAKE_BINARY_DIR}/ZEC)
+  target_compile_definitions(bcnode-zec PUBLIC -DBC=ZEC)
+  target_link_libraries(bcnode-zec ${COMMON_LIBRARIES} bcnodecrypto)
+
+  target_include_directories(bcterminal-zec PUBLIC ${CMAKE_BINARY_DIR}/ZEC)
+  target_compile_definitions(bcterminal-zec PUBLIC -DBC=ZEC)
+  target_link_libraries(bcterminal-zec ${COMMON_LIBRARIES} bcnodecrypto)
 endif()

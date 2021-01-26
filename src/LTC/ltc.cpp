@@ -15,7 +15,7 @@ bool LTC::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultPort = 9333;
     params->DefaultRPCPort = 9332;
 
-    params->PublicKeyPrefix = 48;
+    params->PublicKeyPrefix = {48};
 
     params->powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -78,7 +78,7 @@ bool LTC::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultPort = 19335;
     params->DefaultRPCPort = 19332;
 
-    params->PublicKeyPrefix = 111;
+    params->PublicKeyPrefix = {111};
 
     params->powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 

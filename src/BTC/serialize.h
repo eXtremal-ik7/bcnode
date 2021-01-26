@@ -107,6 +107,7 @@ struct is_simple_numeric : std::integral_constant<bool,
 template<typename T>
 struct Io<T, typename std::enable_if<is_simple_numeric<T>::value, void>::type> {
   static inline size_t getSerializedSize(const T&) { return sizeof(T); }
+  static inline size_t getUnpackedExtraSize(xmstream &src) { src.seek(sizeof(T)); return 0; }
   static inline void serialize(xmstream &stream, const T &data) { stream.writele<T>(data); }
   static inline void unserialize(xmstream &stream, T &data) { data = stream.readle<T>(); }
 };
@@ -118,15 +119,15 @@ template<> struct Io<bool> {
   static inline void unserialize(xmstream &stream, bool &data) { data = stream.readle<uint8_t>(); }
 };
 
-// Serialization for *int256 types
-template<> struct Io<uint256> {
-  static inline size_t getSerializedSize(const uint256&) { return sizeof(uint256); }
+// Serialization for base_blob (including uint256) types
+template<unsigned int BITS> struct Io<base_blob<BITS>> {
+  static inline size_t getSerializedSize(const base_blob<BITS>&) { return BITS/8; }
   static inline size_t getUnpackedExtraSize(xmstream &src) {
-    src.seek(32);
+    src.seek(BITS/8);
     return 0;
   }
-  static inline void serialize(xmstream &stream, const uint256 &data) { stream.write(data.begin(), 32); }
-  static inline void unserialize(xmstream &stream, uint256 &data) { stream.read(data.begin(), 32); }
+  static inline void serialize(xmstream &stream, const base_blob<BITS> &data) { stream.write(data.begin(), data.size()); }
+  static inline void unserialize(xmstream &stream, base_blob<BITS> &data) { stream.read(data.begin(), data.size()); }
   static inline void unpack2(xmstream &src, uint256 *data, uint8_t**) { unserialize(src, *data); }
 };
 
@@ -152,6 +153,30 @@ template<> struct Io<std::string> {
     uint64_t length;
     unserializeVarSize(src, length);
     data.assign(src.seek<const char>(length), length);
+  }
+};
+
+// array
+template<size_t Size> struct Io<std::array<uint8_t, Size>> {
+  static inline size_t getSerializedSize(const std::array<uint8_t, Size> &data) {
+    return Size;
+  }
+
+  static inline size_t getUnpackedExtraSize(xmstream &src) {
+    src.seek(Size);
+    return 0;
+  }
+
+  static inline void serialize(xmstream &dst, const std::array<uint8_t, Size> &data) {
+    dst.write(data.data(), Size);
+  }
+
+  static inline void unserialize(xmstream &src, std::array<uint8_t, Size> &data) {
+    src.read(data.data(), Size);
+  }
+
+  static inline void unpack2(xmstream &src, std::array<uint8_t, Size> *data, uint8_t **extraData) {
+    src.read(data->data(), Size);
   }
 };
 
@@ -206,6 +231,60 @@ template<typename T> struct Io<xvector<T>> {
     (*extraData) += sizeof(T)*size;
     for (size_t i = 0; i < size; i++)
       BTC::Io<T>::unpack2(src, &elementsData[i], extraData);
+  }
+};
+
+// Context-dependend xvector
+template<typename T, typename ContextTy> struct Io<xvector<T>, ContextTy> {
+  static inline size_t getSerializedSize(const xvector<T> &data, ContextTy context) {
+    size_t size = getSerializedVarSizeSize(data.size());
+    for (const auto &v: data)
+      size += Io<T, ContextTy>::getSerializedSize(v, context);
+    return size;
+  }
+
+  static inline size_t getUnpackedExtraSize(xmstream &src, uint64_t *count, ContextTy context) {
+    unserializeVarSize(src, *count);
+
+    size_t result = 0;
+    for (size_t i = 0; i < *count; i++)
+      result += Io<T, ContextTy>::getUnpackedExtraSize(src, context);
+    return *count*sizeof(T) + result;
+  }
+
+  static inline size_t getUnpackedExtraSize(xmstream &src, ContextTy context) {
+    uint64_t size;
+    return getUnpackedExtraSize(src, &size, context);
+  }
+
+  static inline void serialize(xmstream &dst, const xvector<T> &data, ContextTy context) {
+    serializeVarSize(dst, data.size());
+    for (const auto &v: data)
+      Io<T, ContextTy>::serialize(dst, v, context);
+  }
+
+  static inline void unserialize(xmstream &src, xvector<T> &data, ContextTy context) {
+    uint64_t size = 0;
+    unserializeVarSize(src, size);
+    if (size > src.remaining()) {
+      src.seekEnd(0, true);
+      return;
+    }
+
+    data.resize(size);
+    for (uint64_t i = 0; i < size; i++)
+      Io<T, ContextTy>::unserialize(src, data[i], context);
+  }
+
+  static inline void unpack2(xmstream &src, xvector<T> *data, uint8_t **extraData, ContextTy context) {
+    uint64_t size;
+    unserializeVarSize(src, size);
+
+    T *elementsData = reinterpret_cast<T*>(*extraData);
+    new (data) xvector<T>(elementsData, size);
+    (*extraData) += sizeof(T)*size;
+    for (size_t i = 0; i < size; i++)
+      BTC::Io<T, ContextTy>::unpack2(src, &elementsData[i], extraData, context);
   }
 };
 

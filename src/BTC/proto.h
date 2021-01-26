@@ -268,7 +268,7 @@ template<typename T> struct Io<Proto::BlockTy<T>> {
   static inline size_t getSerializedSize(const BTC::Proto::BlockTy<T> &data, bool serializeWitness=true) {
     size_t size = Io<decltype(data.header)>::getSerializedSize(data.header) + getSerializedVarSizeSize(data.vtx.size());
     for (const auto &tx: data.vtx)
-      size += Io<Proto::Transaction>::getSerializedSize(tx, serializeWitness);
+      size += Io<typename T::Transaction>::getSerializedSize(tx, serializeWitness);
     return size;
   }
 
@@ -435,4 +435,4 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tx
 void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Transaction &data);
 
 std::string makeHumanReadableAddress(uint8_t pubkeyAddressPrefix, const BTC::Proto::AddressTy &address);
-bool decodeHumanReadableAddress(const std::string &hrAddress, uint8_t pubkeyAddressPrefix, BTC::Proto::AddressTy &address);
+bool decodeHumanReadableAddress(const std::string &hrAddress, const std::vector<uint8_t> &pubkeyAddressPrefix, BTC::Proto::AddressTy &address);

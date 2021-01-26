@@ -16,7 +16,7 @@ bool XPM::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultPort = 9911;
     params->DefaultRPCPort = 9912;
 
-    params->PublicKeyPrefix = 23;
+    params->PublicKeyPrefix = {23};
 
     // TODO: do correct BIP34 checking
     params->BIP34Height = 17;
@@ -68,7 +68,7 @@ bool XPM::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultPort = 9913;
     params->DefaultRPCPort = 9914;
 
-    params->PublicKeyPrefix = 111;
+    params->PublicKeyPrefix = {111};
 
     // TODO: do correct BIP34 checking
     params->BIP34Height = 17;

@@ -18,7 +18,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->DefaultPort = 8333;
     params->DefaultRPCPort = 8332;
 
-    params->PublicKeyPrefix = 0;
+    params->PublicKeyPrefix = {0};
 
     params->powLimit.SetHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -86,7 +86,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->DefaultPort = 18333;
     params->DefaultRPCPort = 18332;
 
-    params->PublicKeyPrefix = 111;
+    params->PublicKeyPrefix = {111};
 
     params->powLimit.SetHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -152,7 +152,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->DefaultPort = 18444;
     params->DefaultRPCPort = 18443;
 
-    params->PublicKeyPrefix = 111;
+    params->PublicKeyPrefix = {111};
 
     params->powLimit.SetHex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 

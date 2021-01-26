@@ -547,16 +547,17 @@ std::string makeHumanReadableAddress(uint8_t pubkeyAddressPrefix, const BTC::Pro
   return EncodeBase58(data, data+sizeof(data));
 }
 
-bool decodeHumanReadableAddress(const std::string &hrAddress, uint8_t pubkeyAddressPrefix, BTC::Proto::AddressTy &address)
+bool decodeHumanReadableAddress(const std::string &hrAddress, const std::vector<uint8_t> &pubkeyAddressPrefix, BTC::Proto::AddressTy &address)
 {
+  const size_t prefixSize = pubkeyAddressPrefix.size();
   std::vector<uint8_t> data;
   if (!DecodeBase58(hrAddress.c_str(), data) ||
-      data.size() != 1 + sizeof(BTC::Proto::AddressTy) + 4 ||
-      data[0] != pubkeyAddressPrefix)
+      data.size() != prefixSize + sizeof(BTC::Proto::AddressTy) + 4 ||
+      memcmp(&data[0], &pubkeyAddressPrefix[0], prefixSize))
     return false;
 
   uint32_t addrHash;
-  memcpy(&addrHash, &data[1 + sizeof(BTC::Proto::AddressTy)], 4);
+  memcpy(&addrHash, &data[prefixSize + sizeof(BTC::Proto::AddressTy)], 4);
 
   // Compute sha256 and take first 4 bytes
   uint8_t sha256[32];
@@ -572,6 +573,6 @@ bool decodeHumanReadableAddress(const std::string &hrAddress, uint8_t pubkeyAddr
   if (reinterpret_cast<uint32_t*>(sha256)[0] != addrHash)
     return false;
 
-  memcpy(address.begin(), &data[1], sizeof(BTC::Proto::AddressTy));
+  memcpy(address.begin(), &data[prefixSize], sizeof(BTC::Proto::AddressTy));
   return true;
 }

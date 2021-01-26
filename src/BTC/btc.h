@@ -55,7 +55,7 @@ namespace Common {
     uint32_t SegwitHeight;
 
     // Prefixes
-    uint8_t PublicKeyPrefix;
+    std::vector<uint8_t> PublicKeyPrefix;
 
     // Network
     uint16_t DefaultPort;
