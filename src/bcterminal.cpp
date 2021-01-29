@@ -143,7 +143,7 @@ public:
     write("Latency: %lims\n", latency);
   }
 
-  void onReject(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageReject&) { write("message: reject\n"); }
+  void onReject(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageReject &reject) { write("Reject message: %s; reason: %s\n", reject.message.c_str(), reject.reason.c_str()); }
 
   void onGetBlocks(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageGetBlocks&) { write("message: getblocks\n"); }
   void onGetData(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageGetData&) { write("message: getdata\n"); }

@@ -154,7 +154,7 @@ private:
 
     // Send version message
     BC::Proto::MessageVersion msg;
-    msg.version = 70002;
+    msg.version = BC::Configuration::ProtocolVersion;
     msg.services = 1; // NODE
     msg.timestamp = static_cast<uint64_t>(time(nullptr));
     msg.addr_recv.services = 0;
