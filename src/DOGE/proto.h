@@ -65,3 +65,5 @@ template<> struct Io<DOGE::Proto::BlockHeader> {
   static void unpack2(xmstream &src, DOGE::Proto::BlockHeader *dst, uint8_t **);
 };
 }
+
+void serializeJsonInside(xmstream &stream, const DOGE::Proto::BlockHeader &header);

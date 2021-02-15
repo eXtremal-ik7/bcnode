@@ -10,6 +10,7 @@
 #include <memory>
 
 uint256 calculateMerkleRoot(uint256 *hashes, size_t size);
+uint256 calculateMerkleRoot(uint256 hash, uint256 *tree, size_t treeSize, size_t index);
 
 template<typename BlockTy>
 uint256 calculateBlockMerkleRoot(const BlockTy &block)

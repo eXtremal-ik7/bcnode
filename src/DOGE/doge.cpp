@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "doge.h"
+#include "validation.h"
 #include "crypto/scrypt.h"
 
 bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
@@ -72,6 +73,9 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
       "seed.multidoge.org",
       "seed2.multidoge.org"
     });
+
+    // AuxPoW parameters
+    params->StrictChainId = true;
   } else if (strcmp(network, "testnet") == 0) {
     // Setup for testnet
     params->networkId = NetworkIdTestnet;
@@ -132,6 +136,9 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->DNSSeeds.assign({
       "testseed.jrn.me.uk",
     });
+
+    // AuxPoW parameters
+    params->StrictChainId = false;
   } else if (strcmp(network, "regtest") == 0) {
     params->networkId = NetworkIdRegtest;
     params->magic = 0xDAB5BFFA;
@@ -145,6 +152,9 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     {
       genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
     }
+
+    // AuxPoW parameters
+    params->StrictChainId = true;
   } else {
     return false;
   }
@@ -159,6 +169,7 @@ unsigned DOGE::Common::checkBlockStandalone(Proto::Block &block, const ChainPara
   applyStandaloneValidation(validateBlockSize<DOGE::X>, block, chainParams, error, &isValid);
   applyStandaloneValidation(validateMerkleRoot<DOGE::X>, block, chainParams, error, &isValid);
   applyStandaloneValidation(validateWitnessCommitment<DOGE::X>, block, chainParams, error, &isValid);
+  applyStandaloneValidation(validateAuxPow, block, chainParams, error, &isValid);
   return isValid;
 }
 
@@ -169,3 +180,23 @@ bool DOGE::Common::checkBlockContextual(const BlockIndex &index, const Proto::Bl
   applyContextualValidation(validateUnexpectedWitness<DOGE::X>, index, block, chainParams, error, &isValid);
   return isValid;
 }
+
+void serializeJsonInside(xmstream &stream, const DOGE::Proto::BlockHeader &header)
+{
+  serializeJson(stream, "version", header.nVersion); stream.write(',');
+  serializeJson(stream, "hashPrevBlock", header.hashPrevBlock); stream.write(',');
+  serializeJson(stream, "hashMerkleRoot", header.hashMerkleRoot); stream.write(',');
+  serializeJson(stream, "time", header.nTime); stream.write(',');
+  serializeJson(stream, "bits", header.nBits); stream.write(',');
+  serializeJson(stream, "nonce", header.nNonce); stream.write(',');
+  serializeJson(stream, "parentBlockCoinbaseTx", header.ParentBlockCoinbaseTx); stream.write(',');
+  serializeJson(stream, "hashBlock", header.HashBlock); stream.write(',');
+  serializeJson(stream, "merkleBranch", header.MerkleBranch); stream.write(',');
+  serializeJson(stream, "index", header.Index); stream.write(',');
+  serializeJson(stream, "chainMerkleBranch", header.ChainMerkleBranch); stream.write(',');
+  serializeJson(stream, "chainIndex", header.ChainIndex); stream.write(',');
+  stream.write("\"parentBlock\":{");
+  serializeJsonInside(stream, header.ParentBlock);
+  stream.write('}');
+}
+

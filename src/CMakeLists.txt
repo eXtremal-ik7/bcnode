@@ -277,6 +277,7 @@ if (BCNODE_DOGE)
     LTC/ltc.cpp
     DOGE/doge.cpp
     DOGE/proto.cpp
+    DOGE/validation.cpp
   )
 
   add_executable(bcterminal-doge
@@ -284,6 +285,7 @@ if (BCNODE_DOGE)
     LTC/ltc.cpp
     DOGE/doge.cpp
     DOGE/proto.cpp
+    DOGE/validation.cpp
     BTC/proto.cpp
     common/merkleTree.cpp
   )

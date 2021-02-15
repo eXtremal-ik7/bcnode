@@ -618,8 +618,7 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
   size_t totalBlockCount = 0;
 
   std::vector<BlockPosition> blockOffsets;
-//  unsigned threadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
-  unsigned threadsNum = 1;
+  unsigned threadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
 
   // Cleanup index directory
   {

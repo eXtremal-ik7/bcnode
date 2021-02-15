@@ -38,7 +38,29 @@ using Script = LTC::Script;
 
 namespace Common {
   // Inherit BTC chain params
-  using ChainParams = BTC::Common::ChainParamsTy<DOGE::Proto>;
+  struct ChainParams {
+    int networkId;
+    uint32_t magic;
+    DOGE::Proto::Block GenesisBlock;
+
+    // Soft&hard forks
+    uint32_t BIP34Height;
+    uint32_t SegwitHeight;
+
+    // Prefixes
+    std::vector<uint8_t> PublicKeyPrefix;
+
+    // Network
+    uint16_t DefaultPort;
+    uint16_t DefaultRPCPort;
+    std::vector<const char*> DNSSeeds;
+
+    // ...
+    uint256 powLimit;
+
+    // DOGE aux pow settings
+    bool StrictChainId;
+  };
 
   enum NetwordIdTy {
     NetworkIdMain = 0,
