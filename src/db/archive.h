@@ -7,6 +7,7 @@
 
 #include "balancedb.h"
 #include "txdb.h"
+#include "utxodb.h"
 
 class BlockDatabase;
 
@@ -48,6 +49,7 @@ public:
   BC::DB::TxDb &txdb() { return TxDb_; }
 
 private:
+  BC::DB::UTXODb UTXODb_;
   BC::DB::BalanceDb BalanceDb_;
   BC::DB::TxDb TxDb_;
 };

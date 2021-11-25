@@ -335,9 +335,13 @@ int main(int argc, char **argv)
   if (!context.BlockDb.init(context.DataDir, context.ChainParams))
     return 1;
 
-  // Initialize archive
   BC::DB::IndexDbMap forDisconnect;
   BC::Common::BlockIndex *firstBlocks[BC::DB::DbCount] = {nullptr};
+
+  // Initialize UTXO database
+  if (!context.Storage.utxodb().initialize(context.BlockIndex, context.BlockDb, firstBlocks, forDisconnect))
+    return 1;
+  // Initialize archive
   if (!context.Archive.init(context.BlockIndex, context.BlockDb, firstBlocks, forDisconnect))
     return 1;
   if (!context.Archive.sync(context.BlockIndex, context.BlockDb, firstBlocks, forDisconnect))

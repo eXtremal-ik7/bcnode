@@ -19,6 +19,10 @@
 
 namespace BTC {
 
+namespace DB {
+class UTXODb;
+}
+
 class Configuration {
 public:
   static constexpr size_t MaxBlockSize = 1000000;
@@ -76,11 +80,17 @@ namespace Common {
 
   // Validation functions
   using ValidateStandaloneTy = std::function<bool(const Proto::Block&, const ChainParams&, std::string&)>;
+  using ValidateTxStandaloneTy = std::function<bool(const Proto::ValidationData&, const Proto::Transaction&, const ChainParams&, std::string&)>;
   using ValidateContextualTy = std::function<bool(const Common::BlockIndex&, const Proto::Block&, const ChainParams&, std::string&)>;
 
   static inline void applyStandaloneValidation(ValidateStandaloneTy function, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
     if (*isValid)
       *isValid = function(block, chainParams, error);
+  }
+
+  static inline void applyStandaloneTxValidation(ValidateTxStandaloneTy function, const Proto::ValidationData &validationData, const Proto::Transaction &tx, const ChainParams &chainParams, std::string &error, bool *isValid) {
+    if (*isValid)
+      *isValid = function(validationData, tx, chainParams, error);
   }
 
   static inline void applyContextualValidation(ValidateContextualTy function, const Common::BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
@@ -93,6 +103,7 @@ namespace Common {
   // Check functions
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
   bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
+  void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);
   bool checkBlockStandalone(const Proto::Block &block, const ChainParams &chainParams, std::string &error);
   bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
 }
@@ -103,6 +114,7 @@ public:
   using ChainParams = BTC::Common::ChainParams;
   using Configuration = BTC::Configuration;
   using Proto = BTC::Proto;
+  using UTXODb = BTC::DB::UTXODb;
   template<typename T> using Io = BTC::Io<T>;
 };
 }

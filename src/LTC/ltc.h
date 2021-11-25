@@ -20,6 +20,11 @@ namespace LTC {
 }
 
 namespace LTC {
+
+namespace DB {
+class UTXODb;
+}
+
 class Configuration {
 public:
   static constexpr size_t MaxBlockSize = BTC::Configuration::MaxBlockSize;
@@ -53,6 +58,7 @@ namespace Common {
   static inline bool hasWitness() { return true; }
 
   unsigned getBlockGeneration(const ChainParams &chainParams, LTC::Common::BlockIndex *index);
+  void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);
   unsigned checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error);
   bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
 
@@ -70,6 +76,7 @@ public:
   using ChainParams = LTC::Common::ChainParams;
   using Configuration = LTC::Configuration;
   using Proto = LTC::Proto;
+  using UTXODb = LTC::DB::UTXODb;
   template<typename T> using Io = BTC::Io<T>;
 };
 }

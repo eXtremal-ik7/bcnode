@@ -13,7 +13,8 @@ namespace BC {
 namespace DB {
 
 enum DatabaseTy {
-  DbTransactions = 0,
+  DbUTXO = 0,
+  DbTransactions,
   DbAddrBalance,
   DbAddrTransactions,
   DbTopBalance,

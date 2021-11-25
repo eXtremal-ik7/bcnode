@@ -324,6 +324,7 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
 
   // Validate block
   std::string error;
+  BC::Common::initializeValidationContext(*block, storage.utxodb());
   unsigned blockGeneration = BC::Common::checkBlockStandalone(*block, chainParams, error);
   if (blockGeneration == 0) {
     LOG_F(WARNING, "block %s check failed, error: %s", block->header.GetHash().ToString().c_str(), error.c_str());

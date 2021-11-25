@@ -17,6 +17,11 @@
 #include <functional>
 
 namespace XPM {
+
+namespace DB {
+class UTXODb;
+}
+
   // Using BTC serialization protocol
   using BTC::Io;
   using BTC::serialize;
@@ -92,6 +97,7 @@ namespace Common {
       *isValid = function(index, block, chainParams, error);
   }
 
+  void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);
   unsigned checkBlockStandalone(const Proto::Block &block, const ChainParams &chainParams, std::string &error);
   bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
 
@@ -108,6 +114,7 @@ public:
   using ChainParams = XPM::Common::ChainParams;
   using Configuration = XPM::Configuration;
   using Proto = XPM::Proto;
+  using UTXODb = XPM::DB::UTXODb;
   template<typename T> using Io = BTC::Io<T>;
 };
 

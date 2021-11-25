@@ -11,6 +11,11 @@
 #include <string.h>
 
 namespace DOGE {
+
+namespace DB {
+class UTXODb;
+}
+
   // Using BTC serialization protocol
   using BTC::Io;
   using BTC::serialize;
@@ -87,6 +92,7 @@ namespace Common {
   }
 
   unsigned getBlockGeneration(const ChainParams &chainParams, BlockIndex *index);
+  void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);
   unsigned checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error);
   bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
 
@@ -108,6 +114,7 @@ public:
   using ChainParams = DOGE::Common::ChainParams;
   using Configuration = DOGE::Configuration;
   using Proto = DOGE::Proto;
+  using UTXODb = DOGE::DB::UTXODb;
   template<typename T> using Io = BTC::Io<T>;
 };
 }

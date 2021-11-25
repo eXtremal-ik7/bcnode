@@ -23,6 +23,7 @@ public:
   using TxOut = BTC::Proto::TxOut;
   using TxWitness = BTC::Proto::TxWitness;
   using Transaction = BTC::Proto::Transaction;
+  using CTxValidationData = BTC::Proto::CTxValidationData;
 
   using MessageVersion = BTC::Proto::MessageVersion;
   using MessagePing = BTC::Proto::MessagePing;

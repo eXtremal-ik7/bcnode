@@ -93,10 +93,6 @@ target_include_directories(bcnodecommon PUBLIC
   ${OPENSSL_INCLUDE_DIR}
 )
 
-add_dependencies(bcnodecommon
-  config4cpp mpir
-)
-
 add_library(bcnodecrypto STATIC
   crypto/scrypt.cpp
 )
@@ -116,6 +112,7 @@ set(BASE_SOURCES
   db/balancedb.cpp
   db/storage.cpp
   db/txdb.cpp
+  db/utxodb.cpp
 )
 
 # Linker configuration
@@ -124,12 +121,12 @@ set(COMMON_LIBRARIES
   asyncio-0.5
   asyncioextras-0.5
   p2putils
+  config4cpp
+  ${MPIR_LIBRARIES}
+  ${TBB_IMPORTED_TARGETS}
   OpenSSL::SSL
   OpenSSL::Crypto
   RocksDB::rocksdb
-  ${CONFIG4CPP_LIBRARY}
-  ${MPIR_LIBRARIES}
-  ${TBB_IMPORTED_TARGETS}
 )
 
 if (MSVC)

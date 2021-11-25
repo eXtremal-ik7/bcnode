@@ -162,6 +162,11 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
+void DOGE::Common::initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
+{
+  ::initializeValidationContext<DOGE::X>(block, utxodb);
+}
+
 unsigned DOGE::Common::checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error)
 {
   bool isValid = true;

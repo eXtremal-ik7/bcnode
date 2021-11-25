@@ -59,8 +59,17 @@ struct NetworkAddress {
 
 struct NetworkAddressWithoutTime : public NetworkAddress {};
 
+  struct CTxInInfoLink {};
+
+  struct CTxValidationData {
+    xvector<CTxInInfoLink> TxIns;
+    xvector<bool> ScriptSigValid;
+  };
+
   struct ValidationData {
     uint64_t HasWitness : 1;
+    uint64_t TxAmoutValidated : 1;
+    xvector<CTxValidationData> TxData;
   };
 
 #pragma pack(push, 1)
@@ -136,6 +145,7 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
   struct BlockTy {
     typename T::BlockHeader header;
     xvector<typename T::Transaction> vtx;
+    // Memory only
     mutable ValidationData validationData;
   };
 

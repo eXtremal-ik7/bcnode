@@ -355,6 +355,11 @@ bool XPM::Common::checkConsensus(const Proto::BlockHeader &header, XPM::Common::
   return true;
 }
 
+void XPM::Common::initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
+{
+  ::initializeValidationContext<XPM::X>(block, utxodb);
+}
+
 unsigned XPM::Common::checkBlockStandalone(const Proto::Block &block, const ChainParams &chainParams, std::string &error)
 {
   bool isValid = true;

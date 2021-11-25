@@ -37,7 +37,6 @@ bool TxDb::initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, BC
   BC::Common::BlockIndex *bestIndex = blockIndex.best();
   std::set<BC::Proto::BlockHashTy> knownStamp;
   std::vector<BC::Common::BlockIndex*> forDisconnectLocal;
-  std::vector<BC::Common::BlockIndex*> forConnectLocal;
   Databases_.resize(Cfg_.ShardsNum);
   ShardData_.resize(Cfg_.ShardsNum);
   for (unsigned i = 0; i < Cfg_.ShardsNum; i++) {

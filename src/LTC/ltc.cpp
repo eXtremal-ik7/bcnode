@@ -189,6 +189,11 @@ arith_uint256 LTC::Common::GetBlockProof(const Proto::BlockHeader &header)
   return (~bnTarget / (bnTarget + 1)) + 1;
 }
 
+void LTC::Common::initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
+{
+  ::initializeValidationContext<LTC::X>(block, utxodb);
+}
+
 unsigned LTC::Common::checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error)
 {
   bool isValid = true;

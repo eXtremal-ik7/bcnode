@@ -198,6 +198,11 @@ arith_uint256 ZEC::Common::GetBlockProof(const Proto::BlockHeader &header)
   return (~bnTarget / (bnTarget + 1)) + 1;
 }
 
+void ZEC::Common::initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
+{
+  ::initializeValidationContext<ZEC::X>(block, utxodb);
+}
+
 unsigned ZEC::Common::checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error)
 {
   bool isValid = true;

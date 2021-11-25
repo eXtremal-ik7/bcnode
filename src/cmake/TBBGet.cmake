@@ -224,11 +224,7 @@ function(tbb_get)
         set(tbb_save_to ${tbb_get_SAVE_TO})
     endif()
 
-    if (tbb_get_SOURCE_CODE)
-        _tbb_get_url(URL tbb_url RELEASE_TAG ${tbb_release_tag} OS ${tbb_os} SOURCE_CODE)
-    else()
-        _tbb_get_url(URL tbb_url RELEASE_TAG ${tbb_release_tag} OS ${tbb_os})
-    endif()
+    set(tbb_url https://github.com/01org/tbb/archive/v2020.3.tar.gz)
 
     if (NOT tbb_url)
         message(STATUS "URL to download Intel TBB has not been found")

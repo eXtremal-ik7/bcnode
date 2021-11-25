@@ -35,6 +35,8 @@ public:
     PureBlockHeader ParentBlock;
   };
 
+  using CTxValidationData = BTC::Proto::CTxValidationData;
+
   using BlockHeaderNet = BTC::Proto::BlockHeaderNetTy<DOGE::Proto>;
   using Block = BTC::Proto::BlockTy<DOGE::Proto>;
   using NetworkAddress = LTC::Proto::NetworkAddress;

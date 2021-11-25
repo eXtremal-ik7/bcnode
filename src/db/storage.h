@@ -7,6 +7,7 @@
 
 #include <BC/bc.h>
 #include <db/common.h>
+#include <db/utxodb.h>
 #include <tbb/concurrent_queue.h>
 #include <functional>
 #include <thread>
@@ -36,6 +37,7 @@ public:
 
   BlockDatabase &blockDb() { return *BlockDb_; }
   Archive &archive() { return *Archive_; }
+  UTXODb &utxodb() { return UTXODb_; }
   SerializedDataCache &cache() { return BlockCache; }
 
   tbb::concurrent_queue<Task> &queue() { return Queue_; }
@@ -61,6 +63,7 @@ private:
   std::chrono::time_point<std::chrono::steady_clock> LastFlushTime_ = std::chrono::steady_clock::now();
 
   SerializedDataCache BlockCache;
+  UTXODb UTXODb_;
 };
 
 }

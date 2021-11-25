@@ -244,13 +244,24 @@ bool checkConsensus(const BTC::Proto::BlockHeader &header, CheckConsensusCtx&, B
   return true;
 }
 
+void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
+{
+  ::initializeValidationContext<BTC::X>(block, utxodb);
+}
+
 bool checkBlockStandalone(const Proto::Block &block, const ChainParams &chainParams, std::string &error)
 {
   bool isValid = true;
-  memset(&block.validationData, 0, sizeof(block.validationData));
+
+  // Block validation
   applyStandaloneValidation(validateBlockSize<BTC::X>, block, chainParams, error, &isValid);
   applyStandaloneValidation(validateMerkleRoot<BTC::X>, block, chainParams, error, &isValid);
   applyStandaloneValidation(validateWitnessCommitment<BTC::X>, block, chainParams, error, &isValid);
+  // Transaction validation
+  for (const auto &tx: block.vtx) {
+    applyStandaloneTxValidation(validateScriptSig<BTC::X>, block.validationData, tx, chainParams, error, &isValid);
+    applyStandaloneTxValidation(validateAmount<BTC::X>, block.validationData, tx, chainParams, error, &isValid);
+  }
   return isValid;
 }
 

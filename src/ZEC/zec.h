@@ -12,6 +12,11 @@
 #include <string.h>
 
 namespace ZEC {
+
+namespace DB {
+class UTXODb;
+}
+
   // Using BTC serialization protocol
   using BTC::Io;
   using BTC::serialize;
@@ -80,6 +85,7 @@ namespace Common {
   }
 
   unsigned getBlockGeneration(const ChainParams &chainParams, ZEC::Common::BlockIndex *index);
+  void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);
   unsigned checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error);
   bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
 
@@ -97,6 +103,7 @@ public:
   using ChainParams = ZEC::Common::ChainParams;
   using Configuration = ZEC::Configuration;
   using Proto = ZEC::Proto;
+  using UTXODb = ZEC::DB::UTXODb;
   template<typename T> using Io = BTC::Io<T>;
 };
 }

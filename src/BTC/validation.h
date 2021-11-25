@@ -6,6 +6,23 @@
 #include "common/xvector.h"
 
 template<typename X>
+void initializeValidationContext(const typename X::Proto::Block &block, typename X::UTXODb &utxodb)
+{
+  // Initialize validation context
+  memset(&block.validationData, 0, sizeof(block.validationData));
+  block.validationData.TxData.resize(block.vtx.size());
+  for (size_t i = 0, ie = block.vtx.size(); i != ie; ++i) {
+    auto &tx = block.vtx[i];
+    auto &txValidationData = block.validationData.TxData[i];
+    txValidationData.TxIns.resize(tx.txIn.size());
+    txValidationData.ScriptSigValid.resize(tx.txIn.size());
+    for (size_t j = 0, je = tx.txIn.size(); j != je; ++j) {
+
+    }
+  }
+}
+
+template<typename X>
 bool validateBlockSize(const typename X::Proto::Block &block, const typename X::ChainParams&, std::string &error) {
   bool result = X::template Io<typename X::Proto::Block>::getSerializedSize(block, false) <= X::Configuration::MaxBlockSize;
   if (!result)
@@ -119,4 +136,16 @@ bool validateUnexpectedWitness(const typename X::BlockIndex &index, const typena
   bool result = !(index.Height < chainParams.SegwitHeight && block.validationData.HasWitness);
   error = "unexpected-witness-data";
   return result;
+}
+
+template<typename X>
+bool validateScriptSig(const typename X::Proto::ValidationData &validationCtx, const typename X::Proto::Transaction &tx, const typename X::ChainParams &chainParams, std::string &error)
+{
+  return true;
+}
+
+template<typename X>
+bool validateAmount(const typename X::Proto::ValidationData &validationCtx, const typename X::Proto::Transaction &tx, const typename X::ChainParams &chainParams, std::string &error)
+{
+  return true;
 }
