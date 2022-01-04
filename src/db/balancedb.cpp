@@ -437,7 +437,7 @@ size_t BalanceDb::extractTx(std::vector<BC::Proto::TxHashTy> &out,
 
     const TxValue *value = reinterpret_cast<const TxValue*>(data[i].data());
     uint32_t availableTx = subNoOverflow(value->txNum(data[i].size()), offset);
-    uint32_t copySize = static_cast<uint32_t>(std::min(remaining, static_cast<size_t>(availableTx)));
+    uint32_t copySize = static_cast<uint32_t>(std::min(remaining, static_cast<uint64_t>(availableTx)));
 
     for (uint32_t j = 0; j < copySize; j++)
       out.push_back(value->hashes[offset+j]);

@@ -219,7 +219,7 @@ size_t Io<Proto::Transaction>::getUnpackedExtraSize(xmstream &src)
     flags ^= 1;
     bool hasWitness = false;
     for (size_t i = 0; i < txInCount; i++) {
-      size_t witnessCount = 0;
+      uint64_t witnessCount = 0;
       result += Io<decltype (Proto::TxIn::witnessStack)>::getUnpackedExtraSize(src, &witnessCount);
       if (witnessCount != 0)
         hasWitness = true;

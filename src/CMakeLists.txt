@@ -1,8 +1,5 @@
-include("cmake/HunterGate.cmake")
-HunterGate(
-    URL "https://github.com/cpp-pm/hunter/archive/v0.23.253.tar.gz"
-    SHA1 "88ea6d37c897a81a080eb9ae0f69d7807bbb3c73"
-)
+include("cmake/cxx-pm.cmake")
+cxxpm_initialize(http://coinsforall.io/distr/cxx-pm-0.0.1-v1.tar.gz 9400867f7128e8ec080930bf359ccb828f293c27217dc315d800307162461a6a)
 
 cmake_minimum_required(VERSION 3.11)
 project(bcnode)
@@ -31,7 +28,6 @@ set (CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH}
   ${CMAKE_CURRENT_SOURCE_DIR}/cmake
 )
 
-set(CMAKE_DEBUG_POSTFIX d)
 add_definitions(-DTBB_USE_EXCEPTIONS=0)
 
 if(MSVC)
@@ -46,38 +42,39 @@ if(MSVC)
   )
 
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /GR-")
-  include_directories(${CMAKE_SOURCE_DIR}/msvc/include)
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/msvc/include)
+  set(GETOPT_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/msvc/getopt.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/msvc/getopt1.c
+  )
 else(MSVC)
   set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra")
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fno-rtti")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcx16")
+  if (CXXPM_SYSTEM_PROCESSOR STREQUAL "x86_64")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcx16")
+  endif()
 endif(MSVC)
 
-set(_tbb_cmake_module_path ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
-include(${_tbb_cmake_module_path}/TBBGet.cmake)
-include(${_tbb_cmake_module_path}/TBBBuild.cmake)
-tbb_get(TBB_ROOT tbb_root SOURCE_CODE RELEASE_TAG v2020.3)
-tbb_build(TBB_ROOT ${tbb_root} CONFIG_DIR TBB_DIR)
-find_package(TBB REQUIRED tbb)
+cxxpm_add_package(one-tbb)
+cxxpm_add_package(rocksdb)
+if (NOT MSVC)
+  cxxpm_add_package(gmp)
+  set(BIGNUM_LIBRARIES gmp::libgmp gmp::libgmpxx)
+else()
+  cxxpm_add_package(mpir)
+  set(BIGNUM_LIBRARIES ${MPIR_LIBRARIES})
+endif()
 
-hunter_add_package(OpenSSL)
-hunter_add_package(rocksdb)
-find_package(OpenSSL REQUIRED)
-find_package(RocksDB CONFIG REQUIRED)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectConfig4cpp.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectLibp2p.cmake)
-include(${CMAKE_SOURCE_DIR}/cmake/ProjectMPIR.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectSecp256k1.cmake)
 
 include_directories(
   ${CMAKE_SOURCE_DIR}
   ${libp2p_SOURCE_DIR}/src/include
   ${libp2p_BINARY_DIR}/include
-  ${CONFIG4CPP_INCLUDE_DIR}
-  ${MPIR_INCLUDE_DIR}
-  ${OPENSSL_INCLUDE_DIR}
+  ${config4cpp_SOURCE_DIR}/src/include
 )
-
 
 add_library(bcnodecommon STATIC
   loguru.cpp
@@ -89,16 +86,17 @@ add_library(bcnodecommon STATIC
   common/uint256.cpp
 )
 
-target_include_directories(bcnodecommon PUBLIC
-  ${OPENSSL_INCLUDE_DIR}
+target_link_libraries(bcnodecommon
+  ${BIGNUM_LIBRARIES}
 )
 
 add_library(bcnodecrypto STATIC
   crypto/scrypt.cpp
 )
 
-target_include_directories(bcnodecrypto PUBLIC
-  ${OPENSSL_INCLUDE_DIR}
+target_link_libraries(bcnodecrypto
+  OpenSSL::SSL
+  OpenSSL::Crypto
 )
 
 set(BASE_SOURCES
@@ -122,8 +120,7 @@ set(COMMON_LIBRARIES
   asyncioextras-0.5
   p2putils
   config4cpp
-  ${MPIR_LIBRARIES}
-  ${TBB_IMPORTED_TARGETS}
+  TBB::tbb
   OpenSSL::SSL
   OpenSSL::Crypto
   RocksDB::rocksdb
@@ -141,7 +138,7 @@ endif()
 # OS-specific configuration
 if (WIN32)
   # Winsock libraries
-  set(COMMON_LIBRARIES ${COMMON_LIBRARIES} ws2_32 mswsock)
+  set(COMMON_LIBRARIES ${COMMON_LIBRARIES} ws2_32 mswsock shlwapi crypt32 rpcrt4)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # Add dynamic libraries support
   # Use custom allocator "jemalloc"

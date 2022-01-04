@@ -5,7 +5,7 @@
 
 #pragma once
 #include "uint256.h"
-#include <mpirxx.h>
+#include <gmpxx.h>
 
 void uint256ToBN(mpz_ptr bignum, const uint256 &N);
 void uint256ToBN(mpz_class &bigNum, const uint256 &N);
