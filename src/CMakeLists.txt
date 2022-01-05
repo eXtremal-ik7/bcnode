@@ -1,5 +1,8 @@
 include("cmake/cxx-pm.cmake")
-cxxpm_initialize(http://coinsforall.io/distr/cxx-pm-0.0.1-v1.tar.gz 9400867f7128e8ec080930bf359ccb828f293c27217dc315d800307162461a6a)
+cxxpm_initialize(
+  https://github.com/eXtremal-ik7/cxx-pm/archive/refs/tags/0.0.1.tar.gz
+  f87ec7f53ca4982c7400a19a894d9c606504cc22edc41ae83e8a7b2f9a506e1e
+)
 
 cmake_minimum_required(VERSION 3.11)
 project(bcnode)

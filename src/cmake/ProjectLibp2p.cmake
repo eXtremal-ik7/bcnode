@@ -5,7 +5,7 @@ set(ZMTP_ENABLED OFF CACHE INTERNAL "")
 FetchContent_Declare(
   libp2p
   GIT_REPOSITORY https://github.com/eXtremal-ik7/libp2p.git
-  GIT_TAG        cxx-pm
+  GIT_TAG        master
   GIT_SHALLOW    1
   SOURCE_DIR     ${CMAKE_SOURCE_DIR}/../dependencies/libp2p
 )
