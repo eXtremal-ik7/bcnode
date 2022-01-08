@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "utxodb.h"
+#include "common/smallStream.h"
 #include <set>
 
 namespace BC {
@@ -68,7 +69,44 @@ bool UTXODb::initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, 
 
 void UTXODb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, ActionTy actionType, bool doFlush)
 {
+  SmallStream<1024> serialized;
+  for (const auto &tx: block.vtx) {
+    for (size_t i = 0, ie = tx.txIn.size(); i != ie; ++i) {
+      const auto &txIn = tx.txIn[i];
 
+      if (actionType == Connect) {
+        serialized.reset();
+        serialized.write(txIn.previousOutputHash.begin(), sizeof(txIn.previousOutputHash));
+        serialized.write<uint8_t>(i);
+        serialized.reserve<BC::Script::UnspentOutputInfo>(1)->Type = BTC::Script::UnspentOutputInfo::EInvalid;
+      } else if (actionType == Disconnect) {
+        // SLOW!
+        // Load transaction data from disk
+      }
+
+      MStorage::DynamicBuffer::Pointer pointer = Data_.alloc(serialized.sizeOf());
+      memcpy(pointer.Data, serialized.data(), serialized.sizeOf());
+      MLog_.insert(serialized.data<const UnspentOutputValue>(), pointer.AllocId);
+    }
+
+    BC::Proto::BlockHashTy txid = tx.getTxId();
+    for (size_t i = 0, ie = tx.txOut.size(); i != ie; ++i) {
+      const auto &txOut = tx.txOut[i];
+
+      serialized.reset();
+      serialized.write(txid.begin(), sizeof(txid));
+      serialized.write<uint8_t>(i);
+
+      if (actionType == Connect)
+        BTC::Script::parseTransactionOutput(txOut, serialized);
+      else if (actionType == Disconnect)
+        serialized.reserve<BC::Script::UnspentOutputInfo>(1)->Type = BTC::Script::UnspentOutputInfo::EInvalid;
+
+      MStorage::DynamicBuffer::Pointer pointer = Data_.alloc(serialized.sizeOf());
+      memcpy(pointer.Data, serialized.data(), serialized.sizeOf());
+      MLog_.insert(serialized.data<const UnspentOutputValue>(), pointer.AllocId);
+    }
+  }
 }
 
 bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstream &data)
@@ -91,11 +129,12 @@ void UTXODb::flush()
   rocksdb::WriteBatch batch;
   BC::Proto::BlockHashTy stamp = LastAdded_->Header.GetHash();
   batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(stamp.begin()), sizeof(BC::Proto::BlockHashTy)));
-  for (const auto &tx: Queue_) {
+//  for (const auto &tx: Queue_) {
 
-  }
+//  }
 
   Database_->Write(rocksdb::WriteOptions(), &batch);
+  Data_.updateGenerationId(BatchId_);
 }
 
 }

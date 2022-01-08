@@ -1,4 +1,4 @@
-#include "stream.h"
+#include "dynamicBuffer.h"
 #include <string.h>
 #include <algorithm>
 

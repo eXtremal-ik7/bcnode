@@ -22,7 +22,10 @@ public:
   Pointer alloc(size_t size);
   void *get(uint32_t allocId) const;
   uint32_t loadGenerationId(std::memory_order order) const { return GlobalGenerationId_.load(order); }
-  void updateGenerationId(uint32_t generationId) { GlobalGenerationId_.store(generationId, std::memory_order_seq_cst); }
+  void updateGenerationId(uint32_t generationId) {
+    GlobalGenerationId_.store(generationId, std::memory_order_seq_cst);
+    Offset_ = 0;
+  }
 
 private:
   struct CBuffer {

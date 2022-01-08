@@ -42,4 +42,50 @@ bool Script::decodeStandardOutput(const BC::Proto::TxOut &out, BC::Proto::Addres
   return false;
 }
 
+void Script::parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspentOutputInfo)
+{
+  // TODO:
+  //  Witness
+  //  Taproot
+  const uint8_t *script = out.pkScript.data();
+
+  UnspentOutputInfo *info = unspentOutputInfo.reserve<UnspentOutputInfo>(1);
+  if (out.pkScript.size() == 35 && script[0] == OP_PUSH_33 && script[34] == OP_CHECKSIG) {
+    // P2PK compressed
+    // PUSH_33(PublicKey) OP_CHECKSIG
+    info->Type = UnspentOutputInfo::EPubKey;
+    info->IsPubKeyCompressed = true;
+    memcpy(info->PubKeyCompressed, script+1, 33);
+  } else if (out.pkScript.size() == 67 && script[0] == OP_PUSH_65 && script[66] == OP_CHECKSIG) {
+    // P2PK uncompressed
+    // PUSH_65(PublicKey) OP_CHECKSIG
+    info->Type = UnspentOutputInfo::EPubKey;
+    info->IsPubKeyCompressed = false;
+    unspentOutputInfo.seekSet(UnspentOutputInfo::customDataOffset());
+    unspentOutputInfo.write(script+1, 65);
+  } else if (out.pkScript.size() == 25 &&
+             script[0] == OP_DUP &&
+             script[1] == OP_HASH160 &&
+             script[2] == OP_PUSH20 &&
+             script[23] == OP_EQUALVERIFY &&
+             script[24] == OP_CHECKSIG) {
+    // P2PKH
+    // OP_DUP OP_HASH160 OP_PUSH20(Address) OP_EQUALVERIFY OP_CHECKSIG
+    info->Type = UnspentOutputInfo::EPubKeyHash;
+    memcpy(info->PubKeyHash.begin(), script+3, 20);
+  } else if (out.pkScript.size() == 23 &&
+             script[0] == OP_HASH160 &&
+             script[1] == OP_PUSH20 &&
+             script[22] == OP_EQUAL) {
+    // P2SH
+    // OP_HASH160 OP_PUSH20(RedeemScriptHash) OP_EQUAL
+    info->Type = UnspentOutputInfo::EScriptHash;
+    memcpy(info->ScriptHash.begin(), script+2, 20);
+  } else {
+    info->Type = UnspentOutputInfo::ENonStandard;
+    unspentOutputInfo.seekSet(UnspentOutputInfo::customDataOffset());
+    unspentOutputInfo.write(script, out.pkScript.size());
+  }
+}
+
 }

@@ -87,6 +87,7 @@ add_library(bcnodecommon STATIC
   common/file.cpp
   common/serializedDataCache.cpp
   common/uint256.cpp
+  common/mstorage/dynamicBuffer.cpp
 )
 
 target_include_directories(bcnodecommon PUBLIC
