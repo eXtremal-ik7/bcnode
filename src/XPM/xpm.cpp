@@ -29,7 +29,13 @@ bool XPM::Common::setupChainParams(ChainParams *params, const char *network)
       params->GenesisBlock.header.nTime = 1373064429;
       params->GenesisBlock.header.nBits = 0x06000000;
       params->GenesisBlock.header.nNonce = 383;
+#ifdef _MSC_VER
+      // MPIR supports 64-bit integer operands
       params->GenesisBlock.header.bnPrimeChainMultiplier = ((uint64_t) 532541) * (uint64_t)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+#else
+      static_assert(sizeof(long) == 8 && "4-byte long not supported");
+      params->GenesisBlock.header.bnPrimeChainMultiplier = ((unsigned long) 532541) * (unsigned long)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+#endif
 
       XPM::Proto::Transaction tx;
       tx.version = 1;
@@ -81,7 +87,12 @@ bool XPM::Common::setupChainParams(ChainParams *params, const char *network)
       params->GenesisBlock.header.nTime = 1373063882;
       params->GenesisBlock.header.nBits = 0x06000000;
       params->GenesisBlock.header.nNonce = 1513;
+#ifdef _MSC_VER
       params->GenesisBlock.header.bnPrimeChainMultiplier = ((uint64_t) 585641) * (uint64_t)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+#else
+      static_assert(sizeof(long) == 8 && "4-byte long not supported");
+      params->GenesisBlock.header.bnPrimeChainMultiplier = ((unsigned long) 585641) * (unsigned long)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+#endif
 
       XPM::Proto::Transaction tx;
       tx.version = 1;
@@ -176,8 +187,14 @@ arith_uint256 XPM::Common::GetBlockProof(const XPM::Proto::BlockHeader &header, 
 
   // TODO: don't use bignum here
   // arith_uint256 can support multiplication and division too
+#ifdef _MSC_VER
+  // MPIR supports 64-bit operands
   bnWork *= ((uint64_t) nWorkTransitionRatio) * nFractionalDifficulty;
   bnWork /= (((uint64_t) nWorkTransitionRatio - 1) * nFractionalDifficultyMin + nFractionalDifficulty);
+#else
+  bnWork *= ((unsigned long) nWorkTransitionRatio) * (unsigned long)nFractionalDifficulty;
+  bnWork /= (((unsigned long) nWorkTransitionRatio - 1) * (unsigned long)nFractionalDifficultyMin + (unsigned long)nFractionalDifficulty);
+#endif
   uint256FromBN(result, bnWork.get_mpz_t());
   return UintToArith256(result);
 }

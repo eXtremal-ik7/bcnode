@@ -113,7 +113,7 @@ bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstre
 {
   BC::Proto::BlockHashTy key(txid);
   *reinterpret_cast<uint64_t*>(key.begin()) ^= txoutIdx;
-
+  return false;
 }
 
 bool UTXODb::queryFast(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstream &data)
