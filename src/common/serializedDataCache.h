@@ -8,6 +8,7 @@
 #include "common/intrusive_ptr.h"
 #include <stddef.h>
 #include <atomic>
+#include <limits>
 #include <memory>
 
 class SerializedDataCache;

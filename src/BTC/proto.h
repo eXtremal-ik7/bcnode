@@ -16,6 +16,7 @@ public:
   using BlockHashTy = ::uint256;
   using TxHashTy = ::uint256;
   using AddressTy = ::uint160;
+  using PrivateKeyTy = ::uint256;
 
   enum class ServicesTy : uint64_t {
     Network = 1,
@@ -253,6 +254,7 @@ template<> struct Io<Proto::TxIn> {
   static void serialize(xmstream &dst, const BTC::Proto::TxIn &data);
   static void unserialize(xmstream &src, BTC::Proto::TxIn &data);
   static void unpack2(xmstream &src, Proto::TxIn *data, uint8_t **extraData);
+  static void serializeForSignature(xmstream &dst, const BTC::Proto::TxIn &data, const uint8_t *utxo, size_t utxoSize);
 };
 
 // TxOut
@@ -271,6 +273,12 @@ template<> struct Io<Proto::Transaction> {
   static void serialize(xmstream &dst, const BTC::Proto::Transaction &data, bool serializeWitness=true);
   static void unserialize(xmstream &src, BTC::Proto::Transaction &data);
   static void unpack2(xmstream &src, Proto::Transaction *data, uint8_t **extraData);
+
+  static void serializeForSignature(xmstream &dst,
+                                    const BTC::Proto::Transaction &data,
+                                    size_t targetInput,
+                                    const uint8_t *utxo,
+                                    size_t utxoSize);
 };
 
 // Block
@@ -444,5 +452,7 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tx
 void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TxOut &txout);
 void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Transaction &data);
 
+std::string encodeBase58WithCrc(const uint8_t *prefix, unsigned prefixSize, const uint8_t *address, unsigned addressSize);
+bool decodeBase58WithCrc(const std::string &base58, const uint8_t *prefix, unsigned prefixSize, uint8_t *address, unsigned addressSize);
 std::string makeHumanReadableAddress(uint8_t pubkeyAddressPrefix, const BTC::Proto::AddressTy &address);
 bool decodeHumanReadableAddress(const std::string &hrAddress, const std::vector<uint8_t> &pubkeyAddressPrefix, BTC::Proto::AddressTy &address);

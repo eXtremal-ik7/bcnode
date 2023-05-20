@@ -141,6 +141,20 @@ void Io<Proto::TxIn>::unpack2(xmstream &src, Proto::TxIn *data, uint8_t **extraD
   BTC::unserialize(src, data->sequence);
 }
 
+void Io<Proto::TxIn>::serializeForSignature(xmstream &dst, const BTC::Proto::TxIn &data, const uint8_t *utxo, size_t utxoSize)
+{
+  BTC::serialize(dst, data.previousOutputHash);
+  BTC::serialize(dst, data.previousOutputIndex);
+  if (utxo) {
+    serializeVarSize(dst, utxoSize);
+    dst.write(utxo, utxoSize);
+  } else {
+    serializeVarSize(dst, 0);
+  }
+
+  BTC::serialize(dst, data.sequence);
+}
+
 size_t Io<Proto::TxOut>::getSerializedSize(const BTC::Proto::TxOut &data)
 {
   size_t size = 0;
@@ -325,6 +339,24 @@ void Io<Proto::Transaction>::unpack2(xmstream &src, Proto::Transaction *data, ui
   }
 
   BTC::unserialize(src, data->lockTime);
+}
+
+void Io<Proto::Transaction>::serializeForSignature(xmstream &dst,
+                                                   const Proto::Transaction &data,
+                                                   size_t targetInput,
+                                                   const uint8_t *utxo,
+                                                   size_t utxoSize)
+{
+  BTC::serialize(dst, data.version);
+  serializeVarSize(dst, data.txIn.size());
+  for (size_t i = 0; i < data.txIn.size(); i++) {
+    if (i == targetInput)
+      Io<Proto::TxIn>::serializeForSignature(dst, data.txIn[i], utxo, utxoSize);
+    else
+      Io<Proto::TxIn>::serializeForSignature(dst, data.txIn[i], nullptr, 0);
+  }
+  BTC::serialize(dst, data.txOut);
+  BTC::serialize(dst, data.lockTime);
 }
 
 void Io<Proto::InventoryVector>::serialize(xmstream &dst, const BTC::Proto::InventoryVector &data)
@@ -525,6 +557,59 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tr
   serializeJson(stream, "txout", data.txOut); stream.write(',');
   serializeJson(stream, "lockTime", data.lockTime);
   stream.write('}');
+}
+
+std::string encodeBase58WithCrc(const uint8_t *prefix, unsigned prefixSize, const uint8_t *address, unsigned addressSize)
+{
+  // Using dynamic stack allocation
+  uint8_t data[prefixSize + 4 + addressSize];
+  for (unsigned i = 0; i < prefixSize; i++)
+    data[i] = prefix[i];
+  memcpy(data + prefixSize, address, addressSize);
+
+  {
+    uint8_t sha256[32];
+    SHA256_CTX ctx;
+    SHA256_Init(&ctx);
+    SHA256_Update(&ctx, &data[0], sizeof(data) - 4);
+    SHA256_Final(sha256, &ctx);
+
+    SHA256_Init(&ctx);
+    SHA256_Update(&ctx, sha256, sizeof(sha256));
+    SHA256_Final(sha256, &ctx);
+    memcpy(data + prefixSize + addressSize, sha256, 4);
+  }
+
+  return EncodeBase58(data, data + sizeof(data));
+}
+
+bool decodeBase58WithCrc(const std::string &base58, const uint8_t *prefix, unsigned prefixSize, uint8_t *address, unsigned addressSize)
+{
+  std::vector<uint8_t> data;
+  if (!DecodeBase58(base58.c_str(), data) ||
+      data.size() != prefixSize + addressSize + 4 ||
+      memcmp(&data[0], prefix, prefixSize))
+    return false;
+
+  uint32_t addrHash;
+  memcpy(&addrHash, &data[prefixSize + sizeof(BTC::Proto::AddressTy)], 4);
+
+  // Compute sha256 and take first 4 bytes
+  uint8_t sha256[32];
+  SHA256_CTX ctx;
+  SHA256_Init(&ctx);
+  SHA256_Update(&ctx, &data[0], data.size() - 4);
+  SHA256_Final(sha256, &ctx);
+
+  SHA256_Init(&ctx);
+  SHA256_Update(&ctx, sha256, sizeof(sha256));
+  SHA256_Final(sha256, &ctx);
+
+  if (reinterpret_cast<uint32_t*>(sha256)[0] != addrHash)
+    return false;
+
+  memcpy(address, &data[prefixSize], sizeof(BTC::Proto::AddressTy));
+  return true;
 }
 
 std::string makeHumanReadableAddress(uint8_t pubkeyAddressPrefix, const BTC::Proto::AddressTy &address)

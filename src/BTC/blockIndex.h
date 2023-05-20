@@ -20,6 +20,16 @@ namespace BTC {
 namespace Common {
 
 template<typename T>
+struct alignas(8) BlockAcceptDataTy {
+  typename T::BlockValidationData ValidationData;
+  atomic_tagged_ptr<BlockAcceptDataTy, 3> SuccessorHeaders;
+  atomic_tagged_ptr<BlockAcceptDataTy, 3> SuccessorBlocks;
+  atomic_tagged_ptr<BlockAcceptDataTy, 3> ConcurrentHeaderNext;
+  atomic_tagged_ptr<BlockAcceptDataTy, 3> ConcurrentBlockNext;
+  BlockAcceptDataTy *CombinerNext;
+};
+
+template<typename T>
 struct alignas(8) BlockIndexTy {
 private:
   BlockIndexTy() {}

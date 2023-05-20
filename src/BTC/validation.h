@@ -4,6 +4,7 @@
 #include "common/merkleTree.h"
 #include "p2putils/xmstream.h"
 #include "common/xvector.h"
+#include <limits>
 
 template<typename X>
 void initializeValidationContext(const typename X::Proto::Block &block, typename X::UTXODb &utxodb)

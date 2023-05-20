@@ -60,6 +60,8 @@ namespace Common {
 
     // Prefixes
     std::vector<uint8_t> PublicKeyPrefix;
+    std::vector<uint8_t> ScriptPrefix;
+    std::vector<uint8_t> SecretKeyPrefix;
 
     // Network
     uint16_t DefaultPort;

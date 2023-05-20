@@ -77,6 +77,7 @@ include_directories(
   ${libp2p_SOURCE_DIR}/src/include
   ${libp2p_BINARY_DIR}/include
   ${config4cpp_SOURCE_DIR}/src/include
+  ${secp256k1_SOURCE_DIR}/include
 )
 
 add_library(bcnodecommon STATIC
@@ -124,6 +125,7 @@ set(COMMON_LIBRARIES
   asyncioextras-0.5
   p2putils
   config4cpp
+  secp256k1
   TBB::tbb
   OpenSSL::SSL
   OpenSSL::Crypto
@@ -206,6 +208,13 @@ add_executable(bcterminal-btc
   common/merkleTree.cpp
 )
 
+add_executable(bctest-btc
+  bctest.cpp
+  BTC/btc.cpp
+  BTC/proto.cpp
+  common/merkleTree.cpp
+)
+
 target_include_directories(bcnode-btc PUBLIC ${CMAKE_BINARY_DIR}/BTC)
 target_compile_definitions(bcnode-btc PUBLIC -DBC=BTC)
 target_link_libraries(bcnode-btc ${COMMON_LIBRARIES})
@@ -213,6 +222,10 @@ target_link_libraries(bcnode-btc ${COMMON_LIBRARIES})
 target_include_directories(bcterminal-btc PUBLIC ${CMAKE_BINARY_DIR}/BTC)
 target_compile_definitions(bcterminal-btc PUBLIC -DBC=BTC)
 target_link_libraries(bcterminal-btc ${COMMON_LIBRARIES})
+
+target_include_directories(bctest-btc PUBLIC ${CMAKE_BINARY_DIR}/BTC)
+target_compile_definitions(bctest-btc PUBLIC -DBC=BTC)
+target_link_libraries(bctest-btc ${COMMON_LIBRARIES})
 
 # LTC
 prepare_bc_env(LTC)
