@@ -1,7 +1,7 @@
 include("cmake/cxx-pm.cmake")
 cxxpm_initialize(
-  https://github.com/eXtremal-ik7/cxx-pm/archive/refs/tags/0.0.1.tar.gz
-  f87ec7f53ca4982c7400a19a894d9c606504cc22edc41ae83e8a7b2f9a506e1e
+  https://github.com/eXtremal-ik7/cxx-pm/archive/refs/tags/0.0.4.tar.gz
+  409fdb16b267926d0cae526041f6b6174fe17b7170519e3d35ae2486e9139f1a
 )
 
 cmake_minimum_required(VERSION 3.11)
@@ -58,13 +58,13 @@ else(MSVC)
   endif()
 endif(MSVC)
 
-cxxpm_add_package(one-tbb)
-cxxpm_add_package(rocksdb)
+cxxpm_add_package(one-tbb default)
+cxxpm_add_package(rocksdb default)
 if (NOT MSVC)
-  cxxpm_add_package(gmp)
+  cxxpm_add_package(gmp default)
   set(BIGNUM_LIBRARIES gmp::libgmp gmp::libgmpxx)
 else()
-  cxxpm_add_package(mpir)
+  cxxpm_add_package(mpir default)
   set(BIGNUM_LIBRARIES ${MPIR_LIBRARIES})
 endif()
 
