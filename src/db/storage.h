@@ -5,8 +5,9 @@
 
 #pragma once
 
+#include "db/utxodb.h"
 #include <BC/bc.h>
-#include <db/common.h>
+// #include <db/common.h>
 #include <db/utxodb.h>
 #include <tbb/concurrent_queue.h>
 #include <functional>
@@ -21,6 +22,12 @@ namespace DB {
 
 class Archive;
 
+enum ActionTy {
+  Connect = 0,
+  Disconnect,
+  WriteData
+};
+
 struct Task {
   ActionTy Type;
   BC::Common::BlockIndex *Index = nullptr;
@@ -31,23 +38,29 @@ struct Task {
 class Storage {
 public:
   ~Storage();
-  bool init(BlockDatabase &blockDb, Archive &archive, std::function<void()> errorHandler);
-  void add(ActionTy type, BC::Common::BlockIndex *index, bool wakeUp = false);
+  void init(BlockDatabase &blockDb, Archive &archive) {
+    BlockDb_ = &blockDb;
+    Archive_ = &archive;
+  }
+
+  bool run(std::function<void()> errorHandler);
+  void add(ActionTy type, BC::Common::BlockIndex *index, BlockInMemoryIndex &blockIndex, bool wakeUp = false);
   void wakeUp();
 
   BlockDatabase &blockDb() { return *BlockDb_; }
   Archive &archive() { return *Archive_; }
   UTXODb &utxodb() { return UTXODb_; }
   SerializedDataCache &cache() { return BlockCache; }
+  void flush();
 
   tbb::concurrent_queue<Task> &queue() { return Queue_; }
+
 private:
   static void timerCb(aioUserEvent*, void *arg) { static_cast<Storage*>(arg)->onTimer(); }
   static void newTaskCb(aioUserEvent*, void *arg) { static_cast<Storage*>(arg)->onQueuePush(); }
 
   void onTimer();
   void onQueuePush();
-  void flush();
 
 private:
   bool Initialized_ = false;

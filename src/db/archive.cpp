@@ -4,88 +4,123 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "archive.h"
+#include "addrHistoryDb.h"
+#include "txdbRef.h"
+#include "txdb.h"
+#include "storage.h"
 
 namespace BC {
 namespace DB {
 
-bool Archive::sync(BlockInMemoryIndex &blockIndex,
-                   BlockDatabase &blockDb,
-                   BC::Common::BlockIndex **connectPoints,
-                   BC::DB::IndexDbMap &disconnectQueue)
+template<typename IInterface>
+IInterface* setupHandler(config4cpp::Configuration *cfg,
+                         const char *name,
+                         EInterfaceTy type,
+                         const std::unordered_map<std::string, uint32_t> &dbMap,
+                         const std::vector<std::unique_ptr<BC::DB::BaseInterface>> &allDb)
 {
-  uint32_t forConnectHeights[DbCount];
-  BC::Common::BlockIndex *firstCommon = nullptr;
-  for (unsigned i = 0; i < BC::DB::DbCount; i++) {
-    if (connectPoints[i] && (!firstCommon || connectPoints[i]->Height < firstCommon->Height))
-      firstCommon = connectPoints[i];
-    forConnectHeights[i] = connectPoints[i] ? connectPoints[i]->Height : std::numeric_limits<uint32_t>::max();
+  const char *handler = cfg->lookupString("archive.queries", name, nullptr);
+  if (handler == nullptr)
+    return nullptr;
+
+  auto It = dbMap.find(handler);
+  if (It == dbMap.end()) {
+    LOG_F(ERROR, "Database %s is handler for %s, but it not present", handler, name);
+    exit(1);
   }
 
-  // disconnect blocks
-  {
-    bool noError = true;
-    auto It = disconnectQueue.begin();
-    auto handler = [this, &It](void *data, size_t size) {
-      xmstream stream(data, size);
-      BC::Proto::Block block;
-      BC::unserialize(stream, block);
-      BitMap bitMap = It->second;
-      if (bitMap.Affected[DbTransactions] && TxDb_.enabled())
-        TxDb_.add(It->first, block, Disconnect, true);
-      if (bitMap.Affected[DbAddrBalance] && BalanceDb_.enabled())
-        BalanceDb_.add(It->first, block, Disconnect, true);
-      ++It;
-    };
+  IInterface *result = static_cast<IInterface*>(allDb[It->second]->interface(type));
+  if (!result) {
+    LOG_F(ERROR, "Invalid database for query type %s", name);
+    exit(1);
+  }
 
-    BlockSearcher searcher(blockDb, handler, [&noError]() { noError = false; });
-    for (const auto &element: disconnectQueue) {
-      searcher.add(element.first);
-      if (!noError)
-        return false;
+  return result;
+}
+
+bool Archive::init(BlockInMemoryIndex &blockIndex,
+                   BC::DB::Storage &storage,
+                   config4cpp::Configuration *cfg)
+{
+  std::unordered_map<std::string, uint32_t> dbIndexMap;
+  config4cpp::StringVector enabledDatabases;
+  cfg->lookupList("archive", "databases", enabledDatabases, config4cpp::StringVector());
+
+  for (int i = 0; i < enabledDatabases.length(); i++) {
+    if (!dbIndexMap.insert(std::make_pair(enabledDatabases[i], i)).second) {
+      LOG_F(ERROR, "Duplicate database type: %s", enabledDatabases[i]);
+      return false;
+    }
+
+    if (strcmp(enabledDatabases[i], "addrhistorydb") == 0) {
+      AllDb_.emplace_back(new AddrHistoryDb());
+    } else if (strcmp(enabledDatabases[i], "txdb.ref") == 0) {
+      AllDb_.emplace_back(new TxDbRef());
+    } else if (strcmp(enabledDatabases[i], "txdb.full") == 0) {
+      AllDb_.emplace_back(new TxDb());
+    } else {
+      LOG_F(ERROR, "Unknown database type: %s", enabledDatabases[i]);
+      return false;
     }
   }
 
-  // connect blocks
-  if (firstCommon) {
-    bool noError = true;
-    BC::Common::BlockIndex *best = blockIndex.best();
-    uint32_t count = best->Height - firstCommon->Height + 1;
-    LOG_F(INFO, "Update databases: connecting %u blocks", count);
+  // Route queries
+  TransactionDb_ = setupHandler<ITransactionDb>(cfg, "tx", EIQueryTransaction, dbIndexMap, AllDb_);
+  AddrHistoryDb_ = setupHandler<IAddrHistoryDb>(cfg, "addrhistory", EIQueryAddrHistory, dbIndexMap, AllDb_);
 
-    BC::Common::BlockIndex *indexIt = firstCommon;
-    auto handler = [this, &forConnectHeights, &indexIt](void *data, size_t size) {
-      xmstream stream(data, size);
-      BC::Proto::Block block;
-      BC::unserialize(stream, block);
-      if (indexIt->Height >= forConnectHeights[DbTransactions] && TxDb_.enabled())
-        TxDb_.add(indexIt, block, Connect, true);
-      if (indexIt->Height >= forConnectHeights[DbAddrBalance] && BalanceDb_.enabled())
-        BalanceDb_.add(indexIt, block, Connect, true);
-      indexIt = indexIt->Next;
-    };
+  storage.utxodb().setTxdb(TransactionDb_);
 
-    BC::Common::BlockIndex *index = firstCommon;
-    BlockSearcher searcher(blockDb, handler, [&noError]() { noError = false; });
-    unsigned portionNum = 0;
-    unsigned portionSize = count / 20 + 1;
-    unsigned i = 0;
-    while (index) {
-      searcher.add(index);
-      if (!noError)
-        return false;
-      index = index->Next;
-      if (++i == portionSize) {
-        portionNum++;
-        LOG_F(INFO, "%u%% done", portionNum*5);
-        i = 0;
-      }
+  BC::Common::BlockIndex *utxoBestBlock;
+  std::vector<BC::Common::BlockIndex*> utxoDisconnect;
+  std::vector<std::vector<BC::Common::BlockIndex*>> archiveDisconnect;
+  std::vector<BaseWithBest> archiveDatabases;
+  archiveDisconnect.resize(AllDb_.size());
+  archiveDatabases.resize(AllDb_.size());
+
+  BlockDatabase &blockDb = storage.blockDb();
+
+  // Initialize all databases
+  if (!storage.utxodb().initialize(blockIndex, blockDb, blockDb.dataDir(), storage, cfg, &utxoBestBlock, utxoDisconnect))
+    return false;
+  for (size_t i = 0; i < AllDb_.size(); i++) {
+    BaseWithBest &current = archiveDatabases[i];
+    current.Base = AllDb_[i].get();
+    if (!AllDb_[i]->initialize(blockIndex, blockDb, blockDb.dataDir(), storage, cfg, &current.BestBlock, archiveDisconnect[i]))
+      return false;
+  }
+
+  // Disconnect UTXO
+  if (!dbDisconnectBlocks(storage.utxodb(), blockIndex, storage, utxoDisconnect))
+    return false;
+
+  // Disconnect archive
+  for (size_t i = 0; i < AllDb_.size(); i++) {
+    if (!dbDisconnectBlocks(*AllDb_[i], blockIndex, storage, archiveDisconnect[i]))
+      return false;
+  }
+
+  // Connect
+  if (!dbConnectBlocks(storage.utxodb(), utxoBestBlock, archiveDatabases, blockIndex, storage, "utxo & archive databases"))
+    return false;
+
+  return true;
+}
+
+bool Archive::purge(config4cpp::Configuration *cfg, std::filesystem::path &dataDir)
+{
+  config4cpp::StringVector enabledDatabases;
+  cfg->lookupList("archive", "databases", enabledDatabases, config4cpp::StringVector());
+
+  for (int i = 0; i < enabledDatabases.length(); i++) {
+    std::filesystem::path dbPath = dataDir / enabledDatabases[i];
+    std::error_code ec;
+    std::filesystem::remove_all(dbPath, ec);
+    if (ec) {
+      LOG_F(ERROR, "Failed to remove database %s", enabledDatabases[i]);
+      return false;
     }
   }
 
-  if (TxDb_.enabled())
-    TxDb_.flush();
-
-  LOG_F(INFO, "100%% done");
   return true;
 }
 

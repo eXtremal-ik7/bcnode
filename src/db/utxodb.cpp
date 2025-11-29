@@ -5,115 +5,21 @@
 
 #include "utxodb.h"
 #include "common/smallStream.h"
-#include <set>
 
 namespace BC {
 namespace DB {
 
-UTXODb::~UTXODb()
+bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstream &data) const
 {
-  flush();
-}
+  // TODO: search in cache
 
-bool UTXODb::initialize(BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb, BC::Common::BlockIndex **forConnect, IndexDbMap &forDisconnect)
-{
-  auto shardPath = blockDb.dataDir() / "utxo";
-  std::filesystem::create_directories(shardPath);
-
-  BC::Common::BlockIndex *bestIndex = blockIndex.best();
-  std::set<BC::Proto::BlockHashTy> knownStamp;
-  std::vector<BC::Common::BlockIndex*> forDisconnectLocal;
-
-  rocksdb::DB *db;
-  rocksdb::Options options;
-  options.create_if_missing = true;
-  rocksdb::Status status = rocksdb::DB::Open(options, shardPath.u8string().c_str(), &db);
-  if (!status.ok()) {
-    LOG_F(ERROR, "Can't open of create utxodb database at %s", shardPath.u8string().c_str());
-    return false;
-  }
-
-  Database_.reset(db);
-
-  // Check stamp (last known block)
-  std::string stampData;
-  if (db->Get(rocksdb::ReadOptions(), rocksdb::Slice("stamp"), &stampData).ok()) {
-    if (stampData.size() != sizeof(BC::Proto::BlockHashTy)) {
-      LOG_F(ERROR, "utxodb is corrupted: invalid stamp size (%s)", shardPath.u8string().c_str());
-      return false;
-    }
-
-    BC::Proto::BlockHashTy stamp;
-    memcpy(stamp.begin(), stampData.data(), sizeof(BC::Proto::BlockHashTy));
-    auto It = blockIndex.blockIndex().find(stamp);
-    if (It == blockIndex.blockIndex().end()) {
-      LOG_F(ERROR, "utxodb is corrupted: stamp not exists in block index (%s)", shardPath.u8string().c_str());
-      return false;
-    }
-
-    // Build connect and disconnect block set if need
-    if (It->second != bestIndex && knownStamp.insert(stamp).second) {
-      BC::Common::BlockIndex *first = rebaseChain(bestIndex, It->second, forDisconnectLocal);
-      if (first && (!*forConnect || first->Height < (*forConnect)->Height))
-        *forConnect = first;
-      for (auto index: forDisconnectLocal)
-        forDisconnect[index].Affected[DbUTXO] = true;
-    }
-  } else {
-    // database is empty, run full rescanning
-    *forConnect = blockIndex.genesis();
-  }
-
-  return true;
-}
-
-void UTXODb::add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, ActionTy actionType, bool doFlush)
-{
-  SmallStream<1024> serialized;
-  for (const auto &tx: block.vtx) {
-    for (size_t i = 0, ie = tx.txIn.size(); i != ie; ++i) {
-      const auto &txIn = tx.txIn[i];
-
-      if (actionType == Connect) {
-        serialized.reset();
-        serialized.write(txIn.previousOutputHash.begin(), sizeof(txIn.previousOutputHash));
-        serialized.write<uint8_t>(i);
-        serialized.reserve<BC::Script::UnspentOutputInfo>(1)->Type = BTC::Script::UnspentOutputInfo::EInvalid;
-      } else if (actionType == Disconnect) {
-        // SLOW!
-        // Load transaction data from disk
-      }
-
-      MStorage::DynamicBuffer::Pointer pointer = Data_.alloc(serialized.sizeOf());
-      memcpy(pointer.Data, serialized.data(), serialized.sizeOf());
-      MLog_.insert(serialized.data<const UnspentOutputValue>(), pointer.AllocId);
-    }
-
-    BC::Proto::BlockHashTy txid = tx.getTxId();
-    for (size_t i = 0, ie = tx.txOut.size(); i != ie; ++i) {
-      const auto &txOut = tx.txOut[i];
-
-      serialized.reset();
-      serialized.write(txid.begin(), sizeof(txid));
-      serialized.write<uint8_t>(i);
-
-      if (actionType == Connect)
-        BTC::Script::parseTransactionOutput(txOut, serialized);
-      else if (actionType == Disconnect)
-        serialized.reserve<BC::Script::UnspentOutputInfo>(1)->Type = BTC::Script::UnspentOutputInfo::EInvalid;
-
-      MStorage::DynamicBuffer::Pointer pointer = Data_.alloc(serialized.sizeOf());
-      memcpy(pointer.Data, serialized.data(), serialized.sizeOf());
-      MLog_.insert(serialized.data<const UnspentOutputValue>(), pointer.AllocId);
-    }
-  }
-}
-
-bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstream &data)
-{
-  BC::Proto::BlockHashTy key(txid);
-  *reinterpret_cast<uint64_t*>(key.begin()) ^= txoutIdx;
-  return false;
+  CUnspentOutputKey key;
+  key.Tx = txid;
+  key.Index = txoutIdx;
+  data.reset();
+  return this->find(key, [&data](const void *d, size_t s) {
+    data.write(d, s);
+  });
 }
 
 bool UTXODb::queryFast(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstream &data)
@@ -121,20 +27,133 @@ bool UTXODb::queryFast(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xm
   return false;
 }
 
-void UTXODb::flush()
+bool UTXODb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage)
 {
-  if (!LastAdded_)
-    return;
+  return true;
+}
 
-  rocksdb::WriteBatch batch;
-  BC::Proto::BlockHashTy stamp = LastAdded_->Header.GetHash();
-  batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(stamp.begin()), sizeof(BC::Proto::BlockHashTy)));
-//  for (const auto &tx: Queue_) {
+void UTXODb::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
+{ 
+  SmallStream<1024> serialized;
+  const auto blockId = index->Header.GetHash();
 
-//  }
+  CUnspentOutputKey key;
+  // Coinbase
+  {
+    // txin in coinbase can't spent anything
+    const auto &coinbaseTx = block.vtx[0];
+    key.Tx = coinbaseTx.getTxId();
+    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
+      const auto &txOut = coinbaseTx.txOut[i];
+      key.Index = i;
 
-  Database_->Write(rocksdb::WriteOptions(), &batch);
-  Data_.updateGenerationId(BatchId_);
+      serialized.reset();
+      BTC::Script::parseTransactionOutput(txOut, serialized);
+      this->add(blockId, key, serialized.data(), serialized.sizeOf());
+    }
+  }
+
+  // Other transactions
+  for (size_t i = 1; i < block.vtx.size(); i++) {
+    const auto &tx = block.vtx[i];
+
+    for (size_t j = 0; j < tx.txIn.size(); j++) {
+      const auto &txIn = tx.txIn[j];
+      key.Tx = txIn.previousOutputHash;
+      key.Index = txIn.previousOutputIndex;
+      this->remove(blockId, key);
+    }
+
+    key.Tx = tx.getTxId();
+    for (size_t j = 0; j < tx.txOut.size(); j++) {
+      const auto &txOut = tx.txOut[j];
+      key.Index = j;
+
+      serialized.reset();
+      BTC::Script::parseTransactionOutput(txOut, serialized);
+      this->add(blockId, key, serialized.data(), serialized.sizeOf());
+    }
+  }
+}
+
+void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
+{
+  SmallStream<1024> serialized;
+  const auto blockId = index->Header.GetHash();
+
+  CUnspentOutputKey key;
+  // Coinbase
+  {
+    // txin in coinbase can't spent anything
+    const auto &coinbaseTx = block.vtx[0];
+    key.Tx = coinbaseTx.getTxId();
+    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
+      key.Index = i;
+      this->remove(blockId, key);
+    }
+  }
+
+  // Other transactions
+  for (size_t i = 1; i < block.vtx.size(); i++) {
+    const auto &tx = block.vtx[i];
+
+    for (size_t j = 0; j < tx.txIn.size(); j++) {
+      const auto &txIn = tx.txIn[j];
+      // TODO: use block index for transaction search
+      serialized.reset();
+      if (!TxDb_->searchUnspentOutput(txIn.previousOutputHash, txIn.previousOutputIndex, blockIndex, blockDb, serialized)) {
+        LOG_F(ERROR,
+              "can't disconnect block [%u]%s unspent output %s:%u not found",
+              index->Height,
+              index->Header.GetHash().GetHex().c_str(),
+              txIn.previousOutputHash.GetHex().c_str(),
+              txIn.previousOutputIndex);
+        exit(1);
+      }
+
+      this->add(blockId, key, serialized.data(), serialized.sizeOf());
+    }
+
+    key.Tx = tx.getTxId();
+    for (size_t j = 0; j < tx.txOut.size(); j++) {
+      key.Index = j;
+      this->remove(blockId, key);
+    }
+  }
+}
+
+bool searchUnspentOutput(const BC::Proto::TxHashTy &tx,
+                         uint32_t index,
+                         const BC::Proto::Block &block,
+                         std::unordered_map<BC::Proto::TxHashTy, size_t> &localTxMap,
+                         BlockInMemoryIndex &blockIndex,
+                         BlockDatabase &blockDb,
+                         UTXODb *db,
+                         ITransactionDb *txdb,
+                         xmstream &result)
+{
+  result.reset();
+
+  // 1. Search in UTXO cache
+
+  // 2. Search in current block
+  {
+    auto It = localTxMap.find(tx);
+    if (It != localTxMap.end()) {
+      const BC::Proto::Transaction &localTx = block.vtx[It->second];
+      if (index >= localTx.txOut.size())
+        return false;
+
+      const BC::Proto::TxOut &txOut = localTx.txOut[index];
+
+      // Parse transaction output and return
+      BC::Script::parseTransactionOutput(txOut, result);
+      return true;
+    }
+  }
+
+  // 3. Search in whole transaction base
+  return txdb->searchUnspentOutput(tx, index, blockIndex, blockDb, result);
 }
 
 }

@@ -88,7 +88,7 @@ add_library(bcnodecommon STATIC
   common/file.cpp
   common/serializedDataCache.cpp
   common/uint256.cpp
-  common/mstorage/dynamicBuffer.cpp
+  #common/mstorage/dynamicBuffer.cpp
 )
 
 target_link_libraries(bcnodecommon
@@ -112,10 +112,12 @@ set(BASE_SOURCES
   common/merkleTree.cpp
   common/thread.cpp
   db/archive.cpp
-  db/balancedb.cpp
+  db/addrHistoryDb.cpp
   db/storage.cpp
   db/txdb.cpp
+  db/txdbRef.cpp
   db/utxodb.cpp
+  db/sync.cpp
 )
 
 # Linker configuration
@@ -235,12 +237,14 @@ add_executable(bcnode-ltc
   ${BTC_SOURCES}
   BTC/btc.cpp
   LTC/ltc.cpp
+  LTC/proto.cpp
 )
 
 add_executable(bcterminal-ltc
   bcterminal.cpp
   BTC/proto.cpp
   LTC/ltc.cpp
+  LTC/proto.cpp
   common/merkleTree.cpp
 )
 

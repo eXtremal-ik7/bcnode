@@ -6,7 +6,6 @@
 #include "http.h"
 #include "blockIndex.h"
 #include "common/blockDataBase.h"
-#include "common/merkleTree.h"
 #include "db/archive.h"
 #include "BC/network.h"
 #include <asyncio/socket.h>
@@ -334,14 +333,13 @@ void BC::Network::HttpApiConnection::OnBlockByHeight()
 
 void BC::Network::HttpApiConnection::OnTx()
 {
-  BC::DB::TxDb::QueryResult result;
-  if (!Storage_->txdb().enabled()) {
+  if (!Storage_->TransactionDb_) {
     Reply404();
     return;
   }
 
-  Storage_->txdb().find(RPCContext.hash, BlockIndex_, *BlockDb_, result);
-
+  DB::CQueryTransactionResult result;
+  Storage_->TransactionDb_->queryTransaction(RPCContext.hash, BlockIndex_, *BlockDb_, result);
   if (result.Found) {
     xmstream stream;
     Build200(stream);
@@ -364,62 +362,43 @@ void BC::Network::HttpApiConnection::OnTx()
 
 void BC::Network::HttpApiConnection::OnGetBalance()
 {
-  BC::Proto::AddressTy address;
-  if (Storage_->balancedb().enabled() && decodeHumanReadableAddress(RPCContext.address, ChainParams_.PublicKeyPrefix, address)) {
-    BC::DB::BalanceDb::QueryResult result;
-    xmstream stream;
-    Build200(stream);
-    size_t offset = StartChunk(stream);
-    stream.write('{');
-    if (Storage_->balancedb().find(address, &result)) {
-      serializeJson(stream, "found", true); stream.write(",");
-      serializeJson(stream, "balance", result.Balance); stream.write(",");
-      serializeJson(stream, "totalSent", result.TotalSent); stream.write(",");
-      serializeJson(stream, "totalReceived", result.TotalReceived); stream.write(",");
-      serializeJson(stream, "transactionsNum", result.TransactionsNum);
-    } else {
-      serializeJson(stream, "found", false);
-    }
-
-    stream.write('}');
-    FinishChunk(stream, offset);
-    aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
-  } else {
-    Reply404();
-  }
+  Reply404();
 }
 
 void BC::Network::HttpApiConnection::OnGetAddrTxid()
 {
   BC::Proto::AddressTy address;
-  if (Storage_->balancedb().enabled() && decodeHumanReadableAddress(RPCContext.address, ChainParams_.PublicKeyPrefix, address)) {
-    xmstream stream;
-    Build200(stream);
-    size_t offset = StartChunk(stream);
-    stream.write('{');
-
-    std::vector<BC::Proto::TxHashTy> transactions;
-    Storage_->balancedb().findTxidForAddr(address, RPCContext.from, RPCContext.count, transactions);
-    if (!transactions.empty()) {
-      serializeJson(stream, "found", true); stream.write(",");
-      serializeJson(stream, "txid", transactions);
-    } else {
-      serializeJson(stream, "found", false);
-    }
-
-    stream.write('}');
-    FinishChunk(stream, offset);
-    aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
-  } else {
+  if (!decodeHumanReadableAddress(RPCContext.address, ChainParams_.PublicKeyPrefix, address) ||
+      !Storage_->AddrHistoryDb_) {
     Reply404();
+    return;
   }
+
+  xmstream stream;
+  Build200(stream);
+  size_t offset = StartChunk(stream);
+  stream.write('{');
+  // std::vector<BC::Proto::TxHashTy> transactions;
+  BC::DB::CQueryAddrHistory result;
+  Storage_->AddrHistoryDb_->queryAddrTxid(address, RPCContext.from, RPCContext.count, result);
+  if (!result.Transactions.empty()) {
+    serializeJson(stream, "found", true); stream.write(",");
+    serializeJson(stream, "totalTxCount", result.TotalTxCount); stream.write(",");
+    serializeJson(stream, "txid", result.Transactions);
+  } else {
+    serializeJson(stream, "found", false);
+  }
+
+  stream.write('}');
+  FinishChunk(stream, offset);
+  aioWrite(Socket, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::OnGetAddrTx()
 {
   BC::Proto::AddressTy address;
   if (!decodeHumanReadableAddress(RPCContext.address, ChainParams_.PublicKeyPrefix, address) ||
-      !Storage_->balancedb().enabled()) {
+      !Storage_->AddrHistoryDb_) {
     Reply404();
     return;
   }
@@ -428,41 +407,36 @@ void BC::Network::HttpApiConnection::OnGetAddrTx()
   Build200(stream);
   size_t offset = StartChunk(stream);
   stream.write('[');
+  // std::vector<BC::Proto::TxHashTy> transactions;
+  BC::DB::CQueryAddrHistory result;
+  std::vector<BC::DB::CQueryTransactionResult> txDbQueries;
+  Storage_->AddrHistoryDb_->queryAddrTxid(address, RPCContext.from, RPCContext.count, result);
+  txDbQueries.resize(result.Transactions.size());
+  for (size_t i = 0; i < result.Transactions.size(); i++)
+    Storage_->TransactionDb_->queryTransaction(result.Transactions[i], BlockIndex_, *BlockDb_, txDbQueries[i]);
 
-  if (Storage_->balancedb().storeFullTx()) {
-    // TODO: implement denormalized addrdb
-    Reply404();
-  } else if (Storage_->txdb().enabled()) {
-    std::vector<BC::Proto::TxHashTy> transactions;
-    std::vector<BC::DB::TxDb::QueryResult> txDbQueries;
-    Storage_->balancedb().findTxidForAddr(address, RPCContext.from, RPCContext.count, transactions);
-    Storage_->txdb().find(transactions, BlockIndex_, *BlockDb_, txDbQueries);
-    bool includeToResponse = true;
-    bool firstTx = true;
-    for (size_t i = 0, ie = txDbQueries.size(); i != ie; i++) {
-      if (txDbQueries[i].DataCorrupted) {
-        postQuitOperation(aioGetBase(Socket));
-        return;
-      }
-
-      if (!txDbQueries[i].Found) {
-        includeToResponse = false;
-        continue;
-      }
-
-      if (includeToResponse) {
-        if (!firstTx)
-          stream.write(',');
-        stream.write('{');
-        serializeJson(stream, "block", txDbQueries[i].Block); stream.write(',');
-        serializeJson(stream, "tx", txDbQueries[i].Tx);
-        stream.write('}');
-        firstTx = false;
-      }
+  bool includeToResponse = true;
+  bool firstTx = true;
+  for (size_t i = 0, ie = txDbQueries.size(); i != ie; i++) {
+    if (txDbQueries[i].DataCorrupted) {
+      postQuitOperation(aioGetBase(Socket));
+      return;
     }
-  } else {
-    Reply404();
-    return;
+
+    if (!txDbQueries[i].Found) {
+      includeToResponse = false;
+      continue;
+    }
+
+    if (includeToResponse) {
+      if (!firstTx)
+        stream.write(',');
+      stream.write('{');
+      serializeJson(stream, "block", txDbQueries[i].Block); stream.write(',');
+      serializeJson(stream, "tx", txDbQueries[i].Tx);
+      stream.write('}');
+      firstTx = false;
+    }
   }
 
   stream.write(']');

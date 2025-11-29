@@ -43,7 +43,7 @@ using Script = BTC::Script;
 
 namespace Common {
   // Inherit BTC chain params
-  using ChainParams = BTC::Common::ChainParams;
+  using ChainParams = BTC::Common::ChainParamsTy<LTC::Proto>;
 
   enum NetwordIdTy {
     NetworkIdMain = 0,
@@ -51,11 +51,23 @@ namespace Common {
     NetworkIdRegtest
   };
 
-  using BlockIndex = BTC::Common::BlockIndex;
+  using BlockIndex = BTC::Common::BlockIndexTy<LTC::Proto>;
   using CheckConsensusCtx = BTC::Common::CheckConsensusCtx;
 
   bool setupChainParams(ChainParams *params, const char *network);
   static inline bool hasWitness() { return true; }
+
+  // Validation functions
+  using ValidateStandaloneTy = std::function<bool(const Proto::Block&, const ChainParams&, std::string &error)>;
+  using ValidateContextualTy = std::function<bool(const Common::BlockIndex&, const Proto::Block&, const ChainParams&, std::string &error)>;
+  static inline void applyStandaloneValidation(ValidateStandaloneTy function, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
+    if (*isValid)
+      *isValid = function(block, chainParams, error);
+  }
+  static inline void applyContextualValidation(ValidateContextualTy function, const Common::BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
+    if (*isValid)
+      *isValid = function(index, block, chainParams, error);
+  }
 
   unsigned getBlockGeneration(const ChainParams &chainParams, LTC::Common::BlockIndex *index);
   void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);

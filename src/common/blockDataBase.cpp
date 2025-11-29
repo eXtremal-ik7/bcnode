@@ -92,22 +92,22 @@ static inline void QueueNextBlocks(std::deque<BC::Common::BlockIndex*> &queue, B
   }
 }
 
-static void ConnectBlock(BlockInMemoryIndex &blockIndex, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
+static void ConnectBlock(BlockInMemoryIndex &blockIndex, const BC::Proto::Block &block, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
 {
   if (!silent)
     LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().ToString().c_str(), index->Height);
   index->Prev->Next = index;
   blockIndex.blockHeightIndex()[index->Height] = index;
-  storage.add(BC::DB::Connect, index);
+  storage.add(BC::DB::Connect, index, blockIndex);
 }
 
-static void DisconnectBlock(BlockInMemoryIndex &blockIndex, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
+static void DisconnectBlock(BlockInMemoryIndex &blockIndex, const BC::Proto::Block &block, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
 {
   if (!silent)
     LOG_F(INFO, "Disconnect block %s (%u)", index->Header.GetHash().ToString().c_str(), index->Height);
   index->Prev->Next = nullptr;
   blockIndex.blockHeightIndex()[index->Height] = nullptr;
-  storage.add(BC::DB::Disconnect, index);
+  storage.add(BC::DB::Disconnect, index, blockIndex);
 }
 
 static void BuildHeaderChain(BC::Common::ChainParams &chainParams, BC::Common::BlockIndex *start)
@@ -149,6 +149,7 @@ static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPar
     }
 
     // Contextual block check
+    // TODO: do it before block connect
     std::string error;
     if (!BC::Common::checkBlockContextual(*current, *block, chainParams, error)) {
       LOG_F(WARNING, "block %s (%u) check failed, error: %s", current->Header.GetHash().ToString().c_str(), current->Height, error.c_str());
@@ -162,7 +163,7 @@ static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPar
       // New best block found
       BC::Common::BlockIndex *previousBest = blockIndex.best();
       if (current->Prev == previousBest) {
-        ConnectBlock(blockIndex, storage, current);
+        ConnectBlock(blockIndex, *block, storage, current);
       } else {
         // Rebuild chain from least common ancestor
         std::vector<BC::Common::BlockIndex*> newPath;
@@ -178,7 +179,7 @@ static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPar
           }
           while (sb != lb) {
             newPath.push_back(lb);
-            DisconnectBlock(blockIndex, storage, sb, false);
+            DisconnectBlock(blockIndex, *block, storage, sb, false);
             sb = sb->Prev;
             lb = lb->Prev;
           }
@@ -188,12 +189,12 @@ static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPar
           sb = current;
           uint32_t sbHeight = sb->Height;
           while (lb->Height > sbHeight) {
-            DisconnectBlock(blockIndex, storage, lb, false);
+            DisconnectBlock(blockIndex, *block, storage, lb, false);
             lb = lb->Prev;
           }
           while (sb != lb) {
             newPath.push_back(sb);
-            DisconnectBlock(blockIndex, storage, lb, false);
+            DisconnectBlock(blockIndex, *block, storage, lb, false);
             sb = sb->Prev;
             lb = lb->Prev;
           }
@@ -201,7 +202,7 @@ static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPar
 
         // Connect blocks from new path
         for (auto I = newPath.rbegin(), IE = newPath.rend(); I != IE; ++I)
-          ConnectBlock(blockIndex, storage, *I, false);
+          ConnectBlock(blockIndex, *block, storage, *I, false);
       }
 
       blockIndex.setBest(current);
@@ -209,8 +210,7 @@ static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPar
 
     // drop block data cache for connected block
     acceptedBlocks.push_back(current);
-    storage.add(BC::DB::WriteData, current);
-
+    storage.add(BC::DB::WriteData, current, blockIndex);
     QueueNextBlocks(queue, current);
     queue.pop_front();
   }
@@ -464,11 +464,8 @@ static bool loadBlockIndexBuilder(BlockInMemoryIndex &blockIndex, LoadingIndexCo
 {
   for (auto &index: loadingIndexContext->allIndexes) {
     auto It = blockIndex.blockIndex().find(index->Header.hashPrevBlock);
-    if (It == blockIndex.blockIndex().end()) {
-      LOG_F(ERROR, "Can't find previous block %s for %s (%u)", index->Header.hashPrevBlock.ToString().c_str(), index->Header.GetHash().ToString().c_str(), index->Height);
-      return false;
-    }
-
+    if (It == blockIndex.blockIndex().end())
+      continue;
     index->Prev = It->second;
   }
 
@@ -587,20 +584,30 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex, std::filesystem::path &da
   LOG_F(INFO, "Restore best chain...");
 
   BC::Common::BlockIndex *index = bestIndex;
-  while (index) {
-    blockIndex.blockHeightIndex()[index->Height] = index;
-
-    BC::Common::BlockIndex *prevIndex = index->Prev;
-    if (prevIndex) {
-      if (prevIndex->Height != index->Height-1) {
-        LOG_F(ERROR, "Index loader: block %s (%u) have invalid previous block %s with height %u", index->Header.GetHash().ToString().c_str(), index->Height, prevIndex->Header.GetHash().ToString().c_str(), prevIndex->Height);
-        return false;
-      }
-
-      prevIndex->Next = index;
+  while (index->Prev) {
+    if (index->Prev->Height != index->Height-1) {
+      LOG_F(ERROR,
+            "Index loader: block %s (%u) have invalid previous block %s with height %u",
+            index->Header.GetHash().ToString().c_str(),
+            index->Height,
+            index->Prev->Header.GetHash().ToString().c_str(),
+            index->Prev->Height);
+      return false;
     }
 
-    index = prevIndex;
+    blockIndex.blockHeightIndex()[index->Height] = index;
+    index->Prev->Next = index;
+    index = index->Prev;
+  }
+
+  blockIndex.blockHeightIndex()[index->Height] = index;
+  if (index != blockIndex.genesis()) {
+    LOG_F(ERROR, "Index for [%u]%s is broken (breaks at [%u]%s",
+          bestIndex->Height,
+          bestIndex->Header.GetHash().GetHex().c_str(),
+          index->Height,
+          index->Header.GetHash().GetHex().c_str());
+    return false;
   }
 
   blockIndex.setBest(bestIndex);
@@ -621,19 +628,7 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
   std::vector<BlockPosition> blockOffsets;
   unsigned threadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
 
-  // Cleanup index directory
-  {
-    std::error_code errc;
-    std::filesystem::create_directories(indexPath, errc);
-    for (std::filesystem::directory_iterator I(indexPath), IE; I != IE; ++I)
-      std::filesystem::remove_all(I->path());
-  }
-
-  // Initialize local index storage
-  LinearDataStorage indexStorage;
-  indexStorage.init(indexPath, "index%05u.dat", BC::Configuration::BlocksFileLimit);
-
-  auto indexWriter = std::async(std::launch::async, [&storage, &indexStorage]() -> bool {
+  auto indexWriter = std::async(std::launch::async, [&storage]() -> bool {
     xmstream stream;
     for (;;) {
       BC::DB::Task task;
@@ -653,7 +648,7 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
       stream.reset();
       BC::serialize(stream, *task.Index);
       uint32_t serializedSize = static_cast<uint32_t>(stream.sizeOf());
-      if (!indexStorage.append2(&serializedSize, sizeof(serializedSize), stream.data(), static_cast<uint32_t>(stream.sizeOf()), position))
+      if (!storage.blockDb().indexStorage().append2(&serializedSize, sizeof(serializedSize), stream.data(), static_cast<uint32_t>(stream.sizeOf()), position))
         return false;
       task.Index->Serialized.reset();
     }
@@ -743,8 +738,6 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
   storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
   if (!indexWriter.get())
     return false;
-  if (!indexStorage.flush())
-    return false;
 
   auto best = blockIndex.best();
   LOG_F(INFO, "%zu blocks loaded from disk", totalBlockCount);
@@ -782,16 +775,21 @@ bool BlockDatabase::init(std::filesystem::path &dataDir, BC::Common::ChainParams
 bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index)
 {
   std::pair<uint32_t, uint32_t> position;
-  const SerializedDataObject *serialized = index->Serialized.get();
-  uint32_t prefix[2] = { Magic_, index->SerializedBlockSize };
-  if (!BlockStorage_.append2(prefix, sizeof(prefix), serialized->data(), static_cast<uint32_t>(serialized->size()), position))
-    return false;
+  {
+    const SerializedDataObject *serialized = index->Serialized.get();
+    if (serialized->data()) {
+      // Skip blocks loaded from disk
+      uint32_t prefix[2] = { Magic_, index->SerializedBlockSize };
+      if (!BlockStorage_.append2(prefix, sizeof(prefix), serialized->data(), static_cast<uint32_t>(serialized->size()), position))
+        return false;
+      index->FileNo = position.first;
+      index->FileOffset = position.second;
+    }
+  }
 
   // Serialize index for storage
   uint8_t buffer[1024];
   xmstream indexData(buffer, sizeof(buffer));
-  index->FileNo = position.first;
-  index->FileOffset = position.second;
   indexData.reset();
   BC::serialize(indexData, *index);
   uint32_t serializedSize = static_cast<uint32_t>(indexData.sizeOf());

@@ -7,15 +7,24 @@
 
 #include "db/common.h"
 
+namespace config4cpp {
+class Configuration;
+}
+
 namespace BC {
 namespace DB {
 
-class TxDb :
+class Archive;
+
+class TxDbRef :
   public CBaseKV<BC::Proto::TxHashTy>,
   public ITransactionDb {
 public:
-  TxDb() : CBaseKV<BC::Proto::TxHashTy>("txdb.full") {}
-  virtual ~TxDb() {}
+  static constexpr unsigned MinimalBatchSize = 8192;
+
+public:
+  TxDbRef() : CBaseKV<BC::Proto::TxHashTy>("txdb.ref") {}
+  virtual ~TxDbRef() {}
 
   void *interface(int interface) {
     switch (interface) {
@@ -29,6 +38,7 @@ public:
                         BlockDatabase &blockDb,
                         CQueryTransactionResult &result);
 
+  // TODO: remove it, use full block index instead
   bool searchUnspentOutput(const BC::Proto::TxHashTy &tx,
                            uint32_t index,
                            BlockInMemoryIndex &blockIndex,
@@ -39,6 +49,8 @@ private:
   struct CLogData {
     BC::Proto::BlockHashTy Hash;
     uint32_t Index;
+    uint32_t SerializedDataOffset;
+    uint32_t SerializedDataSize;
   };
 
   uint32_t version() final { return 1; }

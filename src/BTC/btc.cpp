@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "btc.h"
+#include "db/utxodb.h"
 #include <p2putils/xmstream.h>
 
 namespace BTC {

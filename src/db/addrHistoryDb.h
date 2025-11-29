@@ -10,41 +10,32 @@
 namespace BC {
 namespace DB {
 
-class TxDb :
-  public CBaseKV<BC::Proto::TxHashTy>,
-  public ITransactionDb {
+class AddrHistoryDb :
+  public CBaseArrayFixed<BC::Proto::AddressTy>,
+  public IAddrHistoryDb {
+
 public:
-  TxDb() : CBaseKV<BC::Proto::TxHashTy>("txdb.full") {}
-  virtual ~TxDb() {}
+  AddrHistoryDb() : CBaseArrayFixed<BC::Proto::AddressTy>("addrhistorydb", sizeof(BC::Proto::TxHashTy), 64) {}
+  virtual ~AddrHistoryDb() {}
 
   void *interface(int interface) {
     switch (interface) {
-      case EIQueryTransaction : return static_cast<ITransactionDb*>(this);
+      case EIQueryAddrHistory : return static_cast<IAddrHistoryDb*>(this);
       default: return nullptr;
     }
   }
 
-  bool queryTransaction(const BC::Proto::TxHashTy &txid,
-                        BlockInMemoryIndex &blockIndex,
-                        BlockDatabase &blockDb,
-                        CQueryTransactionResult &result);
-
-  bool searchUnspentOutput(const BC::Proto::TxHashTy &tx,
-                           uint32_t index,
-                           BlockInMemoryIndex &blockIndex,
-                           BlockDatabase &blockDb,
-                           xmstream &result);
-
-private:
-  struct CLogData {
-    BC::Proto::BlockHashTy Hash;
-    uint32_t Index;
-  };
+  // bool queryTransaction(const BC::Proto::TxHashTy&, CQueryTransactionResult&) final { return false; }
+  bool queryAddrTxid(const BC::Proto::AddressTy &address, size_t from, size_t count, CQueryAddrHistory &result);
 
   uint32_t version() final { return 1; }
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
   void connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
   void disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
+
+private:
+  UTXODb *UTXODb_ = nullptr;
+  ITransactionDb *TxDb_ = nullptr;
 };
 
 }

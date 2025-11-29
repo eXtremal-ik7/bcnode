@@ -5,53 +5,46 @@
 
 #pragma once
 
-#include "balancedb.h"
-#include "txdb.h"
-#include "utxodb.h"
+#include "db/common.h"
+#include "db/sync.h"
 
 class BlockDatabase;
+
+struct aioObject;
 
 namespace BC {
 namespace DB {
 
 class Archive {
-public:
+public:      
   bool init(BlockInMemoryIndex &blockIndex,
-            BlockDatabase &blockDb,
-            BC::Common::BlockIndex **connectPoints,
-            BC::DB::IndexDbMap &disconnectQueue) {
-    if (!TxDb_.initialize(blockIndex, blockDb, *this, &connectPoints[BC::DB::DbTransactions], disconnectQueue) ||
-        !BalanceDb_.initialize(blockIndex, blockDb, *this, &connectPoints[BC::DB::DbAddrBalance], disconnectQueue))
-      return false;
-    return true;
+            BC::DB::Storage &storage,
+            config4cpp::Configuration *cfg);
+
+  bool purge(config4cpp::Configuration *cfg, std::filesystem::path &dataDir);
+
+  void connect(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) {
+    for (auto &db: AllDb_)
+      db->connect(index, block, blockIndex, blockDb);
   }
 
-  bool sync(BlockInMemoryIndex &blockIndex,
-            BlockDatabase &blockDb,
-            BC::Common::BlockIndex **connectPoints,
-            BC::DB::IndexDbMap &disconnectQueue);
-
-  void add(BC::Common::BlockIndex *index, const BC::Proto::Block &block, ActionTy action) {
-    if (TxDb_.enabled())
-      TxDb_.add(index, block, action);
-    if (BalanceDb_.enabled())
-      BalanceDb_.add(index, block, action);
+  void disconnect(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) {
+    for (auto &db: AllDb_)
+      db->disconnect(index, block, blockIndex, blockDb);
   }
 
   void flush() {
-    if (TxDb_.enabled())
-      TxDb_.flush();
-    if (BalanceDb_.enabled())
-      BalanceDb_.flush();
+    for (auto &db: AllDb_)
+      db->flush();
   }
 
-  BC::DB::BalanceDb &balancedb() { return BalanceDb_; }
-  BC::DB::TxDb &txdb() { return TxDb_; }
-
 private:
-  BC::DB::UTXODb UTXODb_;
-  BC::DB::BalanceDb BalanceDb_;
-  BC::DB::TxDb TxDb_;
+  std::vector<std::unique_ptr<BC::DB::BaseInterface>> AllDb_;
+
+public:
+  // Handlers
+  ITransactionDb *TransactionDb_ = nullptr;
+  IAddrHistoryDb *AddrHistoryDb_ = nullptr;
 };
 
 }

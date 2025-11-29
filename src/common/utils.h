@@ -49,3 +49,11 @@ static inline void bin2hexLowerCase(const void *in, char *out, size_t size)
     out[i*2+1] = bin2hexLowerCaseDigit(pIn[i] & 0xF);
   }
 }
+
+static inline std::string bin2hexLowerCase(const void *in, size_t size)
+{
+  std::string result;
+  result.resize(size * 2);
+  bin2hexLowerCase(in, result.data(), size);
+  return result;
+}

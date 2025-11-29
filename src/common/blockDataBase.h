@@ -57,8 +57,12 @@ public:
 
   BC::Common::BlockIndex *best() { return BestIndex_.load(std::memory_order::memory_order_relaxed); }
   BC::Common::BlockIndex *genesis() { return GenesisIndex_; }
+  BC::Proto::Block &genesisBlock() { return GenesisBlock_; }
   void setBest(BC::Common::BlockIndex *index) { BestIndex_.store(index); }
-  void setGenesis(BC::Common::BlockIndex *index) { GenesisIndex_ = index; }
+  void setGenesis(BC::Common::BlockIndex *index, const BC::Proto::Block &block) {
+    GenesisIndex_ = index;
+    GenesisBlock_ = block;
+  }
 
   // Old-style accessors
   auto &blockIndex() { return BlockIndex_; }
@@ -71,6 +75,7 @@ private:
   tbb::concurrent_unordered_map<uint32_t, BC::Common::BlockIndex*, std::hash<uint32_t>> BlockHeightIndex_;
   std::atomic<BC::Common::BlockIndex*> BestIndex_ = nullptr;
   BC::Common::BlockIndex *GenesisIndex_ = nullptr;
+  BC::Proto::Block GenesisBlock_;
 };
 
 class BlockDatabase {
@@ -85,6 +90,9 @@ public:
   bool writeBufferEmpty() { return BlockStorage_.bufferEmpty(); }
   bool flush() { return BlockStorage_.flush() && IndexStorage_.flush(); }
   uint32_t magic() { return Magic_; }
+
+  // TODO: remove
+  LinearDataStorage &indexStorage() { return IndexStorage_; }
 
 private:
   LinearDataStorage BlockStorage_;

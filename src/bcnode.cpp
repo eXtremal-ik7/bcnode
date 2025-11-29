@@ -215,7 +215,7 @@ int main(int argc, char **argv)
     BC::Proto::BlockHashTy hash = context.ChainParams.GenesisBlock.header.GetHash();
     context.BlockIndex.blockIndex().insert(std::pair(hash, genesisIndex));
     context.BlockIndex.blockHeightIndex().insert(std::pair(0, genesisIndex));
-    context.BlockIndex.setGenesis(genesisIndex);
+    context.BlockIndex.setGenesis(genesisIndex, context.ChainParams.GenesisBlock);
     context.BlockIndex.setBest(genesisIndex);
     LOG_F(INFO, "Adding genesis block %s", hash.ToString().c_str());
   }
@@ -260,6 +260,7 @@ int main(int argc, char **argv)
   unsigned rtThreadsNum = 1;
   unsigned outgoingConnectionsLimit = 16;
   unsigned incomingConnectionsLimit = std::numeric_limits<unsigned>::max();
+  bool archiveEnabled = false;
   if (std::filesystem::exists(configPath)) {
     try {
       cfg->parse(configPath.u8string().c_str());
@@ -285,9 +286,7 @@ int main(int argc, char **argv)
       outgoingConnectionsLimit = cfg->lookupInt("bcnode", "outgoingConnectionsLimit", 16);
       incomingConnectionsLimit = cfg->lookupInt("bcnode", "incomingConnectionsLimit", std::numeric_limits<unsigned>::max());
 
-      // Load database configs
-      context.Archive.txdb().getConfiguration(cfg);
-      context.Archive.balancedb().getConfiguration(cfg);
+      archiveEnabled = cfg->lookupBoolean("archive", "enabled", false);
     } catch(const config4cpp::ConfigurationException& ex) {
       LOG_F(ERROR, "%s", ex.c_str());
       return 1;
@@ -316,39 +315,77 @@ int main(int argc, char **argv)
   // Handling special modes:
   //   - resync
   //   - reindex
+  if (gReindex)
+    gResync = 1;
+
   if (gResync) {
-    gReindex = 0;
+    // Remove utxo database
+    std::filesystem::path dbPath = context.DataDir / "utxo";
+    std::error_code ec;
+    std::filesystem::remove_all(dbPath, ec);
+    if (ec) {
+      LOG_F(ERROR, "Failed to remove database %s", "utxo");
+      return 1;
+    }
+
+    // Remove all archive databases
+    if (!context.Archive.purge(cfg, context.DataDir))
+      return 1;
   }
 
-  if (gReindex && !reindex(context.BlockIndex, context.DataDir, context.ChainParams, context.Storage)) {
-    return 1;
+  if (gReindex) {
+    // Remove block index database
+    std::error_code errc;
+    std::filesystem::path indexPath = context.DataDir / "index";
+    std::filesystem::create_directories(indexPath, errc);
+    for (std::filesystem::directory_iterator I(indexPath), IE; I != IE; ++I)
+      std::filesystem::remove_all(I->path());
   }
-
-  // Loading index
-  if (!gResync && !gReindex && !loadingBlockIndex(context.BlockIndex, context.DataDir)) {
-    return 1;
-  }
-
-  context.MainBase = createAsyncBase(amOSDefault);
 
   // Initialize storage
   if (!context.BlockDb.init(context.DataDir, context.ChainParams))
     return 1;
+  context.Storage.init(context.BlockDb, context.Archive);
 
-  BC::DB::IndexDbMap forDisconnect;
-  BC::Common::BlockIndex *firstBlocks[BC::DB::DbCount] = {nullptr};
+  // Loading index
+  if (!loadingBlockIndex(context.BlockIndex, context.DataDir))
+    return 1;
 
-  // Initialize UTXO database
-  if (!context.Storage.utxodb().initialize(context.BlockIndex, context.BlockDb, firstBlocks, forDisconnect))
+  if (!archiveEnabled) {
+    LOG_F(ERROR, "Full block index not supported at this moment, need enable archive with any transaction base");
     return 1;
-  // Initialize archive
-  if (!context.Archive.init(context.BlockIndex, context.BlockDb, firstBlocks, forDisconnect))
-    return 1;
-  if (!context.Archive.sync(context.BlockIndex, context.BlockDb, firstBlocks, forDisconnect))
-    return 1;
+  }
+
+  // Initialize databases
+  if (!archiveEnabled) {
+    // Archive disabled, processing UTXO database
+    BC::Common::BlockIndex *utxoBestBlock;
+    std::vector<BC::Common::BlockIndex*> forDisconnect;
+    if (!context.Storage.utxodb().initialize(context.BlockIndex, context.BlockDb, context.DataDir, context.Storage, cfg, &utxoBestBlock, forDisconnect))
+      return 1;
+    if (!BC::DB::dbDisconnectBlocks(context.Storage.utxodb(), context.BlockIndex, context.Storage, forDisconnect))
+      return 1;
+    if (!BC::DB::dbConnectBlocks(context.Storage.utxodb(), utxoBestBlock, {}, context.BlockIndex, context.Storage, "UTXO database"))
+      return 1;
+  } else {
+    // Initialize full archive
+    if (!context.Archive.init(context.BlockIndex, context.Storage, cfg))
+      return 1;
+    if (!context.Archive.TransactionDb_) {
+      LOG_F(ERROR, "Full block index not supported at this moment, need enable archive with any transaction base");
+      return 1;
+    }
+  }
+
+  if (gReindex) {
+    if (!reindex(context.BlockIndex, context.DataDir, context.ChainParams, context.Storage))
+      return 1;
+  }
+
+  context.MainBase = createAsyncBase(amOSDefault);
 
   // Initialize storage manager
-  if (!context.Storage.init(context.BlockDb, context.Archive, [&context]() { postQuitOperation(context.MainBase); }))
+  if (!context.Storage.run([&context]() { postQuitOperation(context.MainBase); }))
     return 1;
 
   // Starting daemon

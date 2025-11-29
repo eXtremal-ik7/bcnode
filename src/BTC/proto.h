@@ -249,8 +249,8 @@ template<> struct Io<Proto::BlockHeader> {
 
 // TxIn
 template<> struct Io<Proto::TxIn> {
-  static inline size_t getSerializedSize(const BTC::Proto::TxIn &data);
-  static inline size_t getUnpackedExtraSize(xmstream &src);
+  static size_t getSerializedSize(const BTC::Proto::TxIn &data);
+  static size_t getUnpackedExtraSize(xmstream &src);
   static void serialize(xmstream &dst, const BTC::Proto::TxIn &data);
   static void unserialize(xmstream &src, BTC::Proto::TxIn &data);
   static void unpack2(xmstream &src, Proto::TxIn *data, uint8_t **extraData);
@@ -259,8 +259,8 @@ template<> struct Io<Proto::TxIn> {
 
 // TxOut
 template<> struct Io<Proto::TxOut> {
-  static inline size_t getSerializedSize(const BTC::Proto::TxOut &data);
-  static inline size_t getUnpackedExtraSize(xmstream &src);
+  static size_t getSerializedSize(const BTC::Proto::TxOut &data);
+  static size_t getUnpackedExtraSize(xmstream &src);
   static void serialize(xmstream &dst, const BTC::Proto::TxOut &data);
   static void unserialize(xmstream &src, BTC::Proto::TxOut &data);
   static void unpack2(xmstream &src, Proto::TxOut *data, uint8_t **extraData);
@@ -321,8 +321,26 @@ template<typename T> struct Io<Proto::BlockTy<T>> {
   }
 
   static inline void unpack2(xmstream &src, Proto::BlockTy<T> *data, uint8_t **extraData) {
+    size_t blockDataOffset = src.offsetOf();
+
     BTC::Io<decltype(data->header)>::unpack2(src, &data->header, extraData);
-    BTC::Io<decltype(data->vtx)>::unpack2(src, &data->vtx, extraData);
+
+    uint64_t size = 0;
+    unserializeVarSize(src, size);
+    if (size > src.remaining()) {
+      src.seekEnd(0, true);
+      return;
+    }
+
+    using TransactionTy = typename T::Transaction;
+    TransactionTy *elementsData = reinterpret_cast<TransactionTy*>(*extraData);
+    new (&data->vtx) xvector<TransactionTy>(elementsData, size);
+    (*extraData) += sizeof(TransactionTy)*size;
+    for (size_t i = 0; i < size; i++) {
+      data->vtx[i].SerializedDataOffset = static_cast<uint32_t>(src.offsetOf() - blockDataOffset);
+      BTC::Io<TransactionTy>::unpack2(src, &elementsData[i], extraData);
+      data->vtx[i].SerializedDataSize = static_cast<uint32_t>(src.offsetOf() - data->vtx[i].SerializedDataOffset);
+    }
   }
 };
 
