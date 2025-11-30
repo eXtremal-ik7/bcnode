@@ -383,7 +383,7 @@ void BC::Network::HttpApiConnection::OnGetAddrTxid()
   Storage_->AddrHistoryDb_->queryAddrTxid(address, RPCContext.from, RPCContext.count, result);
   if (!result.Transactions.empty()) {
     serializeJson(stream, "found", true); stream.write(",");
-    serializeJson(stream, "totalTxCount", result.TotalTxCount); stream.write(",");
+    serializeJson(stream, "totalTxCount", (uint64_t)result.TotalTxCount); stream.write(",");
     serializeJson(stream, "txid", result.Transactions);
   } else {
     serializeJson(stream, "found", false);

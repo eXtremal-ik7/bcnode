@@ -637,7 +637,7 @@ public:
 
         if (currentArraySize % ChunkSize_) {
           // Merge last chunk
-          size_t writeSize = std::min(remaining, ChunkSize_ - (currentArraySize % ChunkSize_));
+          size_t writeSize = std::min(remaining, ChunkSize_ - (size_t)(currentArraySize % ChunkSize_));
 
           CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
           chunkKey->Key = allKeys[i];

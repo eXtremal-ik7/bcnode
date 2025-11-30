@@ -20,6 +20,7 @@ option(USE_EXTERNAL_DEFAULT_CALLBACKS "Define this symbol if an external impleme
 # Test & benchmarks
 option(ENABLE_TESTS "Enable tests" OFF)
 option(ENABLE_OPENSSL_TESTS "Enable OpenSSL tests" OFF)
+option(ENABLE_VALGRIND "Enable valgrind" OFF)
 
 set(ECMULT_GEN_PREC_BITS 4 CACHE STRING "Set ecmult gen precision bits" FORCE)
 set(ECMULT_WINDOW_SIZE 15 CACHE STRING "Set window size for ecmult precomputation" FORCE)
@@ -126,7 +127,7 @@ endif()
 
 # Main static library
 add_library(secp256k1 STATIC ${CMAKE_CURRENT_SOURCE_DIR}/src/secp256k1.c)
-if (NOT MSVC)
+if (ENABLE_VALGRIND)
   target_compile_definitions(secp256k1 PRIVATE -DVALGRIND)
 endif()
 target_compile_options(secp256k1 PRIVATE ${DEFAULT_COMPILE_OPTIONS})
@@ -136,14 +137,14 @@ add_dependencies(secp256k1 ecmult_static_context)
 if (ENABLE_TESTS)
   add_executable(tests ${CMAKE_CURRENT_SOURCE_DIR}/src/tests.c)
   target_include_directories(tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  if (NOT MSVC)
+  if (ENABLE_VALGRIND)
     target_compile_definitions(tests PRIVATE -DVALGRIND)
   endif()
   target_compile_definitions(tests PRIVATE -DVERIFY)
   target_compile_options(tests PRIVATE ${DEFAULT_COMPILE_OPTIONS})
   target_link_libraries(tests secp256k1)
     
-  if (NOT MSVC)
+  if (ENABLE_VALGRIND)
     add_executable(valgrind_ctime_test ${CMAKE_CURRENT_SOURCE_DIR}/src/valgrind_ctime_test.c)
     target_compile_options(valgrind_ctime_test PRIVATE ${DEFAULT_COMPILE_OPTIONS})
     target_link_libraries(valgrind_ctime_test secp256k1)
