@@ -22,17 +22,17 @@ bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstre
   });
 }
 
-bool UTXODb::queryFast(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstream &data)
+bool UTXODb::queryFast(const BC::Proto::BlockHashTy&, unsigned, xmstream&)
 {
   return false;
 }
 
-bool UTXODb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage)
+bool UTXODb::initializeImpl(config4cpp::Configuration* , BC::DB::Storage&)
 {
   return true;
 }
 
-void UTXODb::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
+void UTXODb::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex&, BlockDatabase&)
 { 
   SmallStream<1024> serialized;
   const auto blockId = index->Header.GetHash();
@@ -128,7 +128,7 @@ bool searchUnspentOutput(const BC::Proto::TxHashTy &tx,
                          std::unordered_map<BC::Proto::TxHashTy, size_t> &localTxMap,
                          BlockInMemoryIndex &blockIndex,
                          BlockDatabase &blockDb,
-                         UTXODb *db,
+                         UTXODb*,
                          ITransactionDb *txdb,
                          xmstream &result)
 {

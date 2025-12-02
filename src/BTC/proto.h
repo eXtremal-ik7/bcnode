@@ -4,9 +4,8 @@
 #include <string.h>
 #include <string>
 #include "serialize.h"
-#include "common/intrusive_ptr.h"
 #include "common/uint256.h"
-#include <openssl/sha.h>
+#include "crypto/sha256.h"
 #include "../loguru.hpp"
 
 
@@ -84,14 +83,13 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
 
     BlockHashTy GetHash() const {
       uint256 result;
-      SHA256_CTX sha256;
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, this, sizeof(*this));
-      SHA256_Final(result.begin(), &sha256);
-
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, result.begin(), sizeof(result));
-      SHA256_Final(result.begin(), &sha256);
+      CCtxSha256 sha256;
+      sha256Init(&sha256);
+      sha256Update(&sha256, this, sizeof(*this));
+      sha256Final(&sha256, result.begin());
+      sha256Init(&sha256);
+      sha256Update(&sha256, result.begin(), sizeof(result));
+      sha256Final(&sha256, result.begin());
       return result;
     }
   };

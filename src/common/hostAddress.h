@@ -14,7 +14,7 @@ struct HostAddressCompare {
     } else {
       const size_t *ipv6 = reinterpret_cast<const size_t*>(address.ipv6);
       size_t hash = 0;
-      for (unsigned i = 0; i < sizeof(address.ipv6) / sizeof(size_t); i++)
+      for (unsigned i = 0; i < sizeof(address.ipv6) / sizeof(uint16_t); i++)
         hash ^= ipv6[i];
       hash ^= address.port;
       hash ^= address.family;
@@ -32,7 +32,7 @@ struct HostAddressEqual {
              a1.port == a2.port;
     } else {
       return a1.family == a2.family &&
-             a1.ipv6 == a2.ipv6 &&
+             memcmp(a1.ipv6, a2.ipv6, sizeof(a1.ipv6)) == 0 &&
              a1.port == a2.port;
     }
   }

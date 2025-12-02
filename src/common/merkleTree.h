@@ -6,7 +6,6 @@
 #pragma once
 
 #include "common/uint256.h"
-#include <openssl/sha.h>
 #include <memory>
 
 uint256 calculateMerkleRoot(uint256 *hashes, size_t size);
@@ -32,7 +31,8 @@ uint256 calculateBlockWitnessMerkleRoot(const BlockTy &block)
   std::unique_ptr<uint256[]> hashes(new uint256[txNum]);
 
   // Get hashes for all transactions
-  hashes[0].SetNull();
+  if (txNum >= 1)
+    hashes[0].SetNull();
   for (size_t i = 1; i < txNum; i++)
     hashes[i] = block.vtx[i].getWTxid();
 

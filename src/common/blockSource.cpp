@@ -22,6 +22,7 @@ intrusive_ptr<BlockSource> BlockSource::getOrCreateBlockSource(atomic_intrusive_
         return intrusive_ptr<BlockSource>(newValue);
       } else {
         // newValue was deleted in this branch
+        // TODO: fix it
         current = current.get()->Next_;
         if (!current.get()->DownloadingFinished_)
           return current;

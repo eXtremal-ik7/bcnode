@@ -4,23 +4,24 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "merkleTree.h"
+#include "crypto/sha256.h"
 
 uint256 calculateMerkleRoot(uint256 *hashes, size_t size)
 {
   if (size) {
     size_t txNum = size;
-    SHA256_CTX sha256;
+    CCtxSha256 sha256;
     while (txNum > 1) {
       size_t iterNum = (txNum / 2) + (txNum % 2);
       for (size_t i = 0; i < iterNum; i++) {
-        SHA256_Init(&sha256);
-        SHA256_Update(&sha256, hashes[i*2].begin(), sizeof(uint256));
-        SHA256_Update(&sha256, hashes[i*2+1 < txNum ? i*2+1 : i*2].begin(), sizeof(uint256));
-        SHA256_Final(hashes[i].begin(), &sha256);
+        sha256Init(&sha256);
+        sha256Update(&sha256, hashes[i*2].begin(), sizeof(uint256));
+        sha256Update(&sha256, hashes[i*2+1 < txNum ? i*2+1 : i*2].begin(), sizeof(uint256));
+        sha256Final(&sha256, hashes[i].begin());
 
-        SHA256_Init(&sha256);
-        SHA256_Update(&sha256, hashes[i].begin(), sizeof(uint256));
-        SHA256_Final(hashes[i].begin(), &sha256);
+        sha256Init(&sha256);
+        sha256Update(&sha256, hashes[i].begin(), sizeof(uint256));
+        sha256Final(&sha256, hashes[i].begin());
       }
 
       txNum = iterNum;
@@ -40,26 +41,26 @@ uint256 calculateMerkleRoot(uint256 hash, uint256 *tree, size_t treeSize, size_t
   if (!treeSize)
     return result;
 
-  SHA256_CTX sha256;
+  CCtxSha256 sha256;
   for (size_t i = 0; i < treeSize; i++) {
     if (index & 1) {
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, tree[i].begin(), sizeof(uint256));
-      SHA256_Update(&sha256, result.begin(), sizeof(uint256));
-      SHA256_Final(result.begin(), &sha256);
+      sha256Init(&sha256);
+      sha256Update(&sha256, tree[i].begin(), sizeof(uint256));
+      sha256Update(&sha256, result.begin(), sizeof(uint256));
+      sha256Final(&sha256, result.begin());
 
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, result.begin(), sizeof(uint256));
-      SHA256_Final(result.begin(), &sha256);
+      sha256Init(&sha256);
+      sha256Update(&sha256, result.begin(), sizeof(uint256));
+      sha256Final(&sha256, result.begin());
     } else {
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, result.begin(), sizeof(uint256));
-      SHA256_Update(&sha256, tree[i].begin(), sizeof(uint256));
-      SHA256_Final(result.begin(), &sha256);
+      sha256Init(&sha256);
+      sha256Update(&sha256, result.begin(), sizeof(uint256));
+      sha256Update(&sha256, tree[i].begin(), sizeof(uint256));
+      sha256Final(&sha256, result.begin());
 
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, result.begin(), sizeof(uint256));
-      SHA256_Final(result.begin(), &sha256);
+      sha256Init(&sha256);
+      sha256Update(&sha256, result.begin(), sizeof(uint256));
+      sha256Final(&sha256, result.begin());
     }
 
     index >>= 1;

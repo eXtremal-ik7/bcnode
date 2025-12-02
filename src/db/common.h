@@ -203,7 +203,7 @@ public:
           // Build connect and disconnect block set if need
           *forConnect = rebaseChain(bestIndex, It->second, forDisconnect);
         } else if (shardStamp != stamp) {
-          LOG_F(ERROR, "%s is corrupted: shard %u has different stamp", Name_.c_str(), i);
+          LOG_F(ERROR, "%s is corrupted: shard %zu has different stamp", Name_.c_str(), i);
           return false;
         }
       } else {

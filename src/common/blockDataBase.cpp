@@ -92,7 +92,7 @@ static inline void QueueNextBlocks(std::deque<BC::Common::BlockIndex*> &queue, B
   }
 }
 
-static void ConnectBlock(BlockInMemoryIndex &blockIndex, const BC::Proto::Block &block, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
+static void ConnectBlock(BlockInMemoryIndex &blockIndex, const BC::Proto::Block&, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
 {
   if (!silent)
     LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().ToString().c_str(), index->Height);
@@ -101,7 +101,7 @@ static void ConnectBlock(BlockInMemoryIndex &blockIndex, const BC::Proto::Block 
   storage.add(BC::DB::Connect, index, blockIndex);
 }
 
-static void DisconnectBlock(BlockInMemoryIndex &blockIndex, const BC::Proto::Block &block, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
+static void DisconnectBlock(BlockInMemoryIndex &blockIndex, const BC::Proto::Block&, BC::DB::Storage &storage, BC::Common::BlockIndex *index, bool silent = true)
 {
   if (!silent)
     LOG_F(INFO, "Disconnect block %s (%u)", index->Header.GetHash().ToString().c_str(), index->Height);

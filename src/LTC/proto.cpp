@@ -15,13 +15,13 @@ Proto::BlockHashTy Proto::Transaction::getTxId() const
   stream.reset();
   BTC::Io<Proto::Transaction>::serialize(stream, *this, false);
 
-  SHA256_CTX sha256;
-  SHA256_Init(&sha256);
-  SHA256_Update(&sha256, stream.data(), stream.sizeOf());
-  SHA256_Final(result.begin(), &sha256);
-  SHA256_Init(&sha256);
-  SHA256_Update(&sha256, result.begin(), sizeof(result));
-  SHA256_Final(result.begin(), &sha256);
+  CCtxSha256 sha256;
+  sha256Init(&sha256);
+  sha256Update(&sha256, stream.data(), stream.sizeOf());
+  sha256Final(&sha256, result.begin());
+  sha256Init(&sha256);
+  sha256Update(&sha256, result.begin(), sizeof(result));
+  sha256Final(&sha256, result.begin());
   return result;
 }
 
@@ -33,13 +33,13 @@ Proto::BlockHashTy Proto::Transaction::getWTxid() const
   stream.reset();
   BTC::Io<Proto::Transaction>::serialize(stream, *this);
 
-  SHA256_CTX sha256;
-  SHA256_Init(&sha256);
-  SHA256_Update(&sha256, stream.data(), stream.sizeOf());
-  SHA256_Final(result.begin(), &sha256);
-  SHA256_Init(&sha256);
-  SHA256_Update(&sha256, result.begin(), sizeof(result));
-  SHA256_Final(result.begin(), &sha256);
+  CCtxSha256 sha256;
+  sha256Init(&sha256);
+  sha256Update(&sha256, stream.data(), stream.sizeOf());
+  sha256Final(&sha256, result.begin());
+  sha256Init(&sha256);
+  sha256Update(&sha256, result.begin(), sizeof(result));
+  sha256Final(&sha256, result.begin());
   return result;
 }
 }

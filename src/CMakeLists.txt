@@ -88,15 +88,27 @@ add_library(bcnodecommon STATIC
   common/file.cpp
   common/serializedDataCache.cpp
   common/uint256.cpp
-  #common/mstorage/dynamicBuffer.cpp
 )
 
 target_link_libraries(bcnodecommon
   ${BIGNUM_LIBRARIES}
 )
 
+option(LIBPOW_SSE2_ENABLED off)
+option(LIBPOW_SHANI_ENABLED off)
+
+if (LIBPOW_SHANI_ENABLED)
+  add_definitions(-DLIBPOW_SHANI_ENABLED)
+  set_source_files_properties(sha256.c PROPERTIES COMPILE_FLAGS -march=znver1)
+endif()
+
+if (LIBPOW_SSE2_ENABLED)
+  add_definitions(-DLIBPOW_SSE2_ENABLED)
+endif()
+
 add_library(bcnodecrypto STATIC
-  crypto/scrypt.cpp
+  crypto/scrypt.c
+  crypto/sha256.c
 )
 
 target_link_libraries(bcnodecrypto
@@ -123,6 +135,7 @@ set(BASE_SOURCES
 # Linker configuration
 set(COMMON_LIBRARIES
   bcnodecommon
+  bcnodecrypto
   asyncio-0.5
   asyncioextras-0.5
   p2putils

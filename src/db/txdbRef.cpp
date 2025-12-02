@@ -13,7 +13,7 @@ bool TxDbRef::queryTransaction(const BC::Proto::TxHashTy &txid,
                                BlockDatabase &blockDb,
                                CQueryTransactionResult &result)
 {
-  result.Found = find(txid, [&result, &blockIndex, &blockDb](const void *data, size_t size) {
+  result.Found = find(txid, [&result, &blockIndex, &blockDb](const void *data, size_t) {
     CLogData *logData = (CLogData*)data;
     result.Block = logData->Hash;
     result.TxNum = logData->Index;
@@ -50,7 +50,7 @@ bool TxDbRef::searchUnspentOutput(const BC::Proto::TxHashTy &tx,
                                   BlockDatabase &blockDb,
                                   xmstream &result)
 {
-  bool found = find(tx, [&blockIndex, &blockDb, &result, outputIndex](const void *data, size_t size) {
+  bool found = find(tx, [&blockIndex, &blockDb, &result, outputIndex](const void *data, size_t) {
     // Load transaction
     const CLogData *logData = static_cast<const CLogData*>(data);
 
@@ -90,12 +90,12 @@ bool TxDbRef::searchUnspentOutput(const BC::Proto::TxHashTy &tx,
   return found && result.sizeOf();
 }
 
-bool TxDbRef::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage)
+bool TxDbRef::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 {
   return true;
 }
 
-void TxDbRef::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
+void TxDbRef::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex&, BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
   for (size_t i = 0, ie = block.vtx.size(); i != ie; i++) {
@@ -110,7 +110,7 @@ void TxDbRef::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::
   }
 }
 
-void TxDbRef::disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
+void TxDbRef::disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex&, BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
   for (size_t i = 0, ie = block.vtx.size(); i != ie; i++)

@@ -7,7 +7,7 @@
 #include <limits>
 
 template<typename X>
-void initializeValidationContext(const typename X::Proto::Block &block, typename X::UTXODb &utxodb)
+void initializeValidationContext(const typename X::Proto::Block &block, typename X::UTXODb&)
 {
   // Initialize validation context
   memset(&block.validationData, 0, sizeof(block.validationData));
@@ -116,14 +116,14 @@ bool validateWitnessCommitment(const typename X::Proto::Block &block, const type
   // Calculate witness commitment
   uint256 commitment;
   {
-    SHA256_CTX ctx;
-    SHA256_Init(&ctx);
-    SHA256_Update(&ctx, witnessMerkleRoot.begin(), witnessMerkleRoot.size());
-    SHA256_Update(&ctx, witnessNonce, 32);
-    SHA256_Final(commitment.begin(), &ctx);
-    SHA256_Init(&ctx);
-    SHA256_Update(&ctx, commitment.begin(), commitment.size());
-    SHA256_Final(commitment.begin(), &ctx);
+    CCtxSha256 ctx;
+    sha256Init(&ctx);
+    sha256Update(&ctx, witnessMerkleRoot.begin(), witnessMerkleRoot.size());
+    sha256Update(&ctx, witnessNonce, 32);
+    sha256Final(&ctx, commitment.begin());
+    sha256Init(&ctx);
+    sha256Update(&ctx, commitment.begin(), commitment.size());
+    sha256Final(&ctx, commitment.begin());
   }
 
   bool result = memcmp(commitment.begin(), commitmentData+6, 32) == 0;
@@ -140,13 +140,13 @@ bool validateUnexpectedWitness(const typename X::BlockIndex &index, const typena
 }
 
 template<typename X>
-bool validateScriptSig(const typename X::Proto::ValidationData &validationCtx, const typename X::Proto::Transaction &tx, const typename X::ChainParams &chainParams, std::string &error)
+bool validateScriptSig(const typename X::Proto::ValidationData&, const typename X::Proto::Transaction&, const typename X::ChainParams&, std::string&)
 {
   return true;
 }
 
 template<typename X>
-bool validateAmount(const typename X::Proto::ValidationData &validationCtx, const typename X::Proto::Transaction &tx, const typename X::ChainParams &chainParams, std::string &error)
+bool validateAmount(const typename X::Proto::ValidationData&, const typename X::Proto::Transaction&, const typename X::ChainParams&, std::string&)
 {
   return true;
 }

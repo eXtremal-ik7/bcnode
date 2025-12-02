@@ -22,7 +22,7 @@ bool AddrHistoryDb::queryAddrTxid(const BC::Proto::AddressTy &address, size_t fr
   return false;
 }
 
-bool AddrHistoryDb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage)
+bool AddrHistoryDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage &storage)
 {
   UTXODb_ = &storage.utxodb();
   TxDb_ = storage.archive().TransactionDb_;

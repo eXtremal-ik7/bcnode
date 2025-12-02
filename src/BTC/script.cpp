@@ -1,6 +1,5 @@
 #include "script.h"
-#include "openssl/ripemd.h"
-#include "openssl/sha.h"
+#include <openssl/evp.h>
 
 namespace BTC {
 
@@ -10,17 +9,19 @@ bool Script::decodeStandardOutput(const BC::Proto::TxOut &out, BC::Proto::Addres
     // Pay to public key
     uint8_t sha256[32];
     {
-      SHA256_CTX ctx;
-      SHA256_Init(&ctx);
-      SHA256_Update(&ctx, out.pkScript.data() + 1, out.pkScript.size() - 2);
-      SHA256_Final(sha256, &ctx);
+      CCtxSha256 ctx;
+      sha256Init(&ctx);
+      sha256Update(&ctx, out.pkScript.data() + 1, out.pkScript.size() - 2);
+      sha256Final(&ctx, sha256);
     }
 
     {
-      RIPEMD160_CTX ctx;
-      RIPEMD160_Init(&ctx);
-      RIPEMD160_Update(&ctx, sha256, sizeof(sha256));
-      RIPEMD160_Final(address.begin(), &ctx);
+      unsigned outSize = 0;
+      EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+      EVP_DigestInit_ex(ctx, EVP_ripemd160(), nullptr);
+      EVP_DigestUpdate(ctx, sha256, sizeof(sha256));
+      EVP_DigestFinal_ex(ctx, address.begin(), &outSize);
+      EVP_MD_CTX_free(ctx);
     }
 
     return true;

@@ -1,15 +1,14 @@
 #include "BC/bc.h"
 #include "common/smallStream.h"
+#include "crypto/sha256.h"
 
 #include <asyncio/asyncio.h>
 #include <asyncio/socket.h>
 #include <asyncioextras/btc.h>
+#include <openssl/evp.h>
 #include <p2putils/uriParse.h>
 
 #include "secp256k1.h"
-
-#include "openssl/ripemd.h"
-
 #include <getopt.h>
 
 #ifndef WIN32
@@ -250,17 +249,19 @@ private:
 
     uint8_t sha256[32];
     {
-      SHA256_CTX ctx;
-      SHA256_Init(&ctx);
-      SHA256_Update(&ctx, address.PublicKeyUncompressed, pkLen);
-      SHA256_Final(sha256, &ctx);
+      CCtxSha256 ctx;
+      sha256Init(&ctx);
+      sha256Update(&ctx, address.PublicKeyUncompressed, pkLen);
+      sha256Final(&ctx, sha256);
     }
 
     {
-      RIPEMD160_CTX ctx;
-      RIPEMD160_Init(&ctx);
-      RIPEMD160_Update(&ctx, sha256, sizeof(sha256));
-      RIPEMD160_Final(address.Address.begin(), &ctx);
+      unsigned outSize = 0;
+      EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+      EVP_DigestInit_ex(ctx, EVP_ripemd160(), nullptr);
+      EVP_DigestUpdate(ctx, sha256, sizeof(sha256));
+      EVP_DigestFinal_ex(ctx, address.Address.begin(), &outSize);
+      EVP_MD_CTX_free(ctx);
     }
   }
 
@@ -375,13 +376,13 @@ private:
       sigData.write<int32_t>(1);
 
       {
-        SHA256_CTX ctx;
-        SHA256_Init(&ctx);
-        SHA256_Update(&ctx, sigData.data(), sigData.sizeOf());
-        SHA256_Final(sigHash, &ctx);
-        SHA256_Init(&ctx);
-        SHA256_Update(&ctx, sigHash, sizeof(sigHash));
-        SHA256_Final(sigHash, &ctx);
+        CCtxSha256 ctx;
+        sha256Init(&ctx);
+        sha256Update(&ctx, sigData.data(), sigData.sizeOf());
+        sha256Final(&ctx, sigHash);
+        sha256Init(&ctx);
+        sha256Update(&ctx, sigHash, sizeof(sigHash));
+        sha256Final(&ctx, sigHash);
       }
 
       {
@@ -483,14 +484,14 @@ private:
         {
           uint8_t defaultWitnessNonce[32];
           memset(defaultWitnessNonce, 0, sizeof(defaultWitnessNonce));
-          SHA256_CTX ctx;
-          SHA256_Init(&ctx);
-          SHA256_Update(&ctx, witnessMerkleRoot.begin(), witnessMerkleRoot.size());
-          SHA256_Update(&ctx, defaultWitnessNonce, 32);
-          SHA256_Final(commitment.begin(), &ctx);
-          SHA256_Init(&ctx);
-          SHA256_Update(&ctx, commitment.begin(), commitment.size());
-          SHA256_Final(commitment.begin(), &ctx);
+          CCtxSha256 ctx;
+          sha256Init(&ctx);
+          sha256Update(&ctx, witnessMerkleRoot.begin(), witnessMerkleRoot.size());
+          sha256Update(&ctx, defaultWitnessNonce, 32);
+          sha256Final(&ctx, commitment.begin());
+          sha256Init(&ctx);
+          sha256Update(&ctx, commitment.begin(), commitment.size());
+          sha256Final(&ctx, commitment.begin());
         }
 
         uint8_t prefix[6] = {0x6A, 0x24, 0xAA, 0x21, 0xA9, 0xED};

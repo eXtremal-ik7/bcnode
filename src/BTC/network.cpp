@@ -325,7 +325,7 @@ void Peer::onMessage(AsyncOpStatus status)
 
 void Peer::processMessageQueue()
 {
-  InternalMessage *internalMsg;
+  InternalMessage *internalMsg = nullptr;
   while (MessageQueue_.try_pop(internalMsg)) {
     Peer *peer = internalMsg->Source.get();
     switch (internalMsg->Type) {

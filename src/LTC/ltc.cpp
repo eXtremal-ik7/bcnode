@@ -155,7 +155,7 @@ bool LTC::Common::setupChainParams(ChainParams *params, const char *network)
 bool LTC::Common::checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, uint256 &powLimit)
 {
   uint256 scryptHash;
-  scrypt_1024_1_1_256(reinterpret_cast<const char*>(&header), reinterpret_cast<char*>(scryptHash.begin()));
+  scrypt_1024_1_1_256(&header, scryptHash.begin());
 
   bool fNegative;
   bool fOverflow;
