@@ -31,33 +31,26 @@ public:
   virtual ~UTXODb() {}
   void *interface(int) final { return nullptr; }
   // Thread safe, search utxo in cache; if it not found - look disk storage
-  bool query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstream &data) const;
+  bool query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result) const;
   // Thread safe, search utxo in cache only
-  bool queryFast(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstream &data);
+  bool queryCache(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result) const;
 
 private:
   uint32_t version() final { return 1; }
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
-  void connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
-  void disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
 
+  void connectImpl(const BC::Common::BlockIndex *index,
+                   const BC::Proto::Block &block,
+                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                   BlockInMemoryIndex &blockIndex,
+                   BlockDatabase &blockDb);
 
-public:
-  // TODO: remove it, use block index instead of txdb
-  void setTxdb(ITransactionDb *txDb) { TxDb_ = txDb; }
-private:
-  ITransactionDb *TxDb_ = nullptr;
+  void disconnectImpl(const BC::Common::BlockIndex *index,
+                      const BC::Proto::Block &block,
+                      const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                      BlockInMemoryIndex &blockIndex,
+                      BlockDatabase &blockDb);
 };
-
-bool searchUnspentOutput(const BC::Proto::TxHashTy &tx,
-                         uint32_t index,
-                         const BC::Proto::Block &block,
-                         std::unordered_map<BC::Proto::TxHashTy, size_t> &localTxMap,
-                         BlockInMemoryIndex &blockIndex,
-                         BlockDatabase &blockDb,
-                         UTXODb *db,
-                         ITransactionDb *txdb,
-                         xmstream &result);
 
 }
 }

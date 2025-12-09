@@ -6,8 +6,10 @@
 #include "xpm.h"
 #include "common/uint256.h"
 
+namespace XPM {
+namespace Common {
 
-bool XPM::Common::setupChainParams(ChainParams *params, const char *network)
+bool setupChainParams(ChainParams *params, const char *network)
 {
   if (strcmp(network, "main") == 0) {
     // Setup for mainnet
@@ -135,7 +137,7 @@ bool XPM::Common::setupChainParams(ChainParams *params, const char *network)
 //   x: rational part (high 8 bit)
 
 // Initialization
-void XPM::Common::initialize()
+void initialize()
 {
 }
 
@@ -145,7 +147,6 @@ static constexpr unsigned TARGET_FRACTIONAL_MASK = (1u<<nFractionalBits) - 1;
 static constexpr unsigned TARGET_LENGTH_MASK = ~TARGET_FRACTIONAL_MASK;
 static constexpr uint64_t nFractionalDifficultyMax = (1llu << (nFractionalBits + 32));
 static constexpr uint64_t nFractionalDifficultyMin = (1llu << 32);
-static constexpr uint64_t nFractionalDifficultyThreshold = (1llu << (8 + 32));
 static constexpr unsigned nWorkTransitionRatio = 32;
 
 static inline unsigned int TargetGetLength(unsigned int nBits)
@@ -176,7 +177,7 @@ uint64_t TargetGetFractionalDifficulty(unsigned int nBits)
 /// 7.500 15887
 /// 7.999 254261
 /// 8.000 262144
-arith_uint256 XPM::Common::GetBlockProof(const XPM::Proto::BlockHeader &header, const XPM::Common::ChainParams &chainParams)
+arith_uint256 GetBlockProof(const XPM::Proto::BlockHeader &header, const XPM::Common::ChainParams &chainParams)
 {
   uint256 result;
   uint64_t nFractionalDifficulty = TargetGetFractionalDifficulty(header.nBits);
@@ -308,7 +309,7 @@ static inline uint32_t bitwinLength(uint32_t l1, uint32_t l2)
     (l1 + TargetFromInt(TargetGetLength(l1)));
 }
 
-void XPM::Common::checkConsensusInitialize(CheckConsensusCtx &ctx)
+void checkConsensusInitialize(CheckConsensusCtx &ctx)
 {
   mpz_init(ctx.bnPrimeChainOrigin);
   mpz_init(ctx.bn);
@@ -319,7 +320,7 @@ void XPM::Common::checkConsensusInitialize(CheckConsensusCtx &ctx)
   mpz_set_ui(ctx.two, 2);
 }
 
-bool XPM::Common::checkConsensus(const Proto::BlockHeader &header, XPM::Common::CheckConsensusCtx &ctx, BC::Common::ChainParams &chainParams)
+bool checkConsensus(const Proto::BlockHeader &header, XPM::Common::CheckConsensusCtx &ctx, BC::Common::ChainParams &chainParams)
 {
   // Check target
   if (TargetGetLength(header.nBits) < chainParams.minimalChainLength || TargetGetLength(header.nBits) > 99)
@@ -372,22 +373,34 @@ bool XPM::Common::checkConsensus(const Proto::BlockHeader &header, XPM::Common::
   return true;
 }
 
-void XPM::Common::initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
-{
-  ::initializeValidationContext<XPM::X>(block, utxodb);
-}
-
-unsigned XPM::Common::checkBlockStandalone(const Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool checkBlockStandalone(const XPM::Proto::Block &block,
+                          XPM::Proto::CBlockValidationData &validation,
+                          const XPM::Common::ChainParams&,
+                          std::string &error)
 {
   bool isValid = true;
-  applyValidation(validateBlockSize<XPM::X>, block, chainParams, error, &isValid);
-  applyValidation(validateMerkleRoot<XPM::X>, block, chainParams, error, &isValid);
+
+  // Block validation
+  isValid |= BTC::validateBlockSize(block, XPM::Configuration::MaxBlockSize, error);
+  isValid |= BTC::validateMerkleRoot(block, error);
+
+  validation.HasWitnessData = false;
+
+  // TODO: Transaction validation
   return isValid;
 }
 
-bool XPM::Common::checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool checkBlockContextual(const BlockIndex &index,
+                          const Proto::Block &block,
+                          const Proto::CBlockValidationData&,
+                          const Proto::CBlockLinkedOutputs&,
+                          const ChainParams &chainParams,
+                          std::string &error)
 {
   bool isValid = true;
-  applyContextualValidation(validateBIP34<XPM::X>, index, block, chainParams, error, &isValid);
+  isValid |= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
   return isValid;
+}
+
+}
 }

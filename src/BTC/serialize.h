@@ -37,7 +37,7 @@ template<typename T> static inline T *unpack2(xmstream &src, size_t *size) {
   uint8_t *data = static_cast<uint8_t*>(operator new(*size));
   uint8_t *extraData = data + dataOnlySize;
   Io<T>::unpack2(src, reinterpret_cast<T*>(data), &extraData);
-  assert(extraData-data == *size && "Unpack failed");
+  assert(static_cast<size_t>(extraData-data) == *size && "Unpack failed");
   if (!src.eof()) {
     return reinterpret_cast<T*>(data);
   } else {

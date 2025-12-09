@@ -2,18 +2,12 @@
 
 #include "proto.h"
 #include "validation.h"
-#include "common/merkleTree.h"
-#include "common/serializeJson.h"
 #include "common/uint256.h"
-#include "common/utils.h"
 #include <openssl/sha.h>
-#include <atomic>
 #include <string.h>
 #include <stdint.h>
 #include <asyncio/asyncioTypes.h>
 
-#include <functional>
-#include <memory>
 #include "blockIndex.h"
 #include "../loguru.hpp"
 
@@ -80,34 +74,24 @@ namespace Common {
   bool setupChainParams(ChainParams *params, const char *network);
   static inline bool hasWitness() { return true; }
 
-  // Validation functions
-  using ValidateStandaloneTy = std::function<bool(const Proto::Block&, const ChainParams&, std::string&)>;
-  using ValidateTxStandaloneTy = std::function<bool(const Proto::ValidationData&, const Proto::Transaction&, const ChainParams&, std::string&)>;
-  using ValidateContextualTy = std::function<bool(const Common::BlockIndex&, const Proto::Block&, const ChainParams&, std::string&)>;
-
-  static inline void applyStandaloneValidation(ValidateStandaloneTy function, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
-    if (*isValid)
-      *isValid = function(block, chainParams, error);
-  }
-
-  static inline void applyStandaloneTxValidation(ValidateTxStandaloneTy function, const Proto::ValidationData &validationData, const Proto::Transaction &tx, const ChainParams &chainParams, std::string &error, bool *isValid) {
-    if (*isValid)
-      *isValid = function(validationData, tx, chainParams, error);
-  }
-
-  static inline void applyContextualValidation(ValidateContextualTy function, const Common::BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
-    if (*isValid)
-      *isValid = function(index, block, chainParams, error);
-  }
-
   arith_uint256 GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams &chainParams);
 
   // Check functions
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
   bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
-  void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);
-  bool checkBlockStandalone(const Proto::Block &block, const ChainParams &chainParams, std::string &error);
-  bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
+
+  static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
+
+  bool checkBlockStandalone(const Proto::Block &block,
+                            Proto::CBlockValidationData &validation,
+                            const ChainParams &chainParams,
+                            std::string &error);
+  bool checkBlockContextual(const BlockIndex &index,
+                            const Proto::Block &block,
+                            const Proto::CBlockValidationData &validation,
+                            const Proto::CBlockLinkedOutputs &linkedOutputs,
+                            const ChainParams &chainParams,
+                            std::string &error);
 }
 
 class X {

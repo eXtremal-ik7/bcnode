@@ -359,6 +359,26 @@ void Io<Proto::Transaction>::serializeForSignature(xmstream &dst,
   BTC::serialize(dst, data.lockTime);
 }
 
+void Io<Proto::CTxLinkedOutputs>::serialize(xmstream &dst, const BTC::Proto::CTxLinkedOutputs &data)
+{
+  BTC::serialize(dst, data.TxIn);
+}
+
+void Io<Proto::CTxLinkedOutputs>::unserialize(xmstream &src, BTC::Proto::CTxLinkedOutputs &data)
+{
+  BTC::unserialize(src, data.TxIn);
+}
+
+void Io<Proto::CBlockLinkedOutputs>::serialize(xmstream &dst, const BTC::Proto::CBlockLinkedOutputs &data)
+{
+  BTC::serialize(dst, data.Tx);
+}
+
+void Io<Proto::CBlockLinkedOutputs>::unserialize(xmstream &src, BTC::Proto::CBlockLinkedOutputs &data)
+{
+  BTC::unserialize(src, data.Tx);
+}
+
 void Io<Proto::InventoryVector>::serialize(xmstream &dst, const BTC::Proto::InventoryVector &data)
 {
   BTC::serialize(dst, data.type);

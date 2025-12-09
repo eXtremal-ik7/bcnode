@@ -269,8 +269,11 @@ void Peer::onMessage(AsyncOpStatus status)
         BC::Proto::Block *unpacked = BC::unpack2<BC::Proto::Block>(serialized, &unpackedSize);
         bool hasRemainingData = serialized.remaining();
         if (unpacked && !hasRemainingData) {
-          intrusive_ptr<SerializedDataObject> object = Storage_.cache().add(data, size, msize, unpacked, unpackedSize);
+          intrusive_ptr<BC::Common::CIndexCacheObject> object(new BC::Common::CIndexCacheObject(&Storage_.cache(), data, size, msize, unpacked, unpackedSize));
           onBlock(object.get(), std::chrono::steady_clock::now());
+
+          // intrusive_ptr<SerializedDataObject> object = Storage_.cache().add(data, size, msize, unpacked, unpackedSize);
+          // onBlock(object.get(), std::chrono::steady_clock::now());
         } else {
           LOG_F(ERROR, "Peer %s: can't unserialize block", Name.c_str());
           operator delete(data);
@@ -344,7 +347,7 @@ void Peer::processMessageQueue()
         size_t unpackedSize = 0;
         BC::Proto::Block *unpacked = BC::unpack2<BC::Proto::Block>(serialized, &unpackedSize);
         if (unpacked && !serialized.remaining()) {
-          intrusive_ptr<SerializedDataObject> object = peer->Storage_.cache().add(internalMsg->Data, internalMsg->Size, internalMsg->MemorySize, unpacked, unpackedSize);
+          intrusive_ptr<BC::Common::CIndexCacheObject> object(new BC::Common::CIndexCacheObject(&peer->Storage_.cache(), internalMsg->Data, internalMsg->Size, internalMsg->MemorySize, unpacked, unpackedSize));
           internalMsg->Data = nullptr;
           peer->onBlock(object.get(), internalMsg->Time);
         } else {
@@ -571,12 +574,12 @@ void Peer::onInv(BC::Proto::MessageInv &inv)
     getData(getBlocks);
 }
 
-void Peer::onBlock(SerializedDataObject *object, std::chrono::time_point<std::chrono::steady_clock> receivedTime)
+void Peer::onBlock(BC::Common::CIndexCacheObject *object, std::chrono::time_point<std::chrono::steady_clock> receivedTime)
 {
   uint32_t sub = 0x10;
   bool scheduledBlock = false;
   if ((blockDownloading.fetch_add(sub) & 0xF) == 2) {
-    BC::Proto::Block *block = static_cast<BC::Proto::Block*>(object->unpackedData());
+    BC::Proto::Block *block = object->block();
     BC::Proto::BlockHashTy hash = block->header.GetHash();
     if (ScheduledToDownload_.count(hash)) {
       scheduledBlock = true;
@@ -1024,7 +1027,7 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
   }
 }
 
-void Node::Sync(Peer *peer, SerializedDataObject *object, bool scheduledBlock, bool downloadFinished)
+void Node::Sync(Peer *peer, BC::Common::CIndexCacheObject *object, bool scheduledBlock, bool downloadFinished)
 {
   BC::Common::CheckConsensusCtx ccCtx;
   BC::Common::checkConsensusInitialize(ccCtx);

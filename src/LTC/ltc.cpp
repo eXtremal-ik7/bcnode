@@ -5,8 +5,12 @@
 
 #include "ltc.h"
 #include "crypto/scrypt.h"
+#include "common/utils.h"
 
-bool LTC::Common::setupChainParams(ChainParams *params, const char *network)
+namespace LTC {
+namespace Common {
+
+bool setupChainParams(ChainParams *params, const char *network)
 {
   if (strcmp(network, "main") == 0) {
     // Setup for mainnet
@@ -152,7 +156,7 @@ bool LTC::Common::setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-bool LTC::Common::checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, uint256 &powLimit)
+bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, uint256 &powLimit)
 {
   uint256 scryptHash;
   scrypt_1024_1_1_256(&header, scryptHash.begin());
@@ -174,7 +178,7 @@ bool LTC::Common::checkPow(const Proto::BlockHeader &header, uint32_t nBits, Che
   return true;
 }
 
-arith_uint256 LTC::Common::GetBlockProof(const Proto::BlockHeader &header)
+arith_uint256 GetBlockProof(const Proto::BlockHeader &header)
 {
   arith_uint256 bnTarget;
   bool fNegative;
@@ -189,25 +193,37 @@ arith_uint256 LTC::Common::GetBlockProof(const Proto::BlockHeader &header)
   return (~bnTarget / (bnTarget + 1)) + 1;
 }
 
-void LTC::Common::initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
-{
-  ::initializeValidationContext<LTC::X>(block, utxodb);
-}
-
-unsigned LTC::Common::checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool checkBlockStandalone(const LTC::Proto::Block &block,
+                          LTC::Proto::CBlockValidationData &validation,
+                          const LTC::Common::ChainParams&,
+                          std::string &error)
 {
   bool isValid = true;
-  memset(&block.validationData, 0, sizeof(block.validationData));
-  applyStandaloneValidation(validateBlockSize<LTC::X>, block, chainParams, error, &isValid);
-  applyStandaloneValidation(validateMerkleRoot<LTC::X>, block, chainParams, error, &isValid);
-  applyStandaloneValidation(validateWitnessCommitment<LTC::X>, block, chainParams, error, &isValid);
+  bool hasWitnessData = false;
+
+  // Block validation
+  isValid |= BTC::validateBlockSize(block, LTC::Configuration::MaxBlockSize, error);
+  isValid |= BTC::validateMerkleRoot(block, error);
+  isValid |= BTC::validateWitnessCommitment(block, hasWitnessData, error);
+
+  validation.HasWitnessData = hasWitnessData;
+
+  // TODO: Transaction validation
   return isValid;
 }
 
-bool LTC::Common::checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool checkBlockContextual(const BlockIndex &index,
+                          const Proto::Block &block,
+                          const Proto::CBlockValidationData &validation,
+                          const Proto::CBlockLinkedOutputs&,
+                          const ChainParams &chainParams,
+                          std::string &error)
 {
   bool isValid = true;
-  applyContextualValidation(validateBIP34<LTC::X>, index, block, chainParams, error, &isValid);
-  applyContextualValidation(validateUnexpectedWitness<LTC::X>, index, block, chainParams, error, &isValid);
+  isValid |= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
+  isValid |= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);
   return isValid;
+}
+
+}
 }

@@ -74,7 +74,14 @@ struct CLog {
 
   void reset() {
     AllKeysData.clear();
-    CurrentKeysData.clear();
+
+    // Can't use .clear() here, not thread-safe
+    std::vector<CKey> allKeys;
+    for (const auto &v: CurrentKeysData)
+      allKeys.push_back(v.first);
+    for (const auto &v: allKeys)
+      CurrentKeysData.erase(v);
+
     Log.reset();
   }
 };
@@ -99,8 +106,19 @@ public:
                           config4cpp::Configuration *cfg,
                           BC::Common::BlockIndex **forConnect,
                           std::vector<BC::Common::BlockIndex*> &forDisconnect) = 0;
-  virtual void connect(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) = 0;
-  virtual void disconnect(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) = 0;
+
+  virtual void connect(const BC::Common::BlockIndex *index,
+                       const BC::Proto::Block &block,
+                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                       BlockInMemoryIndex &blockIndex,
+                       BlockDatabase &blockDb) = 0;
+
+  virtual void disconnect(const BC::Common::BlockIndex *index,
+                          const BC::Proto::Block &block,
+                          const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                          BlockInMemoryIndex &blockIndex,
+                          BlockDatabase &blockDb) = 0;
+
   virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) = 0;
   virtual void *interface(int interface) = 0;
 
@@ -215,11 +233,15 @@ public:
     if (!initializeImpl(cfg, storage))
       return false;
     if (needConnectGenesis)
-      connect(blockIndex.genesis(), blockIndex.genesisBlock(), blockIndex, blockDb);
+      connect(blockIndex.genesis(), blockIndex.genesisBlock(), BC::Proto::CBlockLinkedOutputs(), blockIndex, blockDb);
     return true;
   }
 
-  void connect(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) final {
+  void connect(const BC::Common::BlockIndex *index,
+               const BC::Proto::Block &block,
+               const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+               BlockInMemoryIndex &blockIndex,
+               BlockDatabase &blockDb) final {
     auto hash = index->Header.GetHash();
 
     if (!PendingBlocks_.empty()) {
@@ -231,7 +253,7 @@ public:
       }
     }
 
-    connectImpl(index, block, blockIndex, blockDb);
+    connectImpl(index, block, linkedOutputs, blockIndex, blockDb);
     PendingBlocks_.emplace_back(hash, true);
     CurrentBlock_ = hash;
 
@@ -241,7 +263,11 @@ public:
     }
   }
 
-  void disconnect(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) final {
+  void disconnect(const BC::Common::BlockIndex *index,
+                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  BlockInMemoryIndex &blockIndex,
+                  BlockDatabase &blockDb) final {
     auto hash = index->Header.GetHash();
 
     if (!PendingBlocks_.empty()) {
@@ -253,7 +279,7 @@ public:
       }
     }
 
-    disconnectImpl(index, block, blockIndex, blockDb);
+    disconnectImpl(index, block, linkedOutputs, blockIndex, blockDb);
     PendingBlocks_.emplace_back(hash, false);
     CurrentBlock_ = index->Header.hashPrevBlock;
   }
@@ -269,8 +295,18 @@ public:
 
   virtual uint32_t version() = 0;
   virtual bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) = 0;
-  virtual void connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) = 0;
-  virtual void disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) = 0;
+
+  virtual void connectImpl(const BC::Common::BlockIndex *index,
+                           const BC::Proto::Block &block,
+                           const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                           BlockInMemoryIndex &blockIndex,
+                           BlockDatabase &blockDb) = 0;
+
+  virtual void disconnectImpl(const BC::Common::BlockIndex *index,
+                              const BC::Proto::Block &block,
+                              const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                              BlockInMemoryIndex &blockIndex,
+                              BlockDatabase &blockDb) = 0;
 
 protected:
   // Configuration
@@ -706,12 +742,6 @@ public:
                                 BlockInMemoryIndex &blockIndex,
                                 BlockDatabase &blockDb,
                                 CQueryTransactionResult &result) = 0;
-
-  virtual bool searchUnspentOutput(const BC::Proto::TxHashTy &tx,
-                                   uint32_t outputIndex,
-                                   BlockInMemoryIndex &blockIndex,
-                                   BlockDatabase &blockDb,
-                                   xmstream &result) = 0;
 };
 
 class IAddrHistoryDb {

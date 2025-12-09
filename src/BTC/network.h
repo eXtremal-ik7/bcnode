@@ -142,7 +142,7 @@ private:
   void onPing(BC::Proto::MessagePing &ping);
   void onPong(BC::Proto::MessagePong &pong);
   void onInv(BC::Proto::MessageInv &inv);
-  void onBlock(SerializedDataObject *block, std::chrono::time_point<std::chrono::steady_clock> receivedTime);
+  void onBlock(BC::Common::CIndexCacheObject *block, std::chrono::time_point<std::chrono::steady_clock> receivedTime);
   void onReject(BC::Proto::MessageReject &reject);
 
   // Synchronization
@@ -391,7 +391,7 @@ public:
   void Sync();
   void Sync(Peer *peer);
   void Sync(Peer *peer, const xvector<BC::Proto::BlockHeaderNet> &headers, unsigned downloadTimeInMilliSeconds);
-  void Sync(Peer *peer, SerializedDataObject *object, bool scheduledBlock, bool downloadFinished);
+  void Sync(Peer *peer, BC::Common::CIndexCacheObject *object, bool scheduledBlock, bool downloadFinished);
   void Sync(std::vector<BC::Proto::BlockHashTy> &hashes);
 
   // API

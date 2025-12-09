@@ -13,10 +13,10 @@
 
 class SerializedDataCache;
 
-class alignas(512) SerializedDataObject {
+class SerializedDataObject {
 private:
-  mutable std::atomic<uintptr_t> Refs_ = 0;
-  SerializedDataCache *Parent_;
+  // mutable std::atomic<uintptr_t> Refs_ = 0;
+  // SerializedDataCache *Parent_;
   void *Data_ = nullptr;
   size_t DataSize_ = 0;
   size_t DataMemSize_ = 0;
@@ -24,16 +24,16 @@ private:
   size_t UnpackedMemSize_ = 0;
 
 public:
-  uintptr_t ref_fetch_add(uintptr_t count) const { return Refs_.fetch_add(count); }
-  uintptr_t ref_fetch_sub(uintptr_t count) const { return Refs_.fetch_sub(count); }
+  // uintptr_t ref_fetch_add(uintptr_t count) const { return Refs_.fetch_add(count); }
+  // uintptr_t ref_fetch_sub(uintptr_t count) const { return Refs_.fetch_sub(count); }
 
-  SerializedDataObject(SerializedDataCache *parent,
-                       void *data,
+  SerializedDataObject() {}
+  SerializedDataObject(void *data,
                        size_t dataSize,
                        size_t memorySize,
                        void *unpackedData,
                        size_t unpackedMemorySize) :
-    Parent_(parent), Data_(data), DataSize_(dataSize), DataMemSize_(memorySize), UnpackedData_(unpackedData), UnpackedMemSize_(unpackedMemorySize) {}
+    Data_(data), DataSize_(dataSize), DataMemSize_(memorySize), UnpackedData_(unpackedData), UnpackedMemSize_(unpackedMemorySize) {}
 
   ~SerializedDataObject();
 
@@ -43,27 +43,40 @@ public:
   size_t memorySize() const { return DataMemSize_ + UnpackedMemSize_ + 512; }
 };
 
-class SerializedDataCache {
+class CAllocationInfo {
+public:
+  void add(size_t size) { Size_.fetch_add(size); }
+  void remove(size_t size) { Size_.fetch_sub(size); }
+  size_t size() { return Size_.load(std::memory_order_relaxed); }
+  bool overflow() { return size() >= Limit_; }
+  void setLimit(size_t limit) { Limit_ = limit; }
+
 private:
   std::atomic<size_t> Size_ = 0;
   size_t Limit_ = std::numeric_limits<size_t>::max();
-
-public:
-  void setLimit(size_t limit) { Limit_ = limit; }
-  size_t size() { return Size_.load(std::memory_order_relaxed); }
-  bool overflow() { return size() >= Limit_; }
-
-  intrusive_ptr<SerializedDataObject> add(void *data,
-                                          size_t dataSize,
-                                          size_t memorySize,
-                                          void *unpackedData,
-                                          size_t unpackedMemorySize) {
-    SerializedDataObject *object = new SerializedDataObject(this, data, dataSize, memorySize, unpackedData, unpackedMemorySize);
-    Size_.fetch_add(object->memorySize());
-    return intrusive_ptr<SerializedDataObject>(object);
-  }
-
-  void remove(SerializedDataObject *object) {
-    Size_.fetch_sub(object->memorySize(), std::memory_order_relaxed);
-  }
 };
+
+// class SerializedDataCache {
+// private:
+//   std::atomic<size_t> Size_ = 0;
+//   size_t Limit_ = std::numeric_limits<size_t>::max();
+
+// public:
+//   void setLimit(size_t limit) { Limit_ = limit; }
+//   size_t size() { return Size_.load(std::memory_order_relaxed); }
+//   bool overflow() { return size() >= Limit_; }
+
+//   intrusive_ptr<SerializedDataObject> add(void *data,
+//                                           size_t dataSize,
+//                                           size_t memorySize,
+//                                           void *unpackedData,
+//                                           size_t unpackedMemorySize) {
+//     SerializedDataObject *object = new SerializedDataObject(this, data, dataSize, memorySize, unpackedData, unpackedMemorySize);
+//     Size_.fetch_add(object->memorySize());
+//     return intrusive_ptr<SerializedDataObject>(object);
+//   }
+
+//   void remove(SerializedDataObject *object) {
+//     Size_.fetch_sub(object->memorySize(), std::memory_order_relaxed);
+//   }
+// };

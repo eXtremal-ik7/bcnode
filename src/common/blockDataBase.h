@@ -41,7 +41,7 @@ BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex,
 BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
                                  BC::Common::ChainParams &chainParams,
                                  BC::DB::Storage &storage,
-                                 SerializedDataObject *serialized,
+                                 BC::Common::CIndexCacheObject *serialized,
                                  BC::Common::CheckConsensusCtx &ccCtx,
                                  newBestCallback callback,
                                  uint32_t fileNo=std::numeric_limits<uint32_t>::max(),
@@ -85,18 +85,21 @@ public:
 
   std::filesystem::path &dataDir() { return DataDir_; }
   LinearDataStorage &blockReader() { return BlockStorage_; }
+  LinearDataStorage &linkedOutputsReader() { return LinkedOutputsStorage_; }
 
   bool writeBlock(BC::Common::BlockIndex *index);
   bool writeBufferEmpty() { return BlockStorage_.bufferEmpty(); }
-  bool flush() { return BlockStorage_.flush() && IndexStorage_.flush(); }
+  bool flush() { return BlockStorage_.flush() && IndexStorage_.flush() && LinkedOutputsStorage_.flush(); }
   uint32_t magic() { return Magic_; }
 
   // TODO: remove
   LinearDataStorage &indexStorage() { return IndexStorage_; }
+  LinearDataStorage &linkedOutputsStorage() { return LinkedOutputsStorage_; }
 
 private:
   LinearDataStorage BlockStorage_;
   LinearDataStorage IndexStorage_;
+  LinearDataStorage LinkedOutputsStorage_;
   std::filesystem::path DataDir_;
   // NOTE: bitcoin core compatibility
   uint32_t Magic_;
@@ -125,4 +128,60 @@ public:
   ~BlockSearcher();
   BC::Common::BlockIndex *add(BC::Common::BlockIndex *index);
   BC::Common::BlockIndex *add(BlockInMemoryIndex &blockIndex, const BC::Proto::BlockHashTy &hash);
+};
+
+intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockIndex *index, BlockDatabase &blockDb);
+
+class BlockBulkReader {
+public:
+  struct CCursor {
+    uint32_t FileNo;
+    uint32_t OffsetBegin;
+    uint32_t OffsetCurrent;
+
+    CCursor() {}
+    CCursor(uint32_t fileNo, uint32_t offsetBegin, uint32_t offsetCurrent) :
+      FileNo(fileNo), OffsetBegin(offsetBegin), OffsetCurrent(offsetCurrent) {}
+
+    void reset() { FileNo = std::numeric_limits<uint32_t>::max(); }
+    void set(uint32_t fileNo, uint32_t offsetBegin, uint32_t offsetCurrent) {
+      FileNo = fileNo;
+      OffsetBegin = offsetBegin;
+      OffsetCurrent = offsetCurrent;
+    }
+    bool initialized() { return FileNo != std::numeric_limits<uint32_t>::max(); }
+  };
+
+public:
+  BlockBulkReader(BlockDatabase &blockDb, std::function<void(BC::Common::BlockIndex*, const BC::Proto::Block&, const BC::Proto::CBlockLinkedOutputs&)> handler, std::function<void()> errorHandler) :
+    BlockDb_(blockDb), Handler_(handler), ErrorHandler_(errorHandler)
+  {
+    BlocksDirectory_ = blockDb.dataDir() / "blocks";
+    LinkedOutputsDirectory_ = blockDb.dataDir() / "index";
+    BlockCursor_.reset();
+  }
+
+  ~BlockBulkReader() {
+    fetchPending();
+  }
+
+  BC::Common::BlockIndex *add(BC::Common::BlockIndex *index);
+  BC::Common::BlockIndex *add(BlockInMemoryIndex &blockIndex, const BC::Proto::BlockHashTy &hash);
+
+private:
+  void fetchPending();
+
+private:
+  BlockDatabase &BlockDb_;
+  CCursor BlockCursor_;
+  std::vector<CCursor> LinkedOutputsCursor_;
+
+  std::filesystem::path BlocksDirectory_;
+  std::filesystem::path LinkedOutputsDirectory_;
+  std::function<void(BC::Common::BlockIndex*, const BC::Proto::Block&, const BC::Proto::CBlockLinkedOutputs&)> Handler_;
+  std::function<void()> ErrorHandler_;
+
+  std::vector<BC::Common::BlockIndex*> Indexes_;
+  xmstream BlockStream_;
+  xmstream LinkedOutputsStream_;
 };

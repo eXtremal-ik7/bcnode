@@ -9,5 +9,5 @@ SerializedDataObject::~SerializedDataObject()
 {
   operator delete(Data_);
   operator delete(UnpackedData_);
-  Parent_->remove(this);
+  // Parent_->remove(this);
 }

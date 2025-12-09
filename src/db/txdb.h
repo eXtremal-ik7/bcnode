@@ -29,12 +29,6 @@ public:
                         BlockDatabase &blockDb,
                         CQueryTransactionResult &result);
 
-  bool searchUnspentOutput(const BC::Proto::TxHashTy &tx,
-                           uint32_t index,
-                           BlockInMemoryIndex &blockIndex,
-                           BlockDatabase &blockDb,
-                           xmstream &result);
-
 private:
   struct CLogData {
     BC::Proto::BlockHashTy Hash;
@@ -43,8 +37,18 @@ private:
 
   uint32_t version() final { return 1; }
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
-  void connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
-  void disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
+
+  void connectImpl(const BC::Common::BlockIndex *index,
+                   const BC::Proto::Block &block,
+                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                   BlockInMemoryIndex &blockIndex,
+                   BlockDatabase &blockDb);
+
+  void disconnectImpl(const BC::Common::BlockIndex *index,
+                      const BC::Proto::Block &block,
+                      const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                      BlockInMemoryIndex &blockIndex,
+                      BlockDatabase &blockDb);
 };
 
 }

@@ -22,26 +22,22 @@ bool AddrHistoryDb::queryAddrTxid(const BC::Proto::AddressTy &address, size_t fr
   return false;
 }
 
-bool AddrHistoryDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage &storage)
+bool AddrHistoryDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 {
-  UTXODb_ = &storage.utxodb();
-  TxDb_ = storage.archive().TransactionDb_;
-  if (!TxDb_) {
-    LOG_F(ERROR, "addrhistory depends on transaction db, need to enable it first and setup 'tx' handler");
-    return false;
-  }
-
   return true;
 }
 
-void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
+void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
+                                const BC::Proto::Block &block,
+                                const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                                BlockInMemoryIndex&,
+                                BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
   if (block.vtx.empty())
     return;
 
   std::unordered_map<BC::Proto::AddressTy, std::vector<BC::Proto::TxHashTy>> txMap;
-  std::unordered_map<BC::Proto::TxHashTy, size_t> internalTxMap;
 
   // Coinbase
   {
@@ -53,38 +49,26 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index, const BC::P
     for (const auto &txout: coinbaseTx.txOut) {
       if (BC::Script::decodeStandardOutput(txout, address))
         txMap[address].push_back(hash);
-
-      internalTxMap[hash] = 0;
     }
   }
 
   // Other transactions
+  assert(linkedOutputs.Tx.size() == block.vtx.size());
+
   for (size_t i = 1; i < block.vtx.size(); i++) {
     std::unordered_set<BC::Proto::AddressTy> affectedAddresses;
     const auto &tx = block.vtx[i];
+    const auto &linkedTx = linkedOutputs.Tx[i];
     BC::Proto::TxHashTy hash = tx.getTxId();
 
-    BC::Proto::AddressTy address;
-    for (size_t i = 0; i < tx.txIn.size(); i++) {
-      const auto &txin = tx.txIn[i];
-      xmstream output;
-      if (!searchUnspentOutput(txin.previousOutputHash,
-                               txin.previousOutputIndex,
-                               block,
-                               internalTxMap,
-                               blockIndex,
-                               blockDb,
-                               UTXODb_,
-                               TxDb_,
-                               output)) {
-        // Corrupted database
-        LOG_F(ERROR, "tx %s input %zu refer non-existing utxo %s:%u at %u",
-              hash.GetHex().c_str(), i, txin.previousOutputHash.GetHex().c_str(), txin.previousOutputIndex,
-              index->Height);
-        exit(1);
-      }
+    assert(linkedTx.TxIn.size() == tx.txIn.size());
 
-      BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)output.data();
+    BC::Proto::AddressTy address;
+    for (size_t j = 0; j < tx.txIn.size(); j++) {
+      const auto &linkedTxin = linkedTx.TxIn[j];
+      assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
+
+      BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
       if (outputInfo->Type == BC::Script::UnspentOutputInfo::EPubKeyHash ||
           outputInfo->Type == BC::Script::UnspentOutputInfo::EScriptHash) {
         if (affectedAddresses.insert(outputInfo->PubKeyHash).second)
@@ -98,22 +82,23 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index, const BC::P
           txMap[address].push_back(hash);
       }
     }
-
-    internalTxMap[hash] = i;
   }
 
   for (const auto &addr: txMap)
     this->add(blockId, addr.first, &addr.second[0], addr.second.size() * sizeof(BC::Proto::TxHashTy), addr.second.size());
 }
 
-void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
+void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index,
+                                   const BC::Proto::Block &block,
+                                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                                   BlockInMemoryIndex&,
+                                   BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
   if (block.vtx.empty())
     return;
 
   std::unordered_map<BC::Proto::AddressTy, size_t> txMap;
-  std::unordered_map<BC::Proto::TxHashTy, size_t> internalTxMap;
 
   // Coinbase
   {
@@ -126,31 +111,21 @@ void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index, const BC
   }
 
   // Other transactions
+  assert(linkedOutputs.Tx.size() == block.vtx.size());
+
   for (size_t i = 1; i < block.vtx.size(); i++) {
     std::unordered_set<BC::Proto::AddressTy> affectedAddresses;
     const auto &tx = block.vtx[i];
-    BC::Proto::TxHashTy hash = tx.getTxId();
+    const auto &linkedTx = linkedOutputs.Tx[i];
+
+    assert(linkedTx.TxIn.size() == tx.txIn.size());
 
     BC::Proto::AddressTy address;
-    for (const auto &txin: tx.txIn) {
-      xmstream output;
-      if (!searchUnspentOutput(txin.previousOutputHash,
-                               txin.previousOutputIndex,
-                               block,
-                               internalTxMap,
-                               blockIndex,
-                               blockDb,
-                               UTXODb_,
-                               TxDb_,
-                               output)) {
-        // Corrupted database
-        LOG_F(ERROR, "tx %s input %zu refer non-existing utxo %s:%u at %u",
-              hash.GetHex().c_str(), i, txin.previousOutputHash.GetHex().c_str(), txin.previousOutputIndex,
-              index->Height);
-        exit(1);
-      }
+    for (size_t j = 0; j < tx.txIn.size(); j++) {
+      const auto &linkedTxin = linkedTx.TxIn[j];
+      assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
 
-      BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)output.data();
+      BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
       if (outputInfo->Type == BC::Script::UnspentOutputInfo::EPubKeyHash ||
           outputInfo->Type == BC::Script::UnspentOutputInfo::EScriptHash) {
         if (affectedAddresses.insert(outputInfo->PubKeyHash).second)
@@ -164,8 +139,6 @@ void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index, const BC
           txMap[address]++;
       }
     }
-
-    internalTxMap[hash] = i;
   }
 
   for (const auto &addr: txMap)

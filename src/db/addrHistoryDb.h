@@ -25,17 +25,22 @@ public:
     }
   }
 
-  // bool queryTransaction(const BC::Proto::TxHashTy&, CQueryTransactionResult&) final { return false; }
   bool queryAddrTxid(const BC::Proto::AddressTy &address, size_t from, size_t count, CQueryAddrHistory &result);
 
   uint32_t version() final { return 1; }
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
-  void connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
-  void disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
 
-private:
-  UTXODb *UTXODb_ = nullptr;
-  ITransactionDb *TxDb_ = nullptr;
+  void connectImpl(const BC::Common::BlockIndex *index,
+                   const BC::Proto::Block &block,
+                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                   BlockInMemoryIndex &blockIndex,
+                   BlockDatabase &blockDb);
+
+  void disconnectImpl(const BC::Common::BlockIndex *index,
+                      const BC::Proto::Block &block,
+                      const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                      BlockInMemoryIndex &blockIndex,
+                      BlockDatabase &blockDb);
 };
 
 }

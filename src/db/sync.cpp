@@ -9,24 +9,35 @@ bool dbDisconnectBlocks(BC::DB::BaseInterface &db,
                         BC::DB::Storage &storage,
                         std::vector<BC::Common::BlockIndex*> &forDisconnect)
 {
-  bool noError = true;
-  auto It = forDisconnect.begin();
-  auto handler = [&db, &It, &blockIndex, &storage](void *data, size_t size) {
-    xmstream stream(data, size);
-    BC::Proto::Block block;
-    BC::unserialize(stream, block);
-    db.disconnect(*It, block, blockIndex, storage.blockDb());
-    ++It;
-  };
-
-  BlockSearcher searcher(storage.blockDb(), handler, [&noError]() { noError = false; });
-  for (const auto &element: forDisconnect) {
-    searcher.add(element);
-    if (!noError)
+  for (BC::Common::BlockIndex *index: forDisconnect) {
+    auto object = objectByIndex(index, storage.blockDb());
+    if (!object.get())
       return false;
+    db.disconnect(index, *object.get()->block(), object.get()->linkedOutputs(), blockIndex, storage.blockDb());
   }
 
   return true;
+
+
+  // bool noError = true;
+  // auto It = forDisconnect.begin();
+  // auto handler = [&db, &It, &blockIndex, &storage](void *data, size_t size) {
+  //   xmstream stream(data, size);
+  //   BC::Proto::Block block;
+  //   BC::unserialize(stream, block);
+  //   // TODO: load linked outputs from disk
+  //   db.disconnect(*It, block, BC::Proto::CBlockLinkedOutputs(), blockIndex, storage.blockDb());
+  //   ++It;
+  // };
+
+  // BlockSearcher searcher(storage.blockDb(), handler, [&noError]() { noError = false; });
+  // for (const auto &element: forDisconnect) {
+  //   searcher.add(element);
+  //   if (!noError)
+  //     return false;
+  // }
+
+  // return true;
 }
 
 bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
@@ -54,29 +65,22 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
   uint32_t count = best->Height - firstCommon->Height;
   LOG_F(INFO, "Update %s: connecting %u blocks", name, count);
 
-  BC::Common::BlockIndex *indexIt = firstCommon;
-  auto handler = [&utxoDb, utxoBestBlock, &archiveDatabases, &indexIt, &blockIndex, &storage](void *data, size_t size) {
-    xmstream stream(data, size);
-    BC::Proto::Block block;
-    BC::unserialize(stream, block);
-
+  auto handler = [&utxoDb, utxoBestBlock, &archiveDatabases, &blockIndex, &storage](BC::Common::BlockIndex *index, const BC::Proto::Block &block, const BC::Proto::CBlockLinkedOutputs &linkedOutputs) {
     // Connect archive
     for (size_t i = 0; i < archiveDatabases.size(); i++) {
       BC::Common::BlockIndex *best = archiveDatabases[i].BestBlock;
       uint32_t connectHeight = best ? best->Height : std::numeric_limits<uint32_t>::max();
-      if (indexIt->Height >= connectHeight)
-        archiveDatabases[i].Base->connect(indexIt, block, blockIndex, storage.blockDb());
+      if (index->Height >= connectHeight)
+        archiveDatabases[i].Base->connect(index, block, linkedOutputs, blockIndex, storage.blockDb());
     }
 
     // Connect utxo
-    if (indexIt->Height >= utxoBestBlock->Height)
-      utxoDb.connect(indexIt, block, blockIndex, storage.blockDb());
-
-    indexIt = indexIt->Next;
+    if (index->Height >= utxoBestBlock->Height)
+      utxoDb.connect(index, block, linkedOutputs, blockIndex, storage.blockDb());
   };
 
   BC::Common::BlockIndex *index = firstCommon;
-  BlockSearcher searcher(storage.blockDb(), handler, [&noError]() { noError = false; });
+  BlockBulkReader searcher(storage.blockDb(), handler, [&noError]() { noError = false; });
   unsigned portionNum = 0;
   unsigned portionSize = count / 20 + 1;
   unsigned i = 0;
@@ -91,7 +95,6 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
       i = 0;
     }
   }
-
 
   LOG_F(INFO, "100%% done");
   return true;

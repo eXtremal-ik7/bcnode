@@ -59,18 +59,18 @@ struct NetworkAddress {
 
 struct NetworkAddressWithoutTime : public NetworkAddress {};
 
-  struct CTxInInfoLink {};
+  // struct CTxInInfoLink {};
 
-  struct CTxValidationData {
-    xvector<CTxInInfoLink> TxIns;
-    xvector<bool> ScriptSigValid;
-  };
+  // struct CTxValidationData {
+  //   xvector<CTxInInfoLink> TxIns;
+  //   xvector<bool> ScriptSigValid;
+  // };
 
-  struct ValidationData {
-    uint64_t HasWitness : 1;
-    uint64_t TxAmoutValidated : 1;
-    xvector<CTxValidationData> TxData;
-  };
+  // struct ValidationData {
+  //   uint64_t HasWitness : 1;
+  //   uint64_t TxAmoutValidated : 1;
+  //   xvector<CTxValidationData> TxData;
+  // };
 
 #pragma pack(push, 1)
   struct BlockHeader {
@@ -145,7 +145,29 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     typename T::BlockHeader header;
     xvector<typename T::Transaction> vtx;
     // Memory only
-    mutable ValidationData validationData;
+    // mutable ValidationData validationData;
+  };
+
+  struct CTxLinkedOutputs {
+    xvector<xvector<uint8_t>> TxIn;
+  };
+
+  struct CBlockLinkedOutputs {
+    bool AllOutputsFound = false;
+    xvector<CTxLinkedOutputs> Tx;
+  };
+
+  struct CTxInValidationData {
+    bool ScriptSigKnownValid;
+  };
+
+  struct CTxValidationData {
+    xvector<CTxInValidationData> ScriptSigKnownValid;
+  };
+
+  struct CBlockValidationData {
+    bool HasWitnessData = false;
+    xvector<CTxValidationData> TxData;
   };
 
   struct MessageVersion {
@@ -340,6 +362,16 @@ template<typename T> struct Io<Proto::BlockTy<T>> {
       data->vtx[i].SerializedDataSize = static_cast<uint32_t>(src.offsetOf() - data->vtx[i].SerializedDataOffset);
     }
   }
+};
+
+template<> struct Io<Proto::CTxLinkedOutputs> {
+  static void serialize(xmstream &dst, const BTC::Proto::CTxLinkedOutputs &data);
+  static void unserialize(xmstream &src, BTC::Proto::CTxLinkedOutputs &data);
+};
+
+template<> struct Io<Proto::CBlockLinkedOutputs> {
+  static void serialize(xmstream &dst, const BTC::Proto::CBlockLinkedOutputs &data);
+  static void unserialize(xmstream &src, BTC::Proto::CBlockLinkedOutputs &data);
 };
 
 // Network messages

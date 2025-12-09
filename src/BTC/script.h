@@ -52,7 +52,9 @@ public:
     };
 
     uint8_t Type;
+    uint8_t IsLocalTx;
     uint8_t IsPubKeyCompressed;
+
     union {
       uint8_t PubKeyCompressed[33];
       uint160 PubKeyHash;

@@ -66,7 +66,8 @@ public:
   using Transaction = BTC::Proto::Transaction;
   using Block = BTC::Proto::BlockTy<XPM::Proto>;
 
-  using CTxValidationData = BTC::Proto::CTxValidationData;
+  using CBlockValidationData = BTC::Proto::CBlockValidationData;
+  using CBlockLinkedOutputs = BTC::Proto::CBlockLinkedOutputs;
 
   using BlockHeaderNet = BTC::Proto::BlockHeaderNetTy<XPM::Proto>;
   using NetworkAddress = BTC::Proto::NetworkAddress;

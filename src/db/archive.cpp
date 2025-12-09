@@ -68,8 +68,6 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   TransactionDb_ = setupHandler<ITransactionDb>(cfg, "tx", EIQueryTransaction, dbIndexMap, AllDb_);
   AddrHistoryDb_ = setupHandler<IAddrHistoryDb>(cfg, "addrhistory", EIQueryAddrHistory, dbIndexMap, AllDb_);
 
-  storage.utxodb().setTxdb(TransactionDb_);
-
   BC::Common::BlockIndex *utxoBestBlock;
   std::vector<BC::Common::BlockIndex*> utxoDisconnect;
   std::vector<std::vector<BC::Common::BlockIndex*>> archiveDisconnect;

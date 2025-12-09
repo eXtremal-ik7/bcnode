@@ -53,6 +53,8 @@ namespace Common {
   };
 
   using BlockIndex = BTC::Common::BlockIndexTy<XPM::Proto>;
+  using CIndexCacheObject = BTC::Common::CIndexCacheObject;
+
   struct ChainParams {
     int networkId;
     uint32_t magic;
@@ -85,27 +87,24 @@ namespace Common {
   void initialize();
   static inline bool hasWitness() { return false; }
 
-  // Validation functions
-  using ValidateStandaloneTy = std::function<bool(const Proto::Block&, const ChainParams&, std::string &error)>;
-  using ValidateContextualTy = std::function<bool(const Common::BlockIndex&, const Proto::Block&, const ChainParams&, std::string &error)>;
-  static inline void applyValidation(ValidateStandaloneTy function, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
-    if (*isValid)
-      *isValid = function(block, chainParams, error);
-  }
-  static inline void applyContextualValidation(ValidateContextualTy function, const Common::BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
-    if (*isValid)
-      *isValid = function(index, block, chainParams, error);
-  }
-
-  void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);
-  unsigned checkBlockStandalone(const Proto::Block &block, const ChainParams &chainParams, std::string &error);
-  bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
-
   arith_uint256 GetBlockProof(const XPM::Proto::BlockHeader &header, const ChainParams &chainParams);
 
   // Consensus (PoW)
   void checkConsensusInitialize(CheckConsensusCtx &ctx);
   bool checkConsensus(const XPM::Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
+
+  static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
+
+  bool checkBlockStandalone(const Proto::Block &block,
+                            Proto::CBlockValidationData &validation,
+                            const ChainParams &chainParams,
+                            std::string &error);
+  bool checkBlockContextual(const BlockIndex &index,
+                            const Proto::Block &block,
+                            const Proto::CBlockValidationData &validation,
+                            const Proto::CBlockLinkedOutputs &linkedOutputs,
+                            const ChainParams &chainParams,
+                            std::string &error);
 };
 
 class X {

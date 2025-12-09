@@ -50,7 +50,8 @@ public:
     BlockHashTy getWTxid() const;
   };
 
-  using CTxValidationData = BTC::Proto::CTxValidationData;
+  using CBlockValidationData = BTC::Proto::CBlockValidationData;
+  using CBlockLinkedOutputs = BTC::Proto::CBlockLinkedOutputs;
 
   using MessageVersion = BTC::Proto::MessageVersion;
   using MessagePing = BTC::Proto::MessagePing;

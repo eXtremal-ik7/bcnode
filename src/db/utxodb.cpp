@@ -9,22 +9,30 @@
 namespace BC {
 namespace DB {
 
-bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xmstream &data) const
+bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result) const
 {
   // TODO: search in cache
 
   CUnspentOutputKey key;
   key.Tx = txid;
   key.Index = txoutIdx;
-  data.reset();
-  return this->find(key, [&data](const void *d, size_t s) {
-    data.write(d, s);
+  return this->find(key, [&result](const void *d, size_t s) {
+    result.resize(s);
+    memcpy(result.begin(), d, s);
   });
 }
 
-bool UTXODb::queryFast(const BC::Proto::BlockHashTy&, unsigned, xmstream&)
+bool UTXODb::queryCache(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result) const
 {
-  return false;
+  // TODO: search in cache
+  // Now cache not implemented, search in entire database
+  CUnspentOutputKey key;
+  key.Tx = txid;
+  key.Index = txoutIdx;
+  return this->find(key, [&result](const void *d, size_t s) {
+    result.resize(s);
+    memcpy(result.begin(), d, s);
+  });
 }
 
 bool UTXODb::initializeImpl(config4cpp::Configuration* , BC::DB::Storage&)
@@ -32,7 +40,11 @@ bool UTXODb::initializeImpl(config4cpp::Configuration* , BC::DB::Storage&)
   return true;
 }
 
-void UTXODb::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex&, BlockDatabase&)
+void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
+                         const BC::Proto::Block &block,
+                         const BC::Proto::CBlockLinkedOutputs&,
+                         BlockInMemoryIndex&,
+                         BlockDatabase&)
 { 
   SmallStream<1024> serialized;
   const auto blockId = index->Header.GetHash();
@@ -76,7 +88,11 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::B
   }
 }
 
-void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
+void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
+                            const BC::Proto::Block &block,
+                            const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                            BlockInMemoryIndex&,
+                            BlockDatabase&)
 {
   SmallStream<1024> serialized;
   const auto blockId = index->Header.GetHash();
@@ -94,24 +110,22 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto
   }
 
   // Other transactions
+  assert(linkedOutputs.Tx.size() == block.vtx.size());
+
   for (size_t i = 1; i < block.vtx.size(); i++) {
     const auto &tx = block.vtx[i];
+    const auto &linkedTx = linkedOutputs.Tx[i];
+    assert(linkedTx.TxIn.size() == tx.txIn.size());
 
     for (size_t j = 0; j < tx.txIn.size(); j++) {
       const auto &txIn = tx.txIn[j];
-      // TODO: use block index for transaction search
-      serialized.reset();
-      if (!TxDb_->searchUnspentOutput(txIn.previousOutputHash, txIn.previousOutputIndex, blockIndex, blockDb, serialized)) {
-        LOG_F(ERROR,
-              "can't disconnect block [%u]%s unspent output %s:%u not found",
-              index->Height,
-              index->Header.GetHash().GetHex().c_str(),
-              txIn.previousOutputHash.GetHex().c_str(),
-              txIn.previousOutputIndex);
-        exit(1);
-      }
+      const auto &linkedTxin = linkedTx.TxIn[j];
 
-      this->add(blockId, key, serialized.data(), serialized.sizeOf());
+      assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
+
+      key.Tx = txIn.previousOutputHash;
+      key.Index = txIn.previousOutputIndex;
+      this->add(blockId, key, linkedTxin.data(), linkedTxin.size());
     }
 
     key.Tx = tx.getTxId();
@@ -120,40 +134,6 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto
       this->remove(blockId, key);
     }
   }
-}
-
-bool searchUnspentOutput(const BC::Proto::TxHashTy &tx,
-                         uint32_t index,
-                         const BC::Proto::Block &block,
-                         std::unordered_map<BC::Proto::TxHashTy, size_t> &localTxMap,
-                         BlockInMemoryIndex &blockIndex,
-                         BlockDatabase &blockDb,
-                         UTXODb*,
-                         ITransactionDb *txdb,
-                         xmstream &result)
-{
-  result.reset();
-
-  // 1. Search in UTXO cache
-
-  // 2. Search in current block
-  {
-    auto It = localTxMap.find(tx);
-    if (It != localTxMap.end()) {
-      const BC::Proto::Transaction &localTx = block.vtx[It->second];
-      if (index >= localTx.txOut.size())
-        return false;
-
-      const BC::Proto::TxOut &txOut = localTx.txOut[index];
-
-      // Parse transaction output and return
-      BC::Script::parseTransactionOutput(txOut, result);
-      return true;
-    }
-  }
-
-  // 3. Search in whole transaction base
-  return txdb->searchUnspentOutput(tx, index, blockIndex, blockDb, result);
 }
 
 }

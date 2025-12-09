@@ -10,6 +10,7 @@ project(bcnode)
 set (CMAKE_CXX_STANDARD 17)
 option(SANITIZER_ENABLED "Build with address sanitizer" OFF)
 option(PROFILE_ENABLED "Build for profiling" OFF)
+option(ASSERTS_ENABLED "Build Release/RelWithDebInfo with asserts" OFF)
 option(BCNODE_DOGE "Build bcnode for dogecoin" OFF)
 option(BCNODE_ZEC "Build bcnode for ZCash" OFF)
 
@@ -21,6 +22,10 @@ endif()
 if (PROFILE_ENABLED)
   set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -fno-inline -fno-omit-frame-pointer")
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-inline -fno-omit-frame-pointer")
+endif()
+
+if (NOT ASSERTS_ENABlED)
+  add_definitions(-UNDEBUG)
 endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")

@@ -345,16 +345,11 @@ int main(int argc, char **argv)
   // Initialize storage
   if (!context.BlockDb.init(context.DataDir, context.ChainParams))
     return 1;
-  context.Storage.init(context.BlockDb, context.Archive);
+  context.Storage.init(context.BlockDb, context.BlockIndex, context.Archive);
 
   // Loading index
   if (!loadingBlockIndex(context.BlockIndex, context.DataDir))
     return 1;
-
-  if (!archiveEnabled) {
-    LOG_F(ERROR, "Full block index not supported at this moment, need enable archive with any transaction base");
-    return 1;
-  }
 
   // Initialize databases
   if (!archiveEnabled) {
@@ -371,15 +366,6 @@ int main(int argc, char **argv)
     // Initialize full archive
     if (!context.Archive.init(context.BlockIndex, context.Storage, cfg))
       return 1;
-    if (!context.Archive.TransactionDb_) {
-      LOG_F(ERROR, "Full block index not supported at this moment, need enable archive with any transaction base");
-      return 1;
-    }
-  }
-
-  if (gReindex) {
-    if (!reindex(context.BlockIndex, context.DataDir, context.ChainParams, context.Storage))
-      return 1;
   }
 
   context.MainBase = createAsyncBase(amOSDefault);
@@ -387,6 +373,13 @@ int main(int argc, char **argv)
   // Initialize storage manager
   if (!context.Storage.run([&context]() { postQuitOperation(context.MainBase); }))
     return 1;
+
+  if (gReindex) {
+    if (!reindex(context.BlockIndex, context.DataDir, context.ChainParams, context.Storage)) {
+      postQuitOperation(context.MainBase);
+      return 1;
+    }
+  }
 
   // Starting daemon
   context.Node.Init(context.BlockIndex, context.ChainParams, context.Storage, context.MainBase, totalThreadsNum, workerThreadsNum, outgoingConnectionsLimit, incomingConnectionsLimit);

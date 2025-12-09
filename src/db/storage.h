@@ -6,9 +6,6 @@
 #pragma once
 
 #include "db/utxodb.h"
-#include <BC/bc.h>
-// #include <db/common.h>
-#include <db/utxodb.h>
 #include <tbb/concurrent_queue.h>
 #include <functional>
 #include <thread>
@@ -35,22 +32,31 @@ struct Task {
   Task(ActionTy type, BC::Common::BlockIndex *index) : Type(type), Index(index) {}
 };
 
+
 class Storage {
 public:
   ~Storage();
-  void init(BlockDatabase &blockDb, Archive &archive) {
+  void init(BlockDatabase &blockDb, BlockInMemoryIndex &blockIndex, Archive &archive) {
     BlockDb_ = &blockDb;
+    BlockIndex_ = &blockIndex;
     Archive_ = &archive;
   }
 
   bool run(std::function<void()> errorHandler);
-  void add(ActionTy type, BC::Common::BlockIndex *index, BlockInMemoryIndex &blockIndex, bool wakeUp = false);
+
+  void add(ActionTy type,
+           BC::Common::BlockIndex *index,
+           const BC::Proto::Block &block,
+           const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+           BlockInMemoryIndex &blockIndex,
+           bool wakeUp = false);
+
   void wakeUp();
 
   BlockDatabase &blockDb() { return *BlockDb_; }
   Archive &archive() { return *Archive_; }
   UTXODb &utxodb() { return UTXODb_; }
-  SerializedDataCache &cache() { return BlockCache; }
+  CAllocationInfo &cache() { return BlockCache; }
   void flush();
 
   tbb::concurrent_queue<Task> &queue() { return Queue_; }
@@ -65,6 +71,7 @@ private:
 private:
   bool Initialized_ = false;
   BlockDatabase *BlockDb_ = nullptr;
+  BlockInMemoryIndex *BlockIndex_ = nullptr;
   Archive *Archive_ = nullptr;
   asyncBase *Base_ = nullptr;
   aioUserEvent *NewTaskEvent_ = nullptr;
@@ -75,7 +82,7 @@ private:
   std::vector<BC::Common::BlockIndex*> CachedBlocks_;
   std::chrono::time_point<std::chrono::steady_clock> LastFlushTime_ = std::chrono::steady_clock::now();
 
-  SerializedDataCache BlockCache;
+  CAllocationInfo BlockCache;
   UTXODb UTXODb_;
 };
 

@@ -10,8 +10,6 @@
 
 class BlockDatabase;
 
-struct aioObject;
-
 namespace BC {
 namespace DB {
 
@@ -23,14 +21,22 @@ public:
 
   bool purge(config4cpp::Configuration *cfg, std::filesystem::path &dataDir);
 
-  void connect(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) {
+  void connect(const BC::Common::BlockIndex *index,
+               const BC::Proto::Block &block,
+               const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+               BlockInMemoryIndex &blockIndex,
+               BlockDatabase &blockDb) {
     for (auto &db: AllDb_)
-      db->connect(index, block, blockIndex, blockDb);
+      db->connect(index, block, linkedOutputs, blockIndex, blockDb);
   }
 
-  void disconnect(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) {
+  void disconnect(const BC::Common::BlockIndex *index,
+                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  BlockInMemoryIndex &blockIndex,
+                  BlockDatabase &blockDb) {
     for (auto &db: AllDb_)
-      db->disconnect(index, block, blockIndex, blockDb);
+      db->disconnect(index, block, linkedOutputs, blockIndex, blockDb);
   }
 
   void flush() {

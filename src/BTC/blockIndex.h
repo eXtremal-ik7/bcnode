@@ -29,6 +29,46 @@ struct alignas(8) BlockAcceptDataTy {
   BlockAcceptDataTy *CombinerNext;
 };
 
+class alignas(512) CIndexCacheObject {
+private:
+  mutable std::atomic<uintptr_t> Refs_ = 0;
+  CAllocationInfo *Info_ = nullptr;
+
+  SerializedDataObject BlockData_;
+  Proto::CBlockValidationData ValidationData_;
+  Proto::CBlockLinkedOutputs LinkedOutputs_;
+
+public:
+  uintptr_t ref_fetch_add(uintptr_t count) const { return Refs_.fetch_add(count); }
+  uintptr_t ref_fetch_sub(uintptr_t count) const { return Refs_.fetch_sub(count); }
+
+public:
+  CIndexCacheObject() {}
+  CIndexCacheObject(CAllocationInfo *allocationInfo,
+                    void *data,
+                    size_t dataSize,
+                    size_t memorySize,
+                    void *unpackedData,
+                    size_t unpackedMemorySize) :
+    Info_(allocationInfo),
+    BlockData_(data, dataSize, memorySize, unpackedData, unpackedMemorySize)
+  {
+    if (Info_)
+      Info_->add(BlockData_.memorySize());
+  }
+
+  ~CIndexCacheObject() {
+    if (Info_)
+      Info_->remove(BlockData_.memorySize());
+  }
+
+  const SerializedDataObject &blockData() const { return BlockData_; }
+  BC::Proto::Block *block() const { return static_cast<BC::Proto::Block*>(BlockData_.unpackedData()); }
+  Proto::CBlockValidationData &validationData() { return ValidationData_; }
+  const Proto::CBlockValidationData &validationDataConst() const { return ValidationData_; }
+  Proto::CBlockLinkedOutputs &linkedOutputs() { return LinkedOutputs_; }
+};
+
 template<typename T>
 struct alignas(8) BlockIndexTy {
 private:
@@ -38,10 +78,13 @@ public:
   std::atomic<BlockStatus> IndexState;
 
   typename T::BlockHeader Header;
-  uint32_t Height = std::numeric_limits<uint32_t>::max();;
-  uint32_t FileNo = std::numeric_limits<uint32_t>::max();;
-  uint32_t FileOffset = std::numeric_limits<uint32_t>::max();;
+  uint32_t Height = std::numeric_limits<uint32_t>::max();
+  uint32_t FileNo = std::numeric_limits<uint32_t>::max();
+  uint32_t FileOffset = std::numeric_limits<uint32_t>::max();
   uint32_t SerializedBlockSize = std::numeric_limits<uint32_t>::max();
+  uint32_t LinkedOutputsFileNo = std::numeric_limits<uint32_t>::max();
+  uint32_t LinkedOutputsFileOffset = std::numeric_limits<uint32_t>::max();
+  uint32_t LinkedOutputsSerializedSize = std::numeric_limits<uint32_t>::max();
 
   BlockIndexTy *Prev = nullptr;
   BlockIndexTy *Next = nullptr;
@@ -49,7 +92,7 @@ public:
   bool OnChain = false;
 
   arith_uint256 ChainWork;
-  atomic_intrusive_ptr<const SerializedDataObject> Serialized;
+  atomic_intrusive_ptr<CIndexCacheObject> Serialized;
   // TODO: make union with other field for save memory
   std::chrono::time_point<std::chrono::steady_clock> DownloadingStartTime = std::chrono::time_point<std::chrono::steady_clock>::max();
 
@@ -75,6 +118,17 @@ public:
   }
 
   bool isOrphan() { return Height == std::numeric_limits<uint32_t>::max(); }
+  bool blockStored() {
+    return FileNo != std::numeric_limits<uint32_t>::max() &&
+           FileOffset != std::numeric_limits<uint32_t>::max() &&
+           SerializedBlockSize != std::numeric_limits<uint32_t>::max();
+  }
+
+  bool indexStored() {
+    return LinkedOutputsFileNo != std::numeric_limits<uint32_t>::max() &&
+           LinkedOutputsFileOffset != std::numeric_limits<uint32_t>::max() &&
+           LinkedOutputsSerializedSize != std::numeric_limits<uint32_t>::max();
+  }
 };
 
 }
@@ -89,6 +143,9 @@ template<typename T> struct Io<Common::BlockIndexTy<T>> {
     BTC::serialize(stream, data.FileNo);
     BTC::serialize(stream, data.FileOffset);
     BTC::serialize(stream, data.SerializedBlockSize);
+    BTC::serialize(stream, data.LinkedOutputsFileNo);
+    BTC::serialize(stream, data.LinkedOutputsFileOffset);
+    BTC::serialize(stream, data.LinkedOutputsSerializedSize);
     BTC::serialize(stream, data.ChainWork);
   }
 
@@ -98,6 +155,9 @@ template<typename T> struct Io<Common::BlockIndexTy<T>> {
     BTC::unserialize(stream, data.FileNo);
     BTC::unserialize(stream, data.FileOffset);
     BTC::unserialize(stream, data.SerializedBlockSize);
+    BTC::unserialize(stream, data.LinkedOutputsFileNo);
+    BTC::unserialize(stream, data.LinkedOutputsFileOffset);
+    BTC::unserialize(stream, data.LinkedOutputsSerializedSize);
     BTC::unserialize(stream, data.ChainWork);
   }
 };

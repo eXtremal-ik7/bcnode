@@ -22,9 +22,9 @@ bool TxDbRef::queryTransaction(const BC::Proto::TxHashTy &txid,
     if (It == blockIndex.blockIndex().end())
       return;
     BC::Common::BlockIndex *index = It->second;
-    intrusive_ptr<const SerializedDataObject> serializedPtr(index->Serialized);
+    intrusive_ptr<BC::Common::CIndexCacheObject> serializedPtr(index->Serialized);
     if (serializedPtr.get()) {
-      BC::Proto::Block *block = static_cast<BC::Proto::Block*>(serializedPtr.get()->unpackedData());
+      BC::Proto::Block *block = serializedPtr.get()->block();
       result.Tx = block->vtx[logData->Index];
       result.DataCorrupted = false;
       return;
@@ -44,58 +44,16 @@ bool TxDbRef::queryTransaction(const BC::Proto::TxHashTy &txid,
   return true;
 }
 
-bool TxDbRef::searchUnspentOutput(const BC::Proto::TxHashTy &tx,
-                                  uint32_t outputIndex,
-                                  BlockInMemoryIndex &blockIndex,
-                                  BlockDatabase &blockDb,
-                                  xmstream &result)
-{
-  bool found = find(tx, [&blockIndex, &blockDb, &result, outputIndex](const void *data, size_t) {
-    // Load transaction
-    const CLogData *logData = static_cast<const CLogData*>(data);
-
-    auto It = blockIndex.blockIndex().find(logData->Hash);
-    if (It == blockIndex.blockIndex().end())
-      return;
-    BC::Common::BlockIndex *index = It->second;
-
-    intrusive_ptr<const SerializedDataObject> serializedPtr(index->Serialized);
-    if (serializedPtr.get()) {
-      BC::Proto::Block *block = static_cast<BC::Proto::Block*>(serializedPtr.get()->unpackedData());
-      if (logData->Index < block->vtx.size()) {
-        const auto &tx = block->vtx[logData->Index];
-        if (outputIndex < tx.txOut.size()) {
-          const auto &txOut = tx.txOut[outputIndex];
-          BC::Script::parseTransactionOutput(txOut, result);
-        }
-      }
-
-      return;
-    }
-
-    xmstream txData;
-    BC::Proto::Transaction txFromDisk;
-    txData.reserve(logData->SerializedDataSize);
-    if (blockDb.blockReader().read(index->FileNo, index->FileOffset + logData->SerializedDataOffset + 8, txData.data(), logData->SerializedDataSize)) {
-      txData.seekSet(0);
-      if (unserializeAndCheck(txData, txFromDisk)) {
-        if (outputIndex < txFromDisk.txOut.size()) {
-          const auto &txOut = txFromDisk.txOut[outputIndex];
-          BC::Script::parseTransactionOutput(txOut, result);
-        }
-      }
-    }
-  });
-
-  return found && result.sizeOf();
-}
-
 bool TxDbRef::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 {
   return true;
 }
 
-void TxDbRef::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex&, BlockDatabase&)
+void TxDbRef::connectImpl(const BC::Common::BlockIndex *index,
+                          const BC::Proto::Block &block,
+                          const BC::Proto::CBlockLinkedOutputs&,
+                          BlockInMemoryIndex&,
+                          BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
   for (size_t i = 0, ie = block.vtx.size(); i != ie; i++) {
@@ -110,13 +68,16 @@ void TxDbRef::connectImpl(const BC::Common::BlockIndex *index, const BC::Proto::
   }
 }
 
-void TxDbRef::disconnectImpl(const BC::Common::BlockIndex *index, const BC::Proto::Block &block, BlockInMemoryIndex&, BlockDatabase&)
+void TxDbRef::disconnectImpl(const BC::Common::BlockIndex *index,
+                             const BC::Proto::Block &block,
+                             const BC::Proto::CBlockLinkedOutputs&,
+                             BlockInMemoryIndex&,
+                             BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
   for (size_t i = 0, ie = block.vtx.size(); i != ie; i++)
     this->remove(blockId, block.vtx[i].getTxId());
 }
-
 
 }
 }

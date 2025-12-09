@@ -4,7 +4,9 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "btc.h"
-#include "db/utxodb.h"
+#include "validation.h"
+#include "common/merkleTree.h"
+#include "common/utils.h"
 #include <p2putils/xmstream.h>
 
 namespace BTC {
@@ -251,32 +253,32 @@ bool checkConsensus(const BTC::Proto::BlockHeader &header, CheckConsensusCtx&, B
   return true;
 }
 
-void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
-{
-  ::initializeValidationContext<BTC::X>(block, utxodb);
-}
-
-bool checkBlockStandalone(const Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool checkBlockStandalone(const Proto::Block &block, Proto::CBlockValidationData &validation, const ChainParams&, std::string &error)
 {
   bool isValid = true;
+  bool hasWitnessData = false;
 
   // Block validation
-  applyStandaloneValidation(validateBlockSize<BTC::X>, block, chainParams, error, &isValid);
-  applyStandaloneValidation(validateMerkleRoot<BTC::X>, block, chainParams, error, &isValid);
-  applyStandaloneValidation(validateWitnessCommitment<BTC::X>, block, chainParams, error, &isValid);
-  // Transaction validation
-  for (const auto &tx: block.vtx) {
-    applyStandaloneTxValidation(validateScriptSig<BTC::X>, block.validationData, tx, chainParams, error, &isValid);
-    applyStandaloneTxValidation(validateAmount<BTC::X>, block.validationData, tx, chainParams, error, &isValid);
-  }
+  isValid |= BTC::validateBlockSize(block, BTC::Configuration::MaxBlockSize, error);
+  isValid |= BTC::validateMerkleRoot(block, error);
+  isValid |= BTC::validateWitnessCommitment(block, hasWitnessData, error);
+
+  validation.HasWitnessData = hasWitnessData;
+
+  // TODO: Transaction validation
   return isValid;
 }
 
-bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool checkBlockContextual(const BlockIndex &index,
+                          const Proto::Block &block,
+                          const Proto::CBlockValidationData &validation,
+                          const Proto::CBlockLinkedOutputs&,
+                          const ChainParams &chainParams,
+                          std::string &error)
 {
   bool isValid = true;
-  applyContextualValidation(validateBIP34<BTC::X>, index, block, chainParams, error, &isValid);
-  applyContextualValidation(validateUnexpectedWitness<BTC::X>, index, block, chainParams, error, &isValid);
+  isValid |= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
+  isValid |= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);
   return isValid;
 }
 

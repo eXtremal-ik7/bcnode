@@ -52,27 +52,13 @@ namespace Common {
   };
 
   using BlockIndex = BTC::Common::BlockIndexTy<LTC::Proto>;
+  using CIndexCacheObject = BTC::Common::CIndexCacheObject;
   using CheckConsensusCtx = BTC::Common::CheckConsensusCtx;
 
   bool setupChainParams(ChainParams *params, const char *network);
   static inline bool hasWitness() { return true; }
 
-  // Validation functions
-  using ValidateStandaloneTy = std::function<bool(const Proto::Block&, const ChainParams&, std::string &error)>;
-  using ValidateContextualTy = std::function<bool(const Common::BlockIndex&, const Proto::Block&, const ChainParams&, std::string &error)>;
-  static inline void applyStandaloneValidation(ValidateStandaloneTy function, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
-    if (*isValid)
-      *isValid = function(block, chainParams, error);
-  }
-  static inline void applyContextualValidation(ValidateContextualTy function, const Common::BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
-    if (*isValid)
-      *isValid = function(index, block, chainParams, error);
-  }
-
   unsigned getBlockGeneration(const ChainParams &chainParams, LTC::Common::BlockIndex *index);
-  void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);
-  unsigned checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error);
-  bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
 
   bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx &, uint256 &powLimit);
   arith_uint256 GetBlockProof(const Proto::BlockHeader &header);
@@ -80,6 +66,19 @@ namespace Common {
   static inline arith_uint256 GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) { return GetBlockProof(header); }
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
   static inline bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) { return checkPow(header, header.nBits, ctx, chainParams.powLimit); }
+
+  static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
+
+  bool checkBlockStandalone(const Proto::Block &block,
+                            Proto::CBlockValidationData &validation,
+                            const ChainParams &chainParams,
+                            std::string &error);
+  bool checkBlockContextual(const BlockIndex &index,
+                            const Proto::Block &block,
+                            const Proto::CBlockValidationData &validation,
+                            const Proto::CBlockLinkedOutputs &linkedOutputs,
+                            const ChainParams &chainParams,
+                            std::string &error);
 };
 
 class X {
