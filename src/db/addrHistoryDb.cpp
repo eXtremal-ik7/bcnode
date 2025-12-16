@@ -47,7 +47,7 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
 
     BC::Proto::AddressTy address;
     for (const auto &txout: coinbaseTx.txOut) {
-      if (BC::Script::decodeStandardOutput(txout, address))
+      if (BC::Script::extractSingleAddress(txout, address) != BC::Script::UnspentOutputInfo::EInvalid)
         txMap[address].push_back(hash);
     }
   }
@@ -69,15 +69,12 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
       assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
 
       BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
-      if (outputInfo->Type == BC::Script::UnspentOutputInfo::EPubKeyHash ||
-          outputInfo->Type == BC::Script::UnspentOutputInfo::EScriptHash) {
-        if (affectedAddresses.insert(outputInfo->PubKeyHash).second)
-          txMap[outputInfo->PubKeyHash].push_back(hash);
-      }
+      if (BC::Script::extractSingleAddress(*outputInfo, address) && affectedAddresses.insert(address).second)
+        txMap[address].push_back(hash);
     }
 
     for (const auto &txout: tx.txOut) {
-      if (BC::Script::decodeStandardOutput(txout, address)) {
+      if (BC::Script::extractSingleAddress(txout, address) != BC::Script::UnspentOutputInfo::EInvalid) {
         if (affectedAddresses.insert(address).second)
           txMap[address].push_back(hash);
       }
@@ -105,7 +102,7 @@ void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index,
     const auto &coinbaseTx = block.vtx[0];
     BC::Proto::AddressTy address;
     for (const auto &txout: coinbaseTx.txOut) {
-      if (BC::Script::decodeStandardOutput(txout, address))
+      if (BC::Script::extractSingleAddress(txout, address) != BC::Script::UnspentOutputInfo::EInvalid)
         txMap[address]++;
     }
   }
@@ -126,15 +123,12 @@ void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index,
       assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
 
       BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
-      if (outputInfo->Type == BC::Script::UnspentOutputInfo::EPubKeyHash ||
-          outputInfo->Type == BC::Script::UnspentOutputInfo::EScriptHash) {
-        if (affectedAddresses.insert(outputInfo->PubKeyHash).second)
-        txMap[outputInfo->PubKeyHash]++;
-      }
+      if (BC::Script::extractSingleAddress(*outputInfo, address) && affectedAddresses.insert(address).second)
+        txMap[address]++;
     }
 
     for (const auto &txout: tx.txOut) {
-      if (BC::Script::decodeStandardOutput(txout, address)) {
+      if (BC::Script::extractSingleAddress(txout, address) != BC::Script::UnspentOutputInfo::EInvalid) {
         if (affectedAddresses.insert(address).second)
           txMap[address]++;
       }

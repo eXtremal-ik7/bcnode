@@ -68,6 +68,7 @@ public:
 
   using CBlockValidationData = BTC::Proto::CBlockValidationData;
   using CBlockLinkedOutputs = BTC::Proto::CBlockLinkedOutputs;
+  using CTxLinkedOutputs = BTC::Proto::CTxLinkedOutputs;
 
   using BlockHeaderNet = BTC::Proto::BlockHeaderNetTy<XPM::Proto>;
   using NetworkAddress = BTC::Proto::NetworkAddress;

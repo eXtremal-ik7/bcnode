@@ -52,6 +52,7 @@ public:
 
   using CBlockValidationData = BTC::Proto::CBlockValidationData;
   using CBlockLinkedOutputs = BTC::Proto::CBlockLinkedOutputs;
+  using CTxLinkedOutputs = BTC::Proto::CTxLinkedOutputs;
 
   using MessageVersion = BTC::Proto::MessageVersion;
   using MessagePing = BTC::Proto::MessagePing;

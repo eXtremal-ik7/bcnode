@@ -55,6 +55,8 @@ public:
     uint8_t IsLocalTx;
     uint8_t IsPubKeyCompressed;
 
+    int64_t Value;
+
     union {
       uint8_t PubKeyCompressed[33];
       uint160 PubKeyHash;
@@ -66,7 +68,14 @@ public:
   };
 #pragma pack(pop)
 
-  static bool decodeStandardOutput(const BC::Proto::TxOut &out, BC::Proto::AddressTy &address);
+  static std::string addressToBase58(UnspentOutputInfo::EType type,
+                                     BC::Proto::AddressTy &address,
+                                     const std::vector<uint8_t> &pubkeyPrefix,
+                                     const std::vector<uint8_t> &scriptPrefix);
+
+  static UnspentOutputInfo::EType extractSingleAddress(const BC::Proto::TxOut &txOut, BC::Proto::AddressTy &address);
+  static bool extractSingleAddress(const UnspentOutputInfo &info, BC::Proto::AddressTy &address);
+
   static void parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspentOutputInfo);
     
 };

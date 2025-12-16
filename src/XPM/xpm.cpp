@@ -19,6 +19,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 9912;
 
     params->PublicKeyPrefix = {23};
+    params->ScriptPrefix = {83};
 
     // TODO: do correct BIP34 checking
     params->BIP34Height = 17;
@@ -77,6 +78,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 9914;
 
     params->PublicKeyPrefix = {111};
+    params->PublicKeyPrefix = {196};
 
     // TODO: do correct BIP34 checking
     params->BIP34Height = 17;

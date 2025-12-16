@@ -1,6 +1,7 @@
 #pragma once
 #include "rapidjson/document.h"
 #include "common/uint256.h"
+#include <optional>
 
 static inline uint8_t hexParse(char c)
 {
@@ -10,6 +11,25 @@ static inline uint8_t hexParse(char c)
   if (digit >= 16)
     digit -= ('a' - 'A');
   return digit < 16 ? digit : 0xFF;
+}
+
+static inline bool hexParse(uint8_t *out, const rapidjson::GenericValue<rapidjson::UTF8<>> &field, size_t size)
+{
+  auto s = field.GetString();
+  auto l = field.GetStringLength();
+  if (l != size * 2)
+    return false;
+
+  for (size_t i = 0; i < size; i++) {
+    uint8_t lo  = hexParse(s[i*2+1]);
+    uint8_t hi = hexParse(s[i*2]);
+    if (lo == 0xFF || hi == 0xFF)
+      return false;
+
+    out[size - i - 1] = (hi << 4) | lo;
+  }
+
+  return true;
 }
 
 template<unsigned BITS>
@@ -27,34 +47,55 @@ static inline void jsonParseBaseBlob(rapidjson::Value &document,
   }
 
   const auto &field = document[name];
-  if (!field.IsString()) {
+  if (!field.IsString() || !hexParse(out.begin(), field, BITS/8)) {
     *validAcc = false;
     if (errorPoint.empty())
       errorPoint = name;
     return;
   }
+}
 
-  auto s = document[name].GetString();
-  auto l = document[name].GetStringLength();
-  if (l != BITS/8 * 2) {
+template<unsigned BITS>
+static inline void jsonParseBaseBlob(rapidjson::Value &document,
+                                     const char *name,
+                                     base_blob<BITS> &out,
+                                     const base_blob<BITS> &defaultValue,
+                                     bool *validAcc,
+                                     std::string &errorPoint)
+{
+  if (!document.HasMember(name)) {
+    out = defaultValue;
+    return;
+  }
+
+  const auto &field = document[name];
+  if (!field.IsString() || !hexParse(out.begin(), field, BITS/8)) {
     *validAcc = false;
     if (errorPoint.empty())
       errorPoint = name;
     return;
   }
+}
 
-  uint8_t *pOut = static_cast<uint8_t*>(out.begin());
-  for (size_t i = 0; i < BITS/8; i++) {
-    uint8_t lo  = hexParse(s[i*2+1]);
-    uint8_t hi = hexParse(s[i*2]);
-    if (lo == 0xFF || hi == 0xFF) {
-      *validAcc = false;
-      if (errorPoint.empty())
-        errorPoint = name;
-      return;
-    }
+template<unsigned BITS>
+static inline void jsonParseBaseBlob(rapidjson::Value &document,
+                                     const char *name,
+                                     std::optional<base_blob<BITS>> &out,
+                                     bool *validAcc,
+                                     std::string &errorPoint)
+{
+  if (!document.HasMember(name)) {
+    out.reset();
+    return;
+  }
 
-    pOut[BITS/8 - i - 1] = (hi << 4) | lo;
+  out.emplace();
+  const auto &field = document[name];
+  if (!field.IsString() || !hexParse(out.value().begin(), field, BITS/8)) {
+    *validAcc = false;
+    if (errorPoint.empty())
+      errorPoint = name;
+    return;
   }
 }
 
@@ -80,17 +121,40 @@ static inline void jsonParseUInt64(rapidjson::Value &document,
                                    bool *validAcc,
                                    std::string &errorPoint)
 {
-  if (document.HasMember(name)) {
-    if (document[name].IsUint64()) {
-      *out = document[name].GetUint64();
-    } else {
-      *validAcc = false;
-      if (errorPoint.empty())
-        errorPoint = name;
-    }
-  } else {
+  if (!document.HasMember(name)) {
     *out = defaultValue;
+    return;
   }
+
+  const auto &field = document[name];
+  if (!field.IsUint64()) {
+    *validAcc = false;
+    if (errorPoint.empty())
+      errorPoint = name;
+  }
+
+  *out = field.GetUint64();
+}
+
+static inline void jsonParseUInt64(rapidjson::Value &document,
+                                   const char *name,
+                                   std::optional<uint64_t> &out,
+                                   bool *validAcc,
+                                   std::string &errorPoint)
+{
+  if (!document.HasMember(name)) {
+    out.reset();
+    return;
+  }
+
+  const auto &field = document[name];
+  if (!field.IsUint64()) {
+    *validAcc = false;
+    if (errorPoint.empty())
+      errorPoint = name;
+  }
+
+  out.emplace(field.GetUint64());
 }
 
 static inline void jsonParseString(rapidjson::Value &document,

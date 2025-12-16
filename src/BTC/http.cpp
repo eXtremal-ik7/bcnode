@@ -326,9 +326,78 @@ void BC::Network::HttpApiConnection::onBlocksRaw(rapidjson::Document&)
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document&)
+void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document &request)
 {
-  replyNotImplemented();
+  bool isValid = true;
+  std::string errorField;
+  std::optional<BC::Proto::BlockHashTy> hash;
+  std::optional<uint64_t> height;
+  struct {
+    uint64_t offset;
+    uint64_t limit;
+  } pagination;
+
+  jsonParseBaseBlob(request, "block_hash", hash, &isValid, errorField);
+  jsonParseUInt64(request, "block_height", height, &isValid, errorField);
+  jsonParseUInt64(request, "offset", &pagination.offset, 0, &isValid, errorField);
+  jsonParseUInt64(request, "limit", &pagination.limit, 50, &isValid, errorField);
+  if (!isValid) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  BC::Common::BlockIndex *index = nullptr;
+  if (height.has_value()) {
+    index = BlockIndex_.indexByHeight(height.value());
+  } else if (hash.has_value()) {
+    index = BlockIndex_.indexByHash(hash.value());
+  } else {
+    replyWithError("REQUEST_FORMAT_ERROR", "", "", "both block_hash and block_height missing");
+  }
+
+  auto object = objectByIndex(index, *BlockDb_);
+  if (!object.get()) {
+    replyWithError("DATABASE_CORRUPTED", "", "" ,"");
+    return;
+  }
+
+  const BC::Common::BlockIndex *best = BlockIndex_.best();
+  const BC::Proto::Block &block = *object.get()->block();
+  const BC::Proto::CBlockLinkedOutputs &blockOutputs = object.get()->linkedOutputs();
+
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+
+  {
+    JSON::Object reply(stream);
+    reply.addField("items");
+
+    {
+      JSON::Array itemsArray(stream);
+
+      for (size_t i = pagination.offset; i < pagination.limit; i++) {
+        if (i >= block.vtx.size())
+          break;
+
+        const BC::Proto::Transaction &tx = block.vtx[i];
+        const BC::Proto::CTxLinkedOutputs &txOutputs = blockOutputs.Tx[i];
+        itemsArray.addField();
+        serializeTx(stream, tx, txOutputs, index, i == 0, best->Height - index->Height);
+      }
+    }
+
+    reply.addField("pagination");
+    {
+      JSON::Object paginationObject(stream);
+      paginationObject.addInt("total", block.vtx.size());
+      paginationObject.addInt("limit", pagination.limit);
+      paginationObject.addInt("offset", pagination.offset);
+    }
+  }
+
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::onMempoolSummary(rapidjson::Document&)
@@ -532,39 +601,145 @@ void BC::Network::HttpApiConnection::serializeBlock(xmstream &stream,
 {
   uint32_t bits = xhtobe(index->Header.nBits);
 
-  JSON::Object reply(stream);
-  reply.addInt("height", index->Height);
-  reply.addString("hash", hash.GetHex());
+  JSON::Object blockObject(stream);
+  blockObject.addInt("height", index->Height);
+  blockObject.addString("hash", hash.GetHex());
   if (index->Prev)
-    reply.addString("previous_hash", index->Prev->Header.GetHash().GetHex());
+    blockObject.addString("previous_hash", index->Prev->Header.GetHash().GetHex());
   else
-    reply.addNull("previous_hash");
+    blockObject.addNull("previous_hash");
 
   if (index->Next)
-    reply.addString("next_hash", index->Next->Header.GetHash().GetHex());
+    blockObject.addString("next_hash", index->Next->Header.GetHash().GetHex());
   else
-    reply.addNull("next_hash");
+    blockObject.addNull("next_hash");
 
-  reply.addInt("timestamp", index->Header.nTime);
-  reply.addString("merkle_root", index->Header.hashMerkleRoot.GetHex());
-  reply.addInt("version", index->Header.nVersion);
-  reply.addString("bits", bin2hexLowerCase(&bits, sizeof(bits)));
-  reply.addInt("nonce", index->Header.nNonce);
-  reply.addInt("size_bytes", index->SerializedBlockSize);
-  reply.addNull("weight");
-  reply.addInt("tx_count", object->block()->vtx.size());
-  reply.addNull("difficulty");
+  blockObject.addInt("timestamp", index->Header.nTime);
+  blockObject.addString("merkle_root", index->Header.hashMerkleRoot.GetHex());
+  blockObject.addInt("version", index->Header.nVersion);
+  blockObject.addString("bits", bin2hexLowerCase(&bits, sizeof(bits)));
+  blockObject.addInt("nonce", index->Header.nNonce);
+  blockObject.addInt("size_bytes", index->SerializedBlockSize);
+  blockObject.addNull("weight");
+  blockObject.addInt("tx_count", object->block()->vtx.size());
+  blockObject.addNull("difficulty");
   // TODO: best block has 0 or 1 confirmations ?
-  reply.addInt("confirmations", BlockIndex_.best()->Height - index->Height);
+  blockObject.addInt("confirmations", BlockIndex_.best()->Height - index->Height);
 
   int64_t reward = 0;
   BC::Proto::Transaction &coinbase = object->block()->vtx[0];
   for (const auto &txOut : coinbase.txOut)
     reward += txOut.value;
 
-  reply.addString("reward", FormatMoney(reward, BC::Configuration::RationalPartSize));
-  reply.addNull("fees_total");
-  reply.addBoolean("is_orphan", index->OnChain);
+  blockObject.addString("reward", FormatMoney(reward, BC::Configuration::RationalPartSize));
+  blockObject.addNull("fees_total");
+  blockObject.addBoolean("is_orphan", index->OnChain);
+}
+
+void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
+                                                 const BC::Proto::Transaction &tx,
+                                                 const BC::Proto::CTxLinkedOutputs &txOutputs,
+                                                 const BC::Common::BlockIndex *index,
+                                                 bool isCoinbase,
+                                                 uint64_t confirmations)
+{
+  JSON::Object txObject(stream);
+
+  int64_t valueIn = 0;
+  int64_t valueOut = 0;
+  int64_t fee = 0;
+  for (const auto &linkedTxin: txOutputs.TxIn) {
+    BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
+    valueIn += outputInfo->Value;
+  }
+  for (const auto &txOut: tx.txOut) {
+    valueOut += txOut.value;
+  }
+  if (!isCoinbase)
+    fee = valueIn - valueOut;
+
+  txObject.addString("txid", tx.getTxId().GetHex());
+  txObject.addString("hash", tx.getWTxid().GetHex());
+  txObject.addString("block_hash", index->Header.GetHash().GetHex());
+  txObject.addInt("block_height", index->Height);
+  txObject.addInt("timestamp", index->Header.nTime);
+  txObject.addInt("size_bytes", tx.SerializedDataSize);
+  txObject.addInt("version", tx.version);
+  txObject.addInt("locktime", tx.lockTime);
+  txObject.addInt("confirmations", confirmations);
+  txObject.addString("value_in", FormatMoney(valueIn, BC::Configuration::RationalPartSize));
+  txObject.addString("value_out", FormatMoney(valueOut, BC::Configuration::RationalPartSize));
+  txObject.addString("fee", FormatMoney(fee, BC::Configuration::RationalPartSize));
+
+  txObject.addField("inputs");
+  {
+    JSON::Array inputsArray(stream);
+    for (size_t i = 0; i < tx.txIn.size(); i++) {
+      const BC::Proto::TxIn &txin = tx.txIn[i];
+      const auto &linkedTxin = txOutputs.TxIn[i];
+      std::string address58;
+      BC::Proto::AddressTy address;
+      int64_t value;
+
+      if (!isCoinbase) {
+        BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
+        if (BC::Script::extractSingleAddress(*outputInfo, address))
+          address58 = BC::Script::addressToBase58(static_cast<BC::Script::UnspentOutputInfo::EType>(outputInfo->Type),
+                                                  address,
+                                                  ChainParams_.PublicKeyPrefix,
+                                                  ChainParams_.ScriptPrefix);
+        value = outputInfo->Value;
+      }
+
+      inputsArray.addField();
+      {
+        JSON::Object inputObject(stream);
+        inputObject.addString("txid", txin.previousOutputHash.GetHex());
+        inputObject.addInt("vout_index", txin.previousOutputIndex);
+        if (!address58.empty())
+          inputObject.addString("address", address58);
+        else
+          inputObject.addNull("address");
+
+        if (!isCoinbase) {
+          inputObject.addString("value", FormatMoney(value, BC::Configuration::RationalPartSize));
+        } else {
+          inputObject.addNull("value");
+        }
+
+        // TODO: check it, excess field
+        inputObject.addBoolean("coinbase", txin.previousOutputIndex == 0);
+      }
+    }
+  }
+  txObject.addField("outputs");
+  {
+    JSON::Array outputsArray(stream);
+    for (size_t i = 0; i < tx.txOut.size(); i++) {
+      std::string address58;
+      BC::Proto::AddressTy address;
+      const BC::Proto::TxOut &txOut = tx.txOut[i];
+
+      auto type = BC::Script::extractSingleAddress(txOut, address);
+      address58 = BC::Script::addressToBase58(type, address, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix);
+
+      outputsArray.addField();
+      {
+        JSON::Object outputObject(stream);
+        outputObject.addInt("index", i);
+        if (!address58.empty())
+          outputObject.addString("address", address58);
+        else
+          outputObject.addNull("address");
+        outputObject.addString("value", FormatMoney(txOut.value, BC::Configuration::RationalPartSize));
+        outputObject.addString("script_pub_key", bin2hexLowerCase(txOut.pkScript.begin(), txOut.pkScript.size()));
+
+        // NOTE: not implemented!
+        outputObject.addNull("spent");
+        outputObject.addNull("spent_in_txid");
+      }
+    }
+  }
 }
 
 size_t BC::Network::HttpApiConnection::startChunk(xmstream &stream)
