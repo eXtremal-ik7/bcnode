@@ -623,7 +623,6 @@ bool loadBlocks(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainPa
 
     intrusive_ptr<BC::Common::CIndexCacheObject> object(new BC::Common::CIndexCacheObject(&storage.cache(), nullptr, stream.sizeOf(), 0, block, unpackedSize));
 
-    // auto object = storage.cache().add(nullptr, stream.sizeOf(), 0, block, unpackedSize);
     if (!AddBlock(blockIndex, chainParams, storage, object.get(), ccCtx, nullptr, fileNo, position[i].offset)) {
       LOG_F(ERROR, "Can't parse block file %s (invalid block structure)", path);
       return false;

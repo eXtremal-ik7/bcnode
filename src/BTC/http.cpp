@@ -177,7 +177,12 @@ void BC::Network::HttpApiConnection::onBlocksByHash(rapidjson::Document &request
   }
 
   // Serialize block
-  replyBlock(index, object.get(), hash);
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+  serializeBlock(stream, index, object.get(), hash);
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::onBlocksByHeight(rapidjson::Document &request)
@@ -205,7 +210,12 @@ void BC::Network::HttpApiConnection::onBlocksByHeight(rapidjson::Document &reque
   }
 
   // Serialize block
-  replyBlock(index, object.get(), index->Header.GetHash());
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+  serializeBlock(stream, index, object.get(), index->Header.GetHash());
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::onBlocksLatest(rapidjson::Document&)
@@ -223,12 +233,92 @@ void BC::Network::HttpApiConnection::onBlocksLatest(rapidjson::Document&)
   }
 
   // Serialize block
-  replyBlock(index, object.get(), index->Header.GetHash());
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+  serializeBlock(stream, index, object.get(), index->Header.GetHash());
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
-void BC::Network::HttpApiConnection::onBlocksList(rapidjson::Document&)
+void BC::Network::HttpApiConnection::onBlocksList(rapidjson::Document &request)
 {
-  replyNotImplemented();
+  bool isValid = true;
+  std::string errorField;
+  struct {
+    uint64_t offset;
+    uint64_t limit;
+    std::string sort;
+  } pagination;
+
+  jsonParseUInt64(request, "offset", &pagination.offset, 0, &isValid, errorField);
+  jsonParseUInt64(request, "limit", &pagination.limit, 20, &isValid, errorField);
+  jsonParseString(request, "sort", pagination.sort, "desc", &isValid, errorField);
+  if (!isValid) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  if (pagination.sort != "asc" && pagination.sort != "desc") {
+    replyWithError("REQUEST_FORMAT_ERROR", "", "sort", "must be asc or desc");
+    return;
+  }
+
+  bool isAscending = pagination.sort == "asc";
+
+  BC::Common::BlockIndex *best = BlockIndex_.best();
+  BC::Common::BlockIndex *current;
+  if (isAscending) {
+    current = BlockIndex_.indexByHeight(pagination.offset);
+  } else {
+    if (pagination.offset == 0)
+      current = best;
+    else
+      current = BlockIndex_.indexByHeight(best->Height - pagination.offset);
+  }
+
+  if (!current) {
+    replyWithError("BLOCK_NOT_FOUND", "", "" ,"");
+    return;
+  }
+
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+
+  {
+    JSON::Object reply(stream);
+    reply.addField("items");
+
+    {
+      JSON::Array itemsArray(stream);
+      uint64_t i = 0;
+      while (current && i < pagination.limit) {
+        auto object = objectByIndex(current, *BlockDb_);
+        if (!object.get()) {
+          replyWithError("DATABASE_CORRUPTED", "", "" ,"");
+          return;
+        }
+
+        itemsArray.addField();
+        serializeBlock(stream, current, object.get(), current->Header.GetHash());
+
+        i++;
+        current = isAscending ? current->Next : current->Prev;
+      }
+    }
+
+    reply.addField("pagination");
+    {
+      JSON::Object paginationObject(stream);
+      paginationObject.addInt("total", best->Height + 1);
+      paginationObject.addInt("limit", pagination.limit);
+      paginationObject.addInt("offset", pagination.offset);
+    }
+  }
+
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::onBlocksRaw(rapidjson::Document&)
@@ -435,54 +525,46 @@ void BC::Network::HttpApiConnection::replyWithError(const std::string &code,
   aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
-void BC::Network::HttpApiConnection::replyBlock(const BC::Common::BlockIndex *index,
-                                                const BC::Common::CIndexCacheObject *object,
-                                                const BC::Proto::BlockHashTy &hash)
+void BC::Network::HttpApiConnection::serializeBlock(xmstream &stream,
+                                                    const BC::Common::BlockIndex *index,
+                                                    const BC::Common::CIndexCacheObject *object,
+                                                    const BC::Proto::BlockHashTy &hash)
 {
-  xmstream stream;
-  reply200(stream);
-  size_t offset = startChunk(stream);
+  uint32_t bits = xhtobe(index->Header.nBits);
 
-  {
-    uint32_t bits = xhtobe(index->Header.nBits);
+  JSON::Object reply(stream);
+  reply.addInt("height", index->Height);
+  reply.addString("hash", hash.GetHex());
+  if (index->Prev)
+    reply.addString("previous_hash", index->Prev->Header.GetHash().GetHex());
+  else
+    reply.addNull("previous_hash");
 
-    JSON::Object reply(stream);
-    reply.addInt("height", index->Height);
-    reply.addString("hash", hash.GetHex());
-    if (index->Prev)
-      reply.addString("previous_hash", index->Prev->Header.GetHash().GetHex());
-    else
-      reply.addNull("previous_hash");
+  if (index->Next)
+    reply.addString("next_hash", index->Next->Header.GetHash().GetHex());
+  else
+    reply.addNull("next_hash");
 
-    if (index->Next)
-      reply.addString("next_hash", index->Next->Header.GetHash().GetHex());
-    else
-      reply.addNull("next_hash");
+  reply.addInt("timestamp", index->Header.nTime);
+  reply.addString("merkle_root", index->Header.hashMerkleRoot.GetHex());
+  reply.addInt("version", index->Header.nVersion);
+  reply.addString("bits", bin2hexLowerCase(&bits, sizeof(bits)));
+  reply.addInt("nonce", index->Header.nNonce);
+  reply.addInt("size_bytes", index->SerializedBlockSize);
+  reply.addNull("weight");
+  reply.addInt("tx_count", object->block()->vtx.size());
+  reply.addNull("difficulty");
+  // TODO: best block has 0 or 1 confirmations ?
+  reply.addInt("confirmations", BlockIndex_.best()->Height - index->Height);
 
-    reply.addInt("timestamp", index->Header.nTime);
-    reply.addString("merkle_root", index->Header.hashMerkleRoot.GetHex());
-    reply.addInt("version", index->Header.nVersion);
-    reply.addString("bits", bin2hexLowerCase(&bits, sizeof(bits)));
-    reply.addInt("nonce", index->Header.nNonce);
-    reply.addInt("size_bytes", index->SerializedBlockSize);
-    reply.addNull("weight");
-    reply.addInt("tx_count", object->block()->vtx.size());
-    reply.addNull("difficulty");
-    // TODO: best block has 0 or 1 confirmations ?
-    reply.addInt("confirmations", BlockIndex_.best()->Height - index->Height);
+  int64_t reward = 0;
+  BC::Proto::Transaction &coinbase = object->block()->vtx[0];
+  for (const auto &txOut : coinbase.txOut)
+    reward += txOut.value;
 
-    int64_t reward = 0;
-    BC::Proto::Transaction &coinbase = object->block()->vtx[0];
-    for (const auto &txOut : coinbase.txOut)
-      reward += txOut.value;
-
-    reply.addString("reward", FormatMoney(reward, BC::Configuration::RationalPartSize));
-    reply.addNull("fees_total");
-    reply.addBoolean("is_orphan", index->OnChain);
-  }
-
-  finishChunk(stream, offset);
-  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
+  reply.addString("reward", FormatMoney(reward, BC::Configuration::RationalPartSize));
+  reply.addNull("fees_total");
+  reply.addBoolean("is_orphan", index->OnChain);
 }
 
 size_t BC::Network::HttpApiConnection::startChunk(xmstream &stream)

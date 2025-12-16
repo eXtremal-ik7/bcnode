@@ -124,7 +124,7 @@ public:
                       const std::string &field,
                       const std::string &reason);
 
-  void replyBlock(const BC::Common::BlockIndex *index, const BC::Common::CIndexCacheObject *object, const BC::Proto::BlockHashTy &hash);
+  void serializeBlock(xmstream &stream, const BC::Common::BlockIndex *index, const BC::Common::CIndexCacheObject *object, const BC::Proto::BlockHashTy &hash);
 
   void reply200(xmstream &stream);
   size_t startChunk(xmstream &stream);

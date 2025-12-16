@@ -211,7 +211,21 @@ int main(int argc, char **argv)
       genesisIndex->FileNo = 0;
       genesisIndex->FileOffset = 0;
       genesisIndex->SerializedBlockSize = static_cast<uint32_t>(stream.sizeOf());
+
+      size_t unpackedSize = 0;
+      stream.seekSet(0);
+      BC::Proto::Block *unpacked = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
+      BC::Common::CIndexCacheObject *genesisObject = new BC::Common::CIndexCacheObject(nullptr, nullptr, stream.sizeOf(), 0, unpacked, unpackedSize);
+
+      auto &outputs = genesisObject->linkedOutputs();
+      outputs.AllOutputsFound = true;
+      outputs.Tx.resize(context.ChainParams.GenesisBlock.vtx.size());
+      for (size_t i = 0; i < context.ChainParams.GenesisBlock.vtx.size(); i++)
+        outputs.Tx[i].TxIn.resize(context.ChainParams.GenesisBlock.vtx[i].txIn.size());
+
+      genesisIndex->Serialized.reset(genesisObject);
     }
+
     BC::Proto::BlockHashTy hash = context.ChainParams.GenesisBlock.header.GetHash();
     context.BlockIndex.blockIndex().insert(std::pair(hash, genesisIndex));
     context.BlockIndex.blockHeightIndex().insert(std::pair(0, genesisIndex));

@@ -58,7 +58,11 @@ static inline void jsonParseBaseBlob(rapidjson::Value &document,
   }
 }
 
-static inline void jsonParseUInt64(rapidjson::Value &document, const char *name, uint64_t *out, bool *validAcc, std::string &errorPoint)
+static inline void jsonParseUInt64(rapidjson::Value &document,
+                                   const char *name,
+                                   uint64_t *out,
+                                   bool *validAcc,
+                                   std::string &errorPoint)
 {
   if (document.HasMember(name) && document[name].IsUint64()) {
     *out = document[name].GetUint64();
@@ -66,6 +70,26 @@ static inline void jsonParseUInt64(rapidjson::Value &document, const char *name,
     *validAcc = false;
     if (errorPoint.empty())
       errorPoint = name;
+  }
+}
+
+static inline void jsonParseUInt64(rapidjson::Value &document,
+                                   const char *name,
+                                   uint64_t *out,
+                                   uint64_t defaultValue,
+                                   bool *validAcc,
+                                   std::string &errorPoint)
+{
+  if (document.HasMember(name)) {
+    if (document[name].IsUint64()) {
+      *out = document[name].GetUint64();
+    } else {
+      *validAcc = false;
+      if (errorPoint.empty())
+        errorPoint = name;
+    }
+  } else {
+    *out = defaultValue;
   }
 }
 
@@ -84,13 +108,21 @@ static inline void jsonParseString(rapidjson::Value &document,
   }
 }
 
-static inline void jsonParseString(rapidjson::Value &document, const char *name, std::string &out, const std::string &defaultValue, bool *validAcc)
+static inline void jsonParseString(rapidjson::Value &document,
+                                   const char *name,
+                                   std::string &out,
+                                   const std::string &defaultValue,
+                                   bool *validAcc,
+                                   std::string &errorPoint)
 {
   if (document.HasMember(name)) {
-    if (document[name].IsString())
+    if (document[name].IsString()) {
       out = document[name].GetString();
-    else
+    } else {
       *validAcc = false;
+      if (errorPoint.empty())
+        errorPoint = name;
+    }
   } else {
     out = defaultValue;
   }
