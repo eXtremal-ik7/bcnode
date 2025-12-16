@@ -7,9 +7,10 @@
 #include "blockIndex.h"
 #include "common/blockDataBase.h"
 #include "common/jsonSerializer.h"
+#include "common/rapidJsonHelper.h"
+#include "common/utils.h"
 #include "db/archive.h"
 #include "BC/network.h"
-#include "rapidjson/document.h"
 #include <asyncio/socket.h>
 #include <stdio.h>
 #include "../loguru.hpp"
@@ -38,7 +39,8 @@ std::unordered_map<std::string, HttpApiConnection::FunctionTy> HttpApiConnection
   {"api/v1/stats/rich_list", fnStatsRichList},
   {"api/v1/system/health", fnSystemHealth},
   {"api/v1/system/summary", fnSystemSummary},
-  {"api/v1/txs/by_block", fnTxsByBlock},
+  {"api/v1/txs/by_block_hash", fnTxsByBlockHash},
+  {"api/v1/txs/by_block_height", fnTxsByBlockHeight},
   {"api/v1/txs/by_txid", fnTxsByTxid},
   {"api/v1/txs/latest", fnTxsLatest},
   {"api/v1/txs/raw", fnTxsRaw}
@@ -98,30 +100,31 @@ int BC::Network::HttpApiConnection::onParse(HttpRequestComponent *component)
       rapidjson::Document document;
       document.Parse(!Context.Request.empty() ? Context.Request.c_str() : "{}");
       if (document.HasParseError() || !document.IsObject()) {
-        replyWithStatus("invalid_json");
+        replyWithError("INVALID_JSON", "", "", "");
         return 1;
       }
 
       switch (Context.Function) {
-        case fnAddressesInfo: onAddressesInfo(); break;
-        case fnAddressesTxs : onAddressesTxs(); break;
-        case fnAddressesUtxo : onAddressesUtxo(); break;
-        case fnBlocksByHash : onBlocksByHash(); break;
-        case fnBlocksByHeight : onBlocksByHeight(); break;
-        case fnBlocksLatest : onBlocksLatest(); break;
-        case fnBlocksList : onBlocksList(); break;
-        case fnBlocksRaw : onBlocksRaw(); break;
-        case fnBlocksTxs : onBlocksTxs(); break;
-        case fnMempoolSummary : onMempoolSummary(); break;
-        case fnMempoolTxs : onMempoolTxs(); break;
-        case fnSearch : onSearch(); break;
-        case fnStatsRichList : onStatsRichList(); break;
-        case fnSystemHealth : onSystemHealth(); break;
-        case fnSystemSummary : onSystemSummary(); break;
-        case fnTxsByBlock : onTxsByBlock(); break;
-        case fnTxsByTxid : onTxsByTxid(); break;
-        case fnTxsLatest : onTxsLatest(); break;
-        case fnTxsRaw : onTxsRaw(); break;
+        case fnAddressesInfo: onAddressesInfo(document); break;
+        case fnAddressesTxs : onAddressesTxs(document); break;
+        case fnAddressesUtxo : onAddressesUtxo(document); break;
+        case fnBlocksByHash : onBlocksByHash(document); break;
+        case fnBlocksByHeight : onBlocksByHeight(document); break;
+        case fnBlocksLatest : onBlocksLatest(document); break;
+        case fnBlocksList : onBlocksList(document); break;
+        case fnBlocksRaw : onBlocksRaw(document); break;
+        case fnBlocksTxs : onBlocksTxs(document); break;
+        case fnMempoolSummary : onMempoolSummary(document); break;
+        case fnMempoolTxs : onMempoolTxs(document); break;
+        case fnSearch : onSearch(document); break;
+        case fnStatsRichList : onStatsRichList(document); break;
+        case fnSystemHealth : onSystemHealth(document); break;
+        case fnSystemSummary : onSystemSummary(document); break;
+        case fnTxsByBlockHash : onTxsByBlockHash(document); break;
+        case fnTxsByBlockHeight : onTxsByBlockHeight(document); break;
+        case fnTxsByTxid : onTxsByTxid(document); break;
+        case fnTxsLatest : onTxsLatest(document); break;
+        case fnTxsRaw : onTxsRaw(document); break;
         default: reply404(); return 1;
       }
 
@@ -134,72 +137,131 @@ int BC::Network::HttpApiConnection::onParse(HttpRequestComponent *component)
   return 1;
 }
 
-void BC::Network::HttpApiConnection::onAddressesInfo()
+void BC::Network::HttpApiConnection::onAddressesInfo(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onAddressesTxs()
+void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onAddressesUtxo()
+void BC::Network::HttpApiConnection::onAddressesUtxo(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onBlocksByHash()
+void BC::Network::HttpApiConnection::onBlocksByHash(rapidjson::Document &request)
+{
+  bool isValid = true;
+  std::string errorField;
+  BC::Proto::BlockHashTy hash;
+  jsonParseBaseBlob(request, "block_hash", hash, &isValid, errorField);
+  if (!isValid) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  // Search block in index
+  BC::Common::BlockIndex *index = BlockIndex_.indexByHash(hash);
+  if (!index) {
+    replyWithError("BLOCK_NOT_FOUND", "", "" ,"");
+    return;
+  }
+
+  auto object = objectByIndex(index, *BlockDb_);
+  if (!object.get()) {
+    replyWithError("DATABASE_CORRUPTED", "", "" ,"");
+    return;
+  }
+
+  // Serialize block
+  replyBlock(index, object.get(), hash);
+}
+
+void BC::Network::HttpApiConnection::onBlocksByHeight(rapidjson::Document &request)
+{
+  bool isValid = true;
+  std::string errorField;
+  uint64_t height;
+  jsonParseUInt64(request, "block_height", &height, &isValid, errorField);
+  if (!isValid) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  // Search block in index
+  BC::Common::BlockIndex *index = BlockIndex_.indexByHeight(height);
+  if (!index) {
+    replyWithError("BLOCK_NOT_FOUND", "", "" ,"");
+    return;
+  }
+
+  auto object = objectByIndex(index, *BlockDb_);
+  if (!object.get()) {
+    replyWithError("DATABASE_CORRUPTED", "", "" ,"");
+    return;
+  }
+
+  // Serialize block
+  replyBlock(index, object.get(), index->Header.GetHash());
+}
+
+void BC::Network::HttpApiConnection::onBlocksLatest(rapidjson::Document&)
+{
+  BC::Common::BlockIndex *index = BlockIndex_.best();
+  if (!index) {
+    replyWithError("BLOCK_NOT_FOUND", "", "" ,"");
+    return;
+  }
+
+  auto object = objectByIndex(index, *BlockDb_);
+  if (!object.get()) {
+    replyWithError("DATABASE_CORRUPTED", "", "" ,"");
+    return;
+  }
+
+  // Serialize block
+  replyBlock(index, object.get(), index->Header.GetHash());
+}
+
+void BC::Network::HttpApiConnection::onBlocksList(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onBlocksByHeight()
+void BC::Network::HttpApiConnection::onBlocksRaw(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onBlocksLatest()
+void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onBlocksList()
+void BC::Network::HttpApiConnection::onMempoolSummary(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onBlocksRaw()
+void BC::Network::HttpApiConnection::onMempoolTxs(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onBlocksTxs()
+void BC::Network::HttpApiConnection::onSearch(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onMempoolSummary()
+void BC::Network::HttpApiConnection::onStatsRichList(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onMempoolTxs()
-{
-  replyNotImplemented();
-}
-
-void BC::Network::HttpApiConnection::onSearch()
-{
-  replyNotImplemented();
-}
-
-void BC::Network::HttpApiConnection::onStatsRichList()
-{
-  replyNotImplemented();
-}
-
-void BC::Network::HttpApiConnection::onSystemHealth()
+void BC::Network::HttpApiConnection::onSystemHealth(rapidjson::Document&)
 {
   xmstream stream;
   reply200(stream);
@@ -224,7 +286,7 @@ void BC::Network::HttpApiConnection::onSystemHealth()
   aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
-void BC::Network::HttpApiConnection::onSystemSummary()
+void BC::Network::HttpApiConnection::onSystemSummary(rapidjson::Document&)
 {
   xmstream stream;
   reply200(stream);
@@ -253,22 +315,27 @@ void BC::Network::HttpApiConnection::onSystemSummary()
   aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
-void BC::Network::HttpApiConnection::onTxsByBlock()
+void BC::Network::HttpApiConnection::onTxsByBlockHash(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onTxsByTxid()
+void BC::Network::HttpApiConnection::onTxsByBlockHeight(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onTxsLatest()
+void BC::Network::HttpApiConnection::onTxsByTxid(rapidjson::Document&)
 {
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onTxsRaw()
+void BC::Network::HttpApiConnection::onTxsLatest(rapidjson::Document&)
+{
+  replyNotImplemented();
+}
+
+void BC::Network::HttpApiConnection::onTxsRaw(rapidjson::Document&)
 {
   replyNotImplemented();
 }
@@ -339,7 +406,10 @@ void BC::Network::HttpApiConnection::reply404()
   aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
-void BC::Network::HttpApiConnection::replyNotImplemented()
+void BC::Network::HttpApiConnection::replyWithError(const std::string &code,
+                                                    const std::string &message,
+                                                    const std::string &field,
+                                                    const std::string &reason)
 {
   xmstream stream;
   reply200(stream);
@@ -350,10 +420,65 @@ void BC::Network::HttpApiConnection::replyNotImplemented()
     object.addField("error");
     {
       JSON::Object errorObject(stream);
-      errorObject.addString("code", "NOT_IMPLEMENTED");
-      errorObject.addNull("message");
-      errorObject.addNull("details");
+      errorObject.addString("code", code);
+      errorObject.addString("message", message);
+      errorObject.addField("details");
+      {
+        JSON::Object detailsObject(stream);
+        detailsObject.addString("field", field);
+        detailsObject.addString("reason", reason);
+      }
     }
+  }
+
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
+}
+
+void BC::Network::HttpApiConnection::replyBlock(const BC::Common::BlockIndex *index,
+                                                const BC::Common::CIndexCacheObject *object,
+                                                const BC::Proto::BlockHashTy &hash)
+{
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+
+  {
+    uint32_t bits = xhtobe(index->Header.nBits);
+
+    JSON::Object reply(stream);
+    reply.addInt("height", index->Height);
+    reply.addString("hash", hash.GetHex());
+    if (index->Prev)
+      reply.addString("previous_hash", index->Prev->Header.GetHash().GetHex());
+    else
+      reply.addNull("previous_hash");
+
+    if (index->Next)
+      reply.addString("next_hash", index->Next->Header.GetHash().GetHex());
+    else
+      reply.addNull("next_hash");
+
+    reply.addInt("timestamp", index->Header.nTime);
+    reply.addString("merkle_root", index->Header.hashMerkleRoot.GetHex());
+    reply.addInt("version", index->Header.nVersion);
+    reply.addString("bits", bin2hexLowerCase(&bits, sizeof(bits)));
+    reply.addInt("nonce", index->Header.nNonce);
+    reply.addInt("size_bytes", index->SerializedBlockSize);
+    reply.addNull("weight");
+    reply.addInt("tx_count", object->block()->vtx.size());
+    reply.addNull("difficulty");
+    // TODO: best block has 0 or 1 confirmations ?
+    reply.addInt("confirmations", BlockIndex_.best()->Height - index->Height);
+
+    int64_t reward = 0;
+    BC::Proto::Transaction &coinbase = object->block()->vtx[0];
+    for (const auto &txOut : coinbase.txOut)
+      reward += txOut.value;
+
+    reply.addString("reward", FormatMoney(reward, BC::Configuration::RationalPartSize));
+    reply.addNull("fees_total");
+    reply.addBoolean("is_orphan", index->OnChain);
   }
 
   finishChunk(stream, offset);
@@ -374,21 +499,6 @@ void BC::Network::HttpApiConnection::finishChunk(xmstream &stream, size_t offset
   sprintf(hex, "%08x", static_cast<unsigned>(stream.offsetOf() - offset - 10));
   memcpy(stream.data<uint8_t>() + offset, hex, 8);
   stream.write(finishData, sizeof(finishData));
-}
-
-void BC::Network::HttpApiConnection::replyWithStatus(const char *status)
-{
-  xmstream stream;
-  reply200(stream);
-  size_t offset = startChunk(stream);
-
-  {
-    JSON::Object object(stream);
-    object.addString("status", status);
-  }
-
-  finishChunk(stream, offset);
-  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 // HttpApiNode

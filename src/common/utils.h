@@ -8,6 +8,14 @@
 #include "common/uint256.h"
 #include "loguru.hpp"
 
+std::string real_strprintf(const std::string &format, int dummy, ...);
+#define strprintf(format, ...) real_strprintf(format, 0, __VA_ARGS__)
+
+std::string vstrprintf(const char *format, va_list ap);
+std::string real_strprintf(const std::string &format, int dummy, ...);
+std::string FormatMoney(int64_t n, int64_t rationalPartSize, bool fPlus=false);
+bool parseMoneyValue(const char *value, const int64_t rationalPartSize, int64_t *out);
+
 template<typename X>
 static inline void genesis_block_hash_assert_eq(const typename X::Proto::BlockHeader &header, const char *targetHash)
 {

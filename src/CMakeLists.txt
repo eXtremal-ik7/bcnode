@@ -95,6 +95,7 @@ add_library(bcnodecommon STATIC
   common/file.cpp
   common/serializedDataCache.cpp
   common/uint256.cpp
+  common/utils.cpp
 )
 
 target_link_libraries(bcnodecommon

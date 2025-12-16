@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include "BC/bc.h"
+#include "rapidjson/document.h"
 
 class BlockDatabase;
 class BlockInMemoryIndex;
@@ -44,7 +45,8 @@ private:
     fnStatsRichList,
     fnSystemHealth,
     fnSystemSummary,
-    fnTxsByBlock,
+    fnTxsByBlockHash,
+    fnTxsByBlockHeight,
     fnTxsByTxid,
     fnTxsLatest,
     fnTxsRaw
@@ -94,33 +96,41 @@ public:
   void onWrite();
 
   // Functions
-  void onAddressesInfo();
-  void onAddressesTxs();
-  void onAddressesUtxo();
-  void onBlocksByHash();
-  void onBlocksByHeight();
-  void onBlocksLatest();
-  void onBlocksList();
-  void onBlocksRaw();
-  void onBlocksTxs();
-  void onMempoolSummary();
-  void onMempoolTxs();
-  void onSearch();
-  void onStatsRichList();
-  void onSystemHealth();
-  void onSystemSummary();
-  void onTxsByBlock();
-  void onTxsByTxid();
-  void onTxsLatest();
-  void onTxsRaw();
+  void onAddressesInfo(rapidjson::Document &request);
+  void onAddressesTxs(rapidjson::Document &request);
+  void onAddressesUtxo(rapidjson::Document &request);
+  void onBlocksByHash(rapidjson::Document &request);
+  void onBlocksByHeight(rapidjson::Document &request);
+  void onBlocksLatest(rapidjson::Document &request);
+  void onBlocksList(rapidjson::Document &request);
+  void onBlocksRaw(rapidjson::Document &request);
+  void onBlocksTxs(rapidjson::Document &request);
+  void onMempoolSummary(rapidjson::Document &request);
+  void onMempoolTxs(rapidjson::Document &request);
+  void onSearch(rapidjson::Document &request);
+  void onStatsRichList(rapidjson::Document &request);
+  void onSystemHealth(rapidjson::Document &request);
+  void onSystemSummary(rapidjson::Document &request);
+  void onTxsByBlockHash(rapidjson::Document &request);
+  void onTxsByBlockHeight(rapidjson::Document &request);
+  void onTxsByTxid(rapidjson::Document &request);
+  void onTxsLatest(rapidjson::Document &request);
+  void onTxsRaw(rapidjson::Document &request);
 
   // Helpers
   void reply404();
-  void replyNotImplemented();
+  void replyWithError(const std::string &code,
+                      const std::string &message,
+                      const std::string &field,
+                      const std::string &reason);
+
+  void replyBlock(const BC::Common::BlockIndex *index, const BC::Common::CIndexCacheObject *object, const BC::Proto::BlockHashTy &hash);
+
   void reply200(xmstream &stream);
   size_t startChunk(xmstream &stream);
   void finishChunk(xmstream &stream, size_t offset);
-  void replyWithStatus(const char *status);
+
+  void replyNotImplemented() { replyWithError("NOT_IMPLEMENTED", "", "", ""); }
 
   friend class HttpApiNode;
 };

@@ -36,6 +36,8 @@ public:
   static constexpr size_t MaxBlockSize = BTC::Common::MaxBlockSize;
   static constexpr uint32_t BlocksFileLimit = BTC::Common::BlocksFileLimit;
   static constexpr size_t DefaultBlockCacheSize = 256*1048576;
+  static constexpr uint64_t RationalPartSize = 100000000ULL;
+
   static constexpr const char *ProjectName = "Primecoin";
   static constexpr const char *TickerName = "XPM";
   static constexpr const char *DefaultDataDir = "bcnodexpm";

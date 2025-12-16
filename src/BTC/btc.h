@@ -22,6 +22,8 @@ public:
   static constexpr size_t MaxBlockSize = 1000000;
   static constexpr uint32_t BlocksFileLimit = 128*1048576;
   static constexpr size_t DefaultBlockCacheSize = 512*1048576;
+  static constexpr uint64_t RationalPartSize = 100000000ULL;
+
   static constexpr bool HasWitness = true;
   static constexpr uint32_t ProtocolVersion = 70015;
   static constexpr uint64_t ServicesEnabled =

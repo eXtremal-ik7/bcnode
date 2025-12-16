@@ -30,6 +30,7 @@ public:
   static constexpr size_t MaxBlockSize = BTC::Configuration::MaxBlockSize;
   static constexpr uint32_t BlocksFileLimit = BTC::Configuration::BlocksFileLimit;
   static constexpr size_t DefaultBlockCacheSize = 256*1048576;
+  static constexpr uint64_t RationalPartSize = 100000000ULL;
 
   static constexpr const char *ProjectName = "Litecoin";
   static constexpr const char *TickerName = "LTC";

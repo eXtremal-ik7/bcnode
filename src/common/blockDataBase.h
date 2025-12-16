@@ -64,6 +64,16 @@ public:
     GenesisBlock_ = block;
   }
 
+  BC::Common::BlockIndex *indexByHash(const BC::Proto::BlockHashTy &hash) {
+    auto It = BlockIndex_.find(hash);
+    return It != BlockIndex_.end() ? It->second : nullptr;
+  }
+
+  BC::Common::BlockIndex *indexByHeight(uint32_t height) {
+    auto It = BlockHeightIndex_.find(height);
+    return It != BlockHeightIndex_.end() ? It->second : nullptr;
+  }
+
   // Old-style accessors
   auto &blockIndex() { return BlockIndex_; }
   auto &blockHeightIndex() { return BlockHeightIndex_; }
