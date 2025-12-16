@@ -5,9 +5,7 @@
 
 #include "linearDataStorage.h"
 #include "loguru.hpp"
-#include "asyncio/asyncioTypes.h"
 #include <system_error>
-#include <vector>
 
 
 std::filesystem::path LinearDataStorage::getFilePath(uint32_t fileNo)
@@ -186,7 +184,7 @@ bool LinearDataStorage::append2(void *prefix, uint32_t prefixSize, void *data, u
     FileOffset_ = 0;
     if (!file(FileNo_).isOpened())
       return false;
-  } else if (Data_.sizeOf() >= 4*1048576) {
+  } else if (Data_.sizeOf() >= 32*1048576) {
     if (!flush())
       return false;
   }

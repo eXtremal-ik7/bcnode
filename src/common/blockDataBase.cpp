@@ -951,14 +951,16 @@ bool BlockDatabase::init(std::filesystem::path &dataDir, BC::Common::ChainParams
   return true;
 }
 
-bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index)
+bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index, bool *needFlush)
 {
   if (index->indexStored())
     return true;
 
   std::pair<uint32_t, uint32_t> position;
   BC::Common::CIndexCacheObject *serialized = index->Serialized.get();
-  if (!index->blockStored()) {
+  bool blockStored = index->blockStored();
+
+  if (!blockStored) {
     // Skip blocks loaded from disk
     uint32_t prefix[2] = { Magic_, index->SerializedBlockSize };
     if (!BlockStorage_.append2(prefix, sizeof(prefix), serialized->blockData().data(), static_cast<uint32_t>(serialized->blockData().size()), position))
@@ -987,10 +989,8 @@ bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index)
   if (!IndexStorage_.append2(&serializedSize, sizeof(serializedSize), data.data(), static_cast<uint32_t>(data.sizeOf()), position))
     return false;
 
-  if (BlockStorage_.empty()) {
-    IndexStorage_.flush();
-    LinkedOutputsStorage_.flush();
-  }
+  if ((!blockStored && BlockStorage_.bufferEmpty()) || LinkedOutputsStorage_.bufferEmpty() || IndexStorage_.bufferEmpty())
+    *needFlush = true;
 
   return true;
 }

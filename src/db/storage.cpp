@@ -87,6 +87,7 @@ void Storage::onTimer()
 void Storage::onQueuePush()
 {
   Task task;
+  bool needFlush = false;
   while (Queue_.try_pop(task)) {
     intrusive_ptr<BTC::Common::CIndexCacheObject> object = objectByIndex(task.Index, *BlockDb_);
 
@@ -94,7 +95,7 @@ void Storage::onQueuePush()
     switch (task.Type) {
       case Connect :
         Archive_->connect(task.Index, *object.get()->block(), object.get()->linkedOutputs(), *BlockIndex_, *BlockDb_);
-        if (!BlockDb_->writeBlock(task.Index))
+        if (!BlockDb_->writeBlock(task.Index, &needFlush))
           ErrorHandler_();
         CachedBlocks_.push_back(task.Index);
         break;
@@ -102,15 +103,17 @@ void Storage::onQueuePush()
         Archive_->disconnect(task.Index, *object.get()->block(), object.get()->linkedOutputs(), *BlockIndex_, *BlockDb_);
         break;
       case WriteData :
-        if (!BlockDb_->writeBlock(task.Index))
+        if (!BlockDb_->writeBlock(task.Index, &needFlush))
           ErrorHandler_();
         CachedBlocks_.push_back(task.Index);
         break;
 
     }
 
-    if (BlockDb_->writeBufferEmpty())
+    if (needFlush) {
       flush();
+      needFlush = false;
+    }
   }
 }
 

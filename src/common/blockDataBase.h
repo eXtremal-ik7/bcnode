@@ -97,8 +97,7 @@ public:
   LinearDataStorage &blockReader() { return BlockStorage_; }
   LinearDataStorage &linkedOutputsReader() { return LinkedOutputsStorage_; }
 
-  bool writeBlock(BC::Common::BlockIndex *index);
-  bool writeBufferEmpty() { return BlockStorage_.bufferEmpty(); }
+  bool writeBlock(BC::Common::BlockIndex *index, bool *needFlush);
   bool flush() { return BlockStorage_.flush() && IndexStorage_.flush() && LinkedOutputsStorage_.flush(); }
   uint32_t magic() { return Magic_; }
 
