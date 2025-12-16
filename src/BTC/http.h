@@ -23,23 +23,34 @@ class HttpApiNode;
 
 class HttpApiConnection {
 public:
-  uintptr_t ref_fetch_add(uintptr_t tag) { return objectIncrementReference(aioObjectHandle(Socket), tag); }
-  uintptr_t ref_fetch_sub(uintptr_t tag) { return objectDecrementReference(aioObjectHandle(Socket), tag); }
+  uintptr_t ref_fetch_add(uintptr_t tag) { return objectIncrementReference(aioObjectHandle(Socket_), tag); }
+  uintptr_t ref_fetch_sub(uintptr_t tag) { return objectDecrementReference(aioObjectHandle(Socket_), tag); }
 
 private:
   enum FunctionTy {
     fnUnknown = 0,
-    fnInfo,
-    fnBlockByHash,
-    fnBlockByHeight,
-    fnTx,
-    fnBalance,
-    fnAddrTxId,
-    fnAddrTx,
-    fnPeerInfo
+    fnAddressesInfo,
+    fnAddressesTxs,
+    fnAddressesUtxo,
+    fnBlocksByHash,
+    fnBlocksByHeight,
+    fnBlocksLatest,
+    fnBlocksList,
+    fnBlocksRaw,
+    fnBlocksTxs,
+    fnMempoolSummary,
+    fnMempoolTxs,
+    fnSearch,
+    fnStatsRichList,
+    fnSystemHealth,
+    fnSystemSummary,
+    fnTxsByBlock,
+    fnTxsByTxid,
+    fnTxsLatest,
+    fnTxsRaw
   };
 
-  static std::unordered_map<std::string, std::pair<int, HttpApiConnection::FunctionTy>> FunctionNameMap_;
+  static std::unordered_map<std::string, HttpApiConnection::FunctionTy> FunctionNameMap_;
 
   BlockInMemoryIndex &BlockIndex_;
   BC::Common::ChainParams &ChainParams_;
@@ -47,7 +58,7 @@ private:
   BC::Network::Node *Node_ = nullptr;
   BC::DB::Archive *Storage_ = nullptr;
   HttpApiNode *HttpNode_ = nullptr;
-  aioObject *Socket = nullptr;
+  aioObject *Socket_ = nullptr;
   HostAddress Address;
   HttpRequestParserState ParserState;
   char buffer[65536];
@@ -57,27 +68,16 @@ private:
 
   // RPC context
   struct {
-    int method = hmUnknown;
-    FunctionTy function = fnUnknown;
-    unsigned argumentsNum = 0;
-
-    // getInfo
-    // blockByHash
-    // tx
-    BC::Proto::BlockHashTy hash;
-    // balance
-    std::string address;
-    uint64_t from = 0;
-    uint64_t count = 20;
-    // blockByHeight
-    uint32_t height;
-    // peerInfo
-  } RPCContext;
+    int Method = hmUnknown;
+    FunctionTy Function = fnUnknown;
+    std::string Path;
+    std::string Request;
+  } Context;
 
   static void socketDestructorCb(aioObjectRoot*, void *arg);
-  static void readCb(AsyncOpStatus status, aioObject*, size_t size, void *arg) { static_cast<HttpApiConnection*>(arg)->OnRead(status, size); }
-  static void writeCb(AsyncOpStatus, aioObject*, size_t, void *arg) { static_cast<HttpApiConnection*>(arg)->OnWrite(); }
-  static int parseCb(HttpRequestComponent *component, void *arg);
+  static void readCb(AsyncOpStatus status, aioObject*, size_t size, void *arg) { static_cast<HttpApiConnection*>(arg)->onRead(status, size); }
+  static void writeCb(AsyncOpStatus, aioObject*, size_t, void *arg) { static_cast<HttpApiConnection*>(arg)->onWrite(); }
+  static int parseCb(HttpRequestComponent *component, void *arg) { return static_cast<HttpApiConnection*>(arg)->onParse(component); }
 
 public:
   HttpApiConnection(BlockInMemoryIndex &blockIndex,
@@ -89,24 +89,38 @@ public:
                     HostAddress address,
                     aioObject *socket);
   void start();
-  void OnRead(AsyncOpStatus status, size_t size);
-  void OnWrite();
+  int onParse(HttpRequestComponent *component);
+  void onRead(AsyncOpStatus status, size_t size);
+  void onWrite();
 
   // Functions
-  void OnGetInfo();
-  void OnBlockByHash();
-  void OnBlockByHeight();
-  void OnTx();
-  void OnGetBalance();
-  void OnGetAddrTxid();
-  void OnGetAddrTx();
-  void OnPeerInfo();
+  void onAddressesInfo();
+  void onAddressesTxs();
+  void onAddressesUtxo();
+  void onBlocksByHash();
+  void onBlocksByHeight();
+  void onBlocksLatest();
+  void onBlocksList();
+  void onBlocksRaw();
+  void onBlocksTxs();
+  void onMempoolSummary();
+  void onMempoolTxs();
+  void onSearch();
+  void onStatsRichList();
+  void onSystemHealth();
+  void onSystemSummary();
+  void onTxsByBlock();
+  void onTxsByTxid();
+  void onTxsLatest();
+  void onTxsRaw();
 
   // Helpers
-  void Reply404();
-  void Build200(xmstream &stream);
-  size_t StartChunk(xmstream &stream);
-  void FinishChunk(xmstream &stream, size_t offset);
+  void reply404();
+  void replyNotImplemented();
+  void reply200(xmstream &stream);
+  size_t startChunk(xmstream &stream);
+  void finishChunk(xmstream &stream, size_t offset);
+  void replyWithStatus(const char *status);
 
   friend class HttpApiNode;
 };
@@ -124,7 +138,7 @@ private:
 
 private:
   static void acceptCb(AsyncOpStatus status, aioObject *object, HostAddress address, socketTy socketFd, void *arg);
-  void OnAccept(HostAddress address, aioObject *socket);
+  void onAccept(HostAddress address, aioObject *socket);
 
 public:
   bool init(BlockInMemoryIndex *blockIndex, BC::Common::ChainParams *chainParams, BlockDatabase *blockDb, BC::Network::Node *node, BC::DB::Archive &storage, asyncBase *mainBase, HostAddress localAddress);

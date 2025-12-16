@@ -65,6 +65,7 @@ endif(MSVC)
 
 cxxpm_add_package(one-tbb default)
 cxxpm_add_package(rocksdb default)
+cxxpm_add_package(rapidjson default)
 if (NOT MSVC)
   cxxpm_add_package(gmp default)
   set(BIGNUM_LIBRARIES gmp::libgmp gmp::libgmpxx)
@@ -83,6 +84,7 @@ include_directories(
   ${libp2p_BINARY_DIR}/include
   ${config4cpp_SOURCE_DIR}/src/include
   ${secp256k1_SOURCE_DIR}/include
+  ${RAPIDJSON_INCLUDE_DIRECTORY}
 )
 
 add_library(bcnodecommon STATIC
