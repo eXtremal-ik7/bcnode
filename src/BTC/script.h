@@ -45,6 +45,7 @@ public:
   struct UnspentOutputInfo {
     enum EType {
       ENonStandard = 0,
+      EOpReturn,
       EPubKey,
       EPubKeyHash,
       EScriptHash,

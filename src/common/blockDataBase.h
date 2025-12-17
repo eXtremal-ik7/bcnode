@@ -47,8 +47,14 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
                                  uint32_t fileNo=std::numeric_limits<uint32_t>::max(),
                                  uint32_t fileOffset=std::numeric_limits<uint32_t>::max());
 
-bool loadingBlockIndex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir);
-bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage);
+bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
+                       const std::filesystem::path &blockPath,
+                       const std::filesystem::path &indexPath);
+
+bool reindex(BlockInMemoryIndex &blockIndex,
+             const std::filesystem::path &blockPath,
+             BC::Common::ChainParams &chainParams,
+             BC::DB::Storage &storage);
 
 
 class BlockInMemoryIndex {
@@ -91,9 +97,12 @@ private:
 class BlockDatabase {
 public:
   BlockDatabase() {}
-  bool init(std::filesystem::path &dataDir, BC::Common::ChainParams &chainParams);
+  bool init(const std::filesystem::path &blocksDir,
+            const std::filesystem::path &indexDir,
+            BC::Common::ChainParams &chainParams);
 
-  std::filesystem::path &dataDir() { return DataDir_; }
+  const std::filesystem::path &blocksDir() const { return BlocksDir_; }
+  const std::filesystem::path &indexDir() const { return IndexDir_; }
   LinearDataStorage &blockReader() { return BlockStorage_; }
   LinearDataStorage &linkedOutputsReader() { return LinkedOutputsStorage_; }
 
@@ -109,7 +118,8 @@ private:
   LinearDataStorage BlockStorage_;
   LinearDataStorage IndexStorage_;
   LinearDataStorage LinkedOutputsStorage_;
-  std::filesystem::path DataDir_;
+  std::filesystem::path BlocksDir_;
+  std::filesystem::path IndexDir_;
   // NOTE: bitcoin core compatibility
   uint32_t Magic_;
 };
@@ -165,8 +175,8 @@ public:
   BlockBulkReader(BlockDatabase &blockDb, std::function<void(BC::Common::BlockIndex*, const BC::Proto::Block&, const BC::Proto::CBlockLinkedOutputs&)> handler, std::function<void()> errorHandler) :
     BlockDb_(blockDb), Handler_(handler), ErrorHandler_(errorHandler)
   {
-    BlocksDirectory_ = blockDb.dataDir() / "blocks";
-    LinkedOutputsDirectory_ = blockDb.dataDir() / "index";
+    BlocksDirectory_ = blockDb.blocksDir();
+    LinkedOutputsDirectory_ = blockDb.indexDir();
     BlockCursor_.reset();
   }
 

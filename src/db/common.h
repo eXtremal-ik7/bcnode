@@ -100,7 +100,7 @@ public:
   virtual rocksdb::MergeOperator *mergeOperator() = 0;
 
   virtual bool initialize(BlockInMemoryIndex &blockIndex,
-                          std::filesystem::path &dataDir,
+                          const std::filesystem::path &dbPath,
                           BC::DB::Storage &storage,
                           config4cpp::Configuration *cfg,
                           BC::Common::BlockIndex **forConnect,
@@ -121,21 +121,27 @@ public:
   virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) = 0;
   virtual void *interface(int interface) = 0;
 
+  const std::string &name() const { return Name_; }
   BC::Proto::BlockHashTy currentBlock() { return CurrentBlock_; }
+
   virtual void flush() = 0;
 
 protected:
   BC::Proto::BlockHashTy CurrentBlock_;
+  std::string Name_;
 };
 
 template<typename CKey>
 class Base : public BaseInterface {
 public:
-  Base(const std::string &name) : Name_(name) {}
+  Base(const std::string &name) {
+    Name_ = name;
+  }
+
   virtual ~Base() {}
 
   bool initialize(BlockInMemoryIndex &blockIndex,
-                  std::filesystem::path &dataDir,
+                  const std::filesystem::path &dbPath,
                   BC::DB::Storage &storage,
                   config4cpp::Configuration *cfg,
                   BC::Common::BlockIndex **forConnect,
@@ -151,7 +157,7 @@ public:
     // Open all shards
     BC::Proto::BlockHashTy stamp;
     for (size_t i = 0; i < BaseCfg_.ShardsNum; i++) {
-      auto shardPath = dataDir / Name_ / std::to_string(i);
+      auto shardPath = dbPath / std::to_string(i);
       std::filesystem::create_directories(shardPath);
 
       rocksdb::DB *db;
@@ -303,7 +309,6 @@ public:
 
 protected:
   // Configuration
-  std::string Name_;
   CBaseCfg BaseCfg_;
 
   // Database structures

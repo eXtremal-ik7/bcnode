@@ -61,7 +61,9 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
 
       serialized.reset();
       BTC::Script::parseTransactionOutput(txOut, serialized);
-      this->add(blockId, key, serialized.data(), serialized.sizeOf());
+      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
+      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn)
+        this->add(blockId, key, serialized.data(), serialized.sizeOf());
     }
   }
 
@@ -83,7 +85,9 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
 
       serialized.reset();
       BTC::Script::parseTransactionOutput(txOut, serialized);
-      this->add(blockId, key, serialized.data(), serialized.sizeOf());
+      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
+      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn)
+        this->add(blockId, key, serialized.data(), serialized.sizeOf());
     }
   }
 }
@@ -104,8 +108,13 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
     const auto &coinbaseTx = block.vtx[0];
     key.Tx = coinbaseTx.getTxId();
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
-      key.Index = i;
-      this->remove(blockId, key);
+      serialized.reset();
+      BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
+      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
+      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
+        key.Index = i;
+        this->remove(blockId, key);
+      }
     }
   }
 
@@ -130,8 +139,13 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
 
     key.Tx = tx.getTxId();
     for (size_t j = 0; j < tx.txOut.size(); j++) {
-      key.Index = j;
-      this->remove(blockId, key);
+      serialized.reset();
+      BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
+      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
+      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
+        key.Index = j;
+        this->remove(blockId, key);
+      }
     }
   }
 }

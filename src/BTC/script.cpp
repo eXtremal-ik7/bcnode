@@ -147,7 +147,9 @@ void Script::parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspe
   UnspentOutputInfo *info = unspentOutputInfo.reserve<UnspentOutputInfo>(1);
   info->Value = out.value;
 
-  if (out.pkScript.size() == 35 && script[0] == OP_PUSH_33 && script[34] == OP_CHECKSIG) {
+  if (out.pkScript.size() >= 1 && script[0] == OP_RETURN) {
+    info->Type = UnspentOutputInfo::EOpReturn;
+  } else if (out.pkScript.size() == 35 && script[0] == OP_PUSH_33 && script[34] == OP_CHECKSIG) {
     // P2PK compressed
     // PUSH_33(PublicKey) OP_CHECKSIG
     info->Type = UnspentOutputInfo::EPubKey;

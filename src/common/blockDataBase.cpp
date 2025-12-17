@@ -676,20 +676,20 @@ static bool loadBlockIndexBuilder(BlockInMemoryIndex &blockIndex, LoadingIndexCo
   return true;
 }
 
-bool loadingBlockIndex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir)
+bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
+                       const std::filesystem::path &blockPath,
+                       const std::filesystem::path &indexPath)
 {
   LOG_F(INFO, "Loading block index...");
 
   char fileName[64];
   uint32_t indexFileNo = 0;
-  std::filesystem::path indexPath = dataDir / "index";
-  std::filesystem::path blocksPath = dataDir / "blocks";
   std::vector<size_t> blockFileSizes;
 
   // Collect block data file sizes
   for (;;) {
     snprintf(fileName, sizeof(fileName), "blk%05u.dat", indexFileNo++);
-    std::filesystem::path path = blocksPath / fileName;
+    std::filesystem::path path = blockPath / fileName;
     if (!std::filesystem::exists(path))
       break;
 
@@ -819,14 +819,15 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex, std::filesystem::path &da
   return true;
 }
 
-bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage)
+bool reindex(BlockInMemoryIndex &blockIndex,
+             const std::filesystem::path &blockPath,
+             BC::Common::ChainParams &chainParams,
+             BC::DB::Storage &storage)
 {
   size_t bufferSize = 0;
   std::unique_ptr<uint8_t[]> data;
   char blockFileName[64];
   unsigned blkFileIndex = 0;
-  std::filesystem::path indexPath = dataDir / "index";
-  std::filesystem::path blocksPath = dataDir / "blocks";
   size_t totalBlockCount = 0;
 
   std::vector<BlockPosition> blockOffsets;
@@ -834,7 +835,7 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
 
   for (;;) {
     snprintf(blockFileName, sizeof(blockFileName), "blk%05u.dat", blkFileIndex);
-    std::filesystem::path path = blocksPath / blockFileName;
+    std::filesystem::path path = blockPath / blockFileName;
     if (!std::filesystem::exists(path))
       break;
 
@@ -923,16 +924,19 @@ bool reindex(BlockInMemoryIndex &blockIndex, std::filesystem::path &dataDir, BC:
 }
 
 
-bool BlockDatabase::init(std::filesystem::path &dataDir, BC::Common::ChainParams &chainParams)
+bool BlockDatabase::init(const std::filesystem::path &blocksDir,
+                         const std::filesystem::path &indexDir,
+                         BC::Common::ChainParams &chainParams)
 {
   Magic_ = chainParams.magic;
-  DataDir_ = dataDir;
+  BlocksDir_ = blocksDir;
+  IndexDir_= indexDir;
 
-  if (!BlockStorage_.init(dataDir / "blocks", "blk%05u.dat", BC::Configuration::BlocksFileLimit))
+  if (!BlockStorage_.init(blocksDir, "blk%05u.dat", BC::Configuration::BlocksFileLimit))
     return false;
-  if (!IndexStorage_.init(dataDir / "index", "index%05u.dat", BC::Configuration::BlocksFileLimit))
+  if (!IndexStorage_.init(indexDir, "index%05u.dat", BC::Configuration::BlocksFileLimit))
     return false;
-  if (!LinkedOutputsStorage_.init(dataDir / "index", "linkedoutput%05u.dat", BC::Configuration::BlocksFileLimit))
+  if (!LinkedOutputsStorage_.init(indexDir, "linkedoutput%05u.dat", BC::Configuration::BlocksFileLimit))
     return false;
 
   if (BlockStorage_.empty()) {
@@ -999,7 +1003,7 @@ bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index, bool *needFlush)
 BlockSearcher::BlockSearcher(BlockDatabase &blockDb, std::function<void(void*, size_t)> handler, std::function<void()> errorHandler) :
   BlockDb_(blockDb), Handler_(handler), ErrorHandler_(errorHandler)
 {
-  blocksDirectory = blockDb.dataDir() / "blocks";
+  blocksDirectory = blockDb.blocksDir();
 }
 
 BlockSearcher::~BlockSearcher()

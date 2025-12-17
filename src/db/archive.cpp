@@ -40,6 +40,8 @@ IInterface* setupHandler(config4cpp::Configuration *cfg,
 
 bool Archive::init(BlockInMemoryIndex &blockIndex,
                    BC::DB::Storage &storage,
+                   const std::filesystem::path &dataDir,
+                   const std::filesystem::path &utxoPath,
                    config4cpp::Configuration *cfg)
 {
   std::unordered_map<std::string, uint32_t> dbIndexMap;
@@ -75,15 +77,19 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   archiveDisconnect.resize(AllDb_.size());
   archiveDatabases.resize(AllDb_.size());
 
-  BlockDatabase &blockDb = storage.blockDb();
-
   // Initialize all databases
-  if (!storage.utxodb().initialize(blockIndex, blockDb.dataDir(), storage, cfg, &utxoBestBlock, utxoDisconnect))
+  if (!storage.utxodb().initialize(blockIndex, utxoPath, storage, cfg, &utxoBestBlock, utxoDisconnect))
     return false;
   for (size_t i = 0; i < AllDb_.size(); i++) {
     BaseWithBest &current = archiveDatabases[i];
     current.Base = AllDb_[i].get();
-    if (!AllDb_[i]->initialize(blockIndex, blockDb.dataDir(), storage, cfg, &current.BestBlock, archiveDisconnect[i]))
+
+    // Get custom database path from config
+    std::string scope = "archive." + AllDb_[i]->name();
+    const char *p = cfg->lookupString(scope.c_str(), "path", nullptr);
+    std::filesystem::path dbPath = p ? p : dataDir / AllDb_[i]->name();
+
+    if (!AllDb_[i]->initialize(blockIndex, dbPath, storage, cfg, &current.BestBlock, archiveDisconnect[i]))
       return false;
   }
 
@@ -110,7 +116,11 @@ bool Archive::purge(config4cpp::Configuration *cfg, std::filesystem::path &dataD
   cfg->lookupList("archive", "databases", enabledDatabases, config4cpp::StringVector());
 
   for (int i = 0; i < enabledDatabases.length(); i++) {
-    std::filesystem::path dbPath = dataDir / enabledDatabases[i];
+    std::string scope = "archive.";
+    scope.append(enabledDatabases[i]);
+    const char *p = cfg->lookupString(scope.c_str(), "path", nullptr);
+
+    std::filesystem::path dbPath = p ? p : dataDir / enabledDatabases[i];
     std::error_code ec;
     std::filesystem::remove_all(dbPath, ec);
     if (ec) {

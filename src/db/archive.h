@@ -14,9 +14,11 @@ namespace BC {
 namespace DB {
 
 class Archive {
-public:      
+public:
   bool init(BlockInMemoryIndex &blockIndex,
             BC::DB::Storage &storage,
+            const std::filesystem::path &dataDir,
+            const std::filesystem::path &utxoPath,
             config4cpp::Configuration *cfg);
 
   bool purge(config4cpp::Configuration *cfg, std::filesystem::path &dataDir);

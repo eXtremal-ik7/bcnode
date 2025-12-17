@@ -136,7 +136,12 @@ void printHelpMessage()
 struct Context {
   // Other objects
   asyncBase *MainBase;
+
   std::filesystem::path DataDir;
+  std::filesystem::path BlocksDir;
+  std::filesystem::path IndexDir;
+  std::filesystem::path UtxoDir;
+
   BC::Common::ChainParams ChainParams;
 
   // Databases
@@ -266,6 +271,9 @@ int main(int argc, char **argv)
   config4cpp::StringVector addNode;
   config4cpp::StringVector forceNode;
   std::filesystem::path configPath = context.DataDir / "bcnode.conf";
+  context.BlocksDir = context.DataDir / "blocks";
+  context.IndexDir = context.DataDir / "index";
+  context.UtxoDir = context.DataDir / "utxo";
   config4cpp::Configuration *cfg = config4cpp::Configuration::create();
   uint16_t bcnodePort = 0;
   uint16_t httpApiPort = 0;
@@ -278,7 +286,6 @@ int main(int argc, char **argv)
   if (std::filesystem::exists(configPath)) {
     try {
       cfg->parse(configPath.u8string().c_str());
-
 
       cfg->lookupList("bcnode", "addNode", addNode, config4cpp::StringVector());
       cfg->lookupList("bcnode", "forceNode", forceNode, config4cpp::StringVector());
@@ -299,6 +306,17 @@ int main(int argc, char **argv)
 
       outgoingConnectionsLimit = cfg->lookupInt("bcnode", "outgoingConnectionsLimit", 16);
       incomingConnectionsLimit = cfg->lookupInt("bcnode", "incomingConnectionsLimit", std::numeric_limits<unsigned>::max());
+
+      {
+        const char *p = cfg->lookupString("bcnode", "indexPath", nullptr);
+        if (p)
+          context.IndexDir = p;
+      }
+      {
+        const char *p = cfg->lookupString("bcnode", "utxoPath", nullptr);
+        if (p)
+          context.UtxoDir = p;
+      }
 
       archiveEnabled = cfg->lookupBoolean("archive", "enabled", false);
     } catch(const config4cpp::ConfigurationException& ex) {
@@ -334,9 +352,8 @@ int main(int argc, char **argv)
 
   if (gResync) {
     // Remove utxo database
-    std::filesystem::path dbPath = context.DataDir / "utxo";
     std::error_code ec;
-    std::filesystem::remove_all(dbPath, ec);
+    std::filesystem::remove_all(context.UtxoDir, ec);
     if (ec) {
       LOG_F(ERROR, "Failed to remove database %s", "utxo");
       return 1;
@@ -350,19 +367,18 @@ int main(int argc, char **argv)
   if (gReindex) {
     // Remove block index database
     std::error_code errc;
-    std::filesystem::path indexPath = context.DataDir / "index";
-    std::filesystem::create_directories(indexPath, errc);
-    for (std::filesystem::directory_iterator I(indexPath), IE; I != IE; ++I)
+    std::filesystem::create_directories(context.IndexDir, errc);
+    for (std::filesystem::directory_iterator I(context.IndexDir), IE; I != IE; ++I)
       std::filesystem::remove_all(I->path());
   }
 
   // Initialize storage
-  if (!context.BlockDb.init(context.DataDir, context.ChainParams))
+  if (!context.BlockDb.init(context.BlocksDir, context.IndexDir, context.ChainParams))
     return 1;
   context.Storage.init(context.BlockDb, context.BlockIndex, context.Archive);
 
   // Loading index
-  if (!loadingBlockIndex(context.BlockIndex, context.DataDir))
+  if (!loadingBlockIndex(context.BlockIndex, context.BlocksDir, context.IndexDir))
     return 1;
 
   // Initialize databases
@@ -370,7 +386,8 @@ int main(int argc, char **argv)
     // Archive disabled, processing UTXO database
     BC::Common::BlockIndex *utxoBestBlock;
     std::vector<BC::Common::BlockIndex*> forDisconnect;
-    if (!context.Storage.utxodb().initialize(context.BlockIndex, context.DataDir, context.Storage, cfg, &utxoBestBlock, forDisconnect))
+
+    if (!context.Storage.utxodb().initialize(context.BlockIndex, context.UtxoDir, context.Storage, cfg, &utxoBestBlock, forDisconnect))
       return 1;
     if (!BC::DB::dbDisconnectBlocks(context.Storage.utxodb(), context.BlockIndex, context.Storage, forDisconnect))
       return 1;
@@ -378,7 +395,7 @@ int main(int argc, char **argv)
       return 1;
   } else {
     // Initialize full archive
-    if (!context.Archive.init(context.BlockIndex, context.Storage, cfg))
+    if (!context.Archive.init(context.BlockIndex, context.Storage, context.DataDir, context.UtxoDir, cfg))
       return 1;
   }
 
@@ -389,7 +406,7 @@ int main(int argc, char **argv)
     return 1;
 
   if (gReindex) {
-    if (!reindex(context.BlockIndex, context.DataDir, context.ChainParams, context.Storage)) {
+    if (!reindex(context.BlockIndex, context.BlocksDir, context.ChainParams, context.Storage)) {
       postQuitOperation(context.MainBase);
       return 1;
     }
