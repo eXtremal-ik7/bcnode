@@ -32,7 +32,7 @@ public:
       default: return nullptr;
     }
   }
-
+  
   bool queryTransaction(const BC::Proto::TxHashTy &txid,
                         BlockInMemoryIndex &blockIndex,
                         BlockDatabase &blockDb,

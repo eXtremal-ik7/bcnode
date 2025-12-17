@@ -17,12 +17,14 @@ bool TxDb::queryTransaction(const BC::Proto::TxHashTy &txid,
                             BlockDatabase&,
                             CQueryTransactionResult &result)
 {
+  result.DataCorrupted = false;
   result.Found = this->find(txid, [&result](const void *data, size_t size) {
     CLogData *p = (CLogData*)data;
     result.Block = p->Hash;
     result.TxNum = p->Index;
     xmstream s(p+1, size-sizeof(CLogData));
-    result.DataCorrupted = !BC::unserializeAndCheck(s, result.Tx);
+    result.DataCorrupted |= !BC::unserializeAndCheck(s, result.Tx);
+    result.DataCorrupted |= !BC::unserializeAndCheck(s, result.LinkedOutputs);
   });
 
   return true;
@@ -35,7 +37,7 @@ bool TxDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 
 void TxDb::connectImpl(const BC::Common::BlockIndex *index,
                        const BC::Proto::Block &block,
-                       const BC::Proto::CBlockLinkedOutputs&,
+                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                        BlockInMemoryIndex&,
                        BlockDatabase&)
 {
@@ -50,6 +52,7 @@ void TxDb::connectImpl(const BC::Common::BlockIndex *index,
     data->Hash = blockId;
     data->Index = i;
     BC::serialize(stream, tx);
+    BC::serialize(stream, linkedOutputs.Tx[i]);
     this->add(blockId, hash, stream.data(), stream.sizeOf());
   }
 }

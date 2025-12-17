@@ -100,7 +100,6 @@ public:
   virtual rocksdb::MergeOperator *mergeOperator() = 0;
 
   virtual bool initialize(BlockInMemoryIndex &blockIndex,
-                          BlockDatabase &blockDb,
                           std::filesystem::path &dataDir,
                           BC::DB::Storage &storage,
                           config4cpp::Configuration *cfg,
@@ -136,7 +135,6 @@ public:
   virtual ~Base() {}
 
   bool initialize(BlockInMemoryIndex &blockIndex,
-                  BlockDatabase &blockDb,
                   std::filesystem::path &dataDir,
                   BC::DB::Storage &storage,
                   config4cpp::Configuration *cfg,
@@ -152,7 +150,6 @@ public:
 
     // Open all shards
     BC::Proto::BlockHashTy stamp;
-    bool needConnectGenesis = false;
     for (size_t i = 0; i < BaseCfg_.ShardsNum; i++) {
       auto shardPath = dataDir / Name_ / std::to_string(i);
       std::filesystem::create_directories(shardPath);
@@ -219,7 +216,7 @@ public:
           }
 
           // Build connect and disconnect block set if need
-          *forConnect = rebaseChain(bestIndex, It->second, forDisconnect);
+          *forConnect = It->second == bestIndex ? nullptr : rebaseChain(bestIndex, It->second, forDisconnect);
         } else if (shardStamp != stamp) {
           LOG_F(ERROR, "%s is corrupted: shard %zu has different stamp", Name_.c_str(), i);
           return false;
@@ -230,11 +227,7 @@ public:
       }
     }
 
-    if (!initializeImpl(cfg, storage))
-      return false;
-    if (needConnectGenesis)
-      connect(blockIndex.genesis(), blockIndex.genesisBlock(), BC::Proto::CBlockLinkedOutputs(), blockIndex, blockDb);
-    return true;
+    return initializeImpl(cfg, storage);
   }
 
   void connect(const BC::Common::BlockIndex *index,
@@ -725,7 +718,8 @@ enum EInterfaceTy {
 
 struct CQueryTransactionResult {
   BC::Proto::Transaction Tx;
-  BC::Proto::TxHashTy Block;
+  BC::Proto::CTxLinkedOutputs LinkedOutputs;
+  BC::Proto::BlockHashTy Block;
   uint32_t TxNum;
   bool Found = false;
   bool DataCorrupted = false;

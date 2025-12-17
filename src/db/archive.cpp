@@ -78,12 +78,12 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   BlockDatabase &blockDb = storage.blockDb();
 
   // Initialize all databases
-  if (!storage.utxodb().initialize(blockIndex, blockDb, blockDb.dataDir(), storage, cfg, &utxoBestBlock, utxoDisconnect))
+  if (!storage.utxodb().initialize(blockIndex, blockDb.dataDir(), storage, cfg, &utxoBestBlock, utxoDisconnect))
     return false;
   for (size_t i = 0; i < AllDb_.size(); i++) {
     BaseWithBest &current = archiveDatabases[i];
     current.Base = AllDb_[i].get();
-    if (!AllDb_[i]->initialize(blockIndex, blockDb, blockDb.dataDir(), storage, cfg, &current.BestBlock, archiveDisconnect[i]))
+    if (!AllDb_[i]->initialize(blockIndex, blockDb.dataDir(), storage, cfg, &current.BestBlock, archiveDisconnect[i]))
       return false;
   }
 

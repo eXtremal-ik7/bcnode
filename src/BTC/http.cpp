@@ -484,9 +484,50 @@ void BC::Network::HttpApiConnection::onTxsByBlockHeight(rapidjson::Document&)
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onTxsByTxid(rapidjson::Document&)
+void BC::Network::HttpApiConnection::onTxsByTxid(rapidjson::Document &request)
 {
-  replyNotImplemented();
+  bool isValid = true;
+  std::string errorField;
+  BC::Proto::TxHashTy txid;
+  jsonParseBaseBlob(request, "txid", txid, &isValid, errorField);
+  if (!isValid) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  DB::CQueryTransactionResult queryResult;
+  if (!Storage_->TransactionDb_->queryTransaction(txid, BlockIndex_, *BlockDb_, queryResult)) {
+    replyWithError("DATABASE_NOT_ENABLED", "", "", "");
+    return;
+  }
+  if (!queryResult.Found) {
+    replyWithError("TRANSACTION_NOT_FOUND", "", "" ,"");
+    return;
+  }
+  if (queryResult.DataCorrupted) {
+    replyWithError("DATABASE_CORRUPTED", "", "" ,"");
+    return;
+  }
+
+  const BC::Common::BlockIndex *best = BlockIndex_.best();
+  BC::Common::BlockIndex *index = BlockIndex_.indexByHash(queryResult.Block);
+  if (!index) {
+    replyWithError("BLOCK_NOT_FOUND", "", "", queryResult.Block.GetHex());
+    return;
+  }
+
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+
+  {
+    JSON::Object reply(stream);
+    reply.addField("tx");
+    serializeTx(stream, queryResult.Tx, queryResult.LinkedOutputs, index, queryResult.TxNum == 0, best->Height - index->Height);
+  }
+
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::onTxsLatest(rapidjson::Document&)
@@ -648,15 +689,16 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   int64_t valueIn = 0;
   int64_t valueOut = 0;
   int64_t fee = 0;
-  for (const auto &linkedTxin: txOutputs.TxIn) {
-    BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
-    valueIn += outputInfo->Value;
-  }
-  for (const auto &txOut: tx.txOut) {
+  for (const auto &txOut: tx.txOut)
     valueOut += txOut.value;
-  }
-  if (!isCoinbase)
+
+  if (!isCoinbase) {
+    for (const auto &linkedTxin: txOutputs.TxIn) {
+      BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
+      valueIn += outputInfo->Value;
+    }
     fee = valueIn - valueOut;
+  }
 
   txObject.addString("txid", tx.getTxId().GetHex());
   txObject.addString("hash", tx.getWTxid().GetHex());

@@ -17,27 +17,6 @@ bool dbDisconnectBlocks(BC::DB::BaseInterface &db,
   }
 
   return true;
-
-
-  // bool noError = true;
-  // auto It = forDisconnect.begin();
-  // auto handler = [&db, &It, &blockIndex, &storage](void *data, size_t size) {
-  //   xmstream stream(data, size);
-  //   BC::Proto::Block block;
-  //   BC::unserialize(stream, block);
-  //   // TODO: load linked outputs from disk
-  //   db.disconnect(*It, block, BC::Proto::CBlockLinkedOutputs(), blockIndex, storage.blockDb());
-  //   ++It;
-  // };
-
-  // BlockSearcher searcher(storage.blockDb(), handler, [&noError]() { noError = false; });
-  // for (const auto &element: forDisconnect) {
-  //   searcher.add(element);
-  //   if (!noError)
-  //     return false;
-  // }
-
-  // return true;
 }
 
 bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
@@ -47,14 +26,19 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
                      BC::DB::Storage &storage,
                      const char *name)
 {
+  uint32_t utxoBestHeight = utxoBestBlock ? utxoBestBlock->Height : std::numeric_limits<uint32_t>::max();
+
   BC::Common::BlockIndex *firstCommon = utxoBestBlock;
+  uint32_t firstCommonHeight = utxoBestHeight;
+
   for (size_t i = 0; i < archiveDatabases.size(); i++) {
     BC::Common::BlockIndex *best = archiveDatabases[i].BestBlock;
-    if (best->Height < firstCommon->Height)
+    if (best && best->Height < firstCommonHeight) {
       firstCommon = best;
+      firstCommonHeight = firstCommon->Height;
+    }
   }
 
-  firstCommon = firstCommon->Next;
   if (!firstCommon) {
     LOG_F(INFO, "%s is up to date", name);
     return true;
@@ -65,7 +49,7 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
   uint32_t count = best->Height - firstCommon->Height;
   LOG_F(INFO, "Update %s: connecting %u blocks", name, count);
 
-  auto handler = [&utxoDb, utxoBestBlock, &archiveDatabases, &blockIndex, &storage](BC::Common::BlockIndex *index, const BC::Proto::Block &block, const BC::Proto::CBlockLinkedOutputs &linkedOutputs) {
+  auto handler = [&utxoDb, utxoBestHeight, &archiveDatabases, &blockIndex, &storage](BC::Common::BlockIndex *index, const BC::Proto::Block &block, const BC::Proto::CBlockLinkedOutputs &linkedOutputs) {
     // Connect archive
     for (size_t i = 0; i < archiveDatabases.size(); i++) {
       BC::Common::BlockIndex *best = archiveDatabases[i].BestBlock;
@@ -75,7 +59,7 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
     }
 
     // Connect utxo
-    if (index->Height >= utxoBestBlock->Height)
+    if (index->Height >= utxoBestHeight)
       utxoDb.connect(index, block, linkedOutputs, blockIndex, storage.blockDb());
   };
 

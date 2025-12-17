@@ -370,7 +370,7 @@ int main(int argc, char **argv)
     // Archive disabled, processing UTXO database
     BC::Common::BlockIndex *utxoBestBlock;
     std::vector<BC::Common::BlockIndex*> forDisconnect;
-    if (!context.Storage.utxodb().initialize(context.BlockIndex, context.BlockDb, context.DataDir, context.Storage, cfg, &utxoBestBlock, forDisconnect))
+    if (!context.Storage.utxodb().initialize(context.BlockIndex, context.DataDir, context.Storage, cfg, &utxoBestBlock, forDisconnect))
       return 1;
     if (!BC::DB::dbDisconnectBlocks(context.Storage.utxodb(), context.BlockIndex, context.Storage, forDisconnect))
       return 1;
