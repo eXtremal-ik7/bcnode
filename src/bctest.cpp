@@ -1,4 +1,5 @@
 #include "BC/bc.h"
+#include "common/serializeUtils.h"
 #include "common/smallStream.h"
 #include "crypto/sha256.h"
 
@@ -436,7 +437,7 @@ private:
     {
       // txin
       BC::Proto::TxIn &txIn = coinbaseTx.txIn.emplace_back();
-      txIn.previousOutputHash.SetNull();
+      txIn.previousOutputHash.setNull();
       txIn.previousOutputIndex = 0xFFFFFFFFu;
       // Witness nonce
       // Use default: 0
@@ -474,13 +475,13 @@ private:
         // segwit
         // calculate commitment
         xmstream witnessCommitment;
-        std::vector<uint256> witnessHashes;
+        std::vector<BaseBlob<256>> witnessHashes;
         witnessHashes.emplace_back();
-        witnessHashes.back().SetNull();
+        witnessHashes.back().setNull();
         for (size_t i = 1; i < block.vtx.size(); i++)
           witnessHashes.push_back(block.vtx[i].getWTxid());
-        uint256 witnessMerkleRoot = calculateMerkleRoot(&witnessHashes[0], witnessHashes.size());
-        uint256 commitment;
+        BaseBlob<256> witnessMerkleRoot = calculateMerkleRoot(&witnessHashes[0], witnessHashes.size());
+        BaseBlob<256> commitment;
         {
           uint8_t defaultWitnessNonce[32];
           memset(defaultWitnessNonce, 0, sizeof(defaultWitnessNonce));

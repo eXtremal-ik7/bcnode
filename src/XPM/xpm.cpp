@@ -4,7 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "xpm.h"
-#include "common/uint256.h"
+#include "common/serializeUtils.h"
 
 namespace XPM {
 namespace Common {
@@ -28,7 +28,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       // Genesis block
       // TODO: build it correct way
       params->GenesisBlock.header.nVersion = 2;
-      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.hashPrevBlock.setNull();
       params->GenesisBlock.header.nTime = 1373064429;
       params->GenesisBlock.header.nBits = 0x06000000;
       params->GenesisBlock.header.nNonce = 383;
@@ -46,7 +46,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       tx.txIn.resize(1);
       tx.txOut.resize(1);
       tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputHash.setNull();
       tx.txIn[0].previousOutputIndex = -1;
       xmstream scriptSig;
       serialize(scriptSig, static_cast<uint8_t>(0));
@@ -87,7 +87,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       // Genesis block
       // TODO: build it correct way
       params->GenesisBlock.header.nVersion = 2;
-      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.hashPrevBlock.setNull();
       params->GenesisBlock.header.nTime = 1373063882;
       params->GenesisBlock.header.nBits = 0x06000000;
       params->GenesisBlock.header.nNonce = 1513;
@@ -105,7 +105,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       tx.txOut.resize(1);
       xmstream scriptSig;
       tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputHash.setNull();
       tx.txIn[0].previousOutputIndex = -1;
       serialize(scriptSig, static_cast<uint8_t>(0));
       XPM::serialize(scriptSig, mpz_class(999));
@@ -179,9 +179,9 @@ uint64_t TargetGetFractionalDifficulty(unsigned int nBits)
 /// 7.500 15887
 /// 7.999 254261
 /// 8.000 262144
-arith_uint256 GetBlockProof(const XPM::Proto::BlockHeader &header, const XPM::Common::ChainParams &chainParams)
+UInt<256> GetBlockProof(const XPM::Proto::BlockHeader &header, const XPM::Common::ChainParams &chainParams)
 {
-  uint256 result;
+  BaseBlob<256> result;
   uint64_t nFractionalDifficulty = TargetGetFractionalDifficulty(header.nBits);
   mpz_class bnWork = 256;
 
@@ -198,8 +198,8 @@ arith_uint256 GetBlockProof(const XPM::Proto::BlockHeader &header, const XPM::Co
   bnWork *= ((unsigned long) nWorkTransitionRatio) * (unsigned long)nFractionalDifficulty;
   bnWork /= (((unsigned long) nWorkTransitionRatio - 1) * (unsigned long)nFractionalDifficultyMin + (unsigned long)nFractionalDifficulty);
 #endif
-  uint256FromBN(result, bnWork.get_mpz_t());
-  return UintToArith256(result);
+
+  return mpzToUint<256>(bnWork);
 }
 
 
@@ -328,17 +328,21 @@ bool checkConsensus(const Proto::BlockHeader &header, XPM::Common::CheckConsensu
   if (TargetGetLength(header.nBits) < chainParams.minimalChainLength || TargetGetLength(header.nBits) > 99)
     return false;
 
-  XPM::Proto::BlockHashTy hash = header.GetOriginalHeaderHash();
+  UInt<256> hash = header.GetOriginalHeaderHash();
+
+  // Check header hash limit (most significant bit of hash must be 1)
+  if (!(hash.data()[3] & 0x8000000000000000ULL))
+    return false;
 
   {
-    // Check header hash limit (most significant bit of hash must be 1)
-    uint8_t hiByte = *(hash.begin() + 31);
-    if (!(hiByte & 0x80))
-      return false;
+
   }
 
   // Check target for prime proof-of-work
-  uint256ToBN(ctx.bnPrimeChainOrigin, hash);
+  uintToMpz(ctx.bnPrimeChainOrigin, hash);
+  // ctx.bnPrimeChainOrigin = uintToMpz(hash);
+
+  // uint256ToBN(ctx.bnPrimeChainOrigin, hash);
   mpz_mul(ctx.bnPrimeChainOrigin, ctx.bnPrimeChainOrigin, header.bnPrimeChainMultiplier.get_mpz_t());
 
   auto bnPrimeChainOriginBitSize = mpz_sizeinbase(ctx.bnPrimeChainOrigin, 2);

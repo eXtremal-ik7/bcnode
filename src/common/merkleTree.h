@@ -5,17 +5,17 @@
 
 #pragma once
 
-#include "common/uint256.h"
+#include "common/baseBlob.h"
 #include <memory>
 
-uint256 calculateMerkleRoot(uint256 *hashes, size_t size);
-uint256 calculateMerkleRoot(uint256 hash, uint256 *tree, size_t treeSize, size_t index);
+BaseBlob<256> calculateMerkleRoot(BaseBlob<256> *hashes, size_t size);
+BaseBlob<256> calculateMerkleRoot(BaseBlob<256> hash, BaseBlob<256> *tree, size_t treeSize, size_t index);
 
 template<typename BlockTy>
-uint256 calculateBlockMerkleRoot(const BlockTy &block)
+BaseBlob<256> calculateBlockMerkleRoot(const BlockTy &block)
 {
   size_t txNum = block.vtx.size();
-  std::unique_ptr<uint256[]> hashes(new uint256[txNum]);
+  std::unique_ptr<BaseBlob<256>[]> hashes(new BaseBlob<256>[txNum]);
 
   // Get hashes for all transactions
   for (size_t i = 0; i < txNum; i++)
@@ -25,14 +25,14 @@ uint256 calculateBlockMerkleRoot(const BlockTy &block)
 }
 
 template<typename BlockTy>
-uint256 calculateBlockWitnessMerkleRoot(const BlockTy &block)
+BaseBlob<256> calculateBlockWitnessMerkleRoot(const BlockTy &block)
 {
   size_t txNum = block.vtx.size();
-  std::unique_ptr<uint256[]> hashes(new uint256[txNum]);
+  std::unique_ptr<BaseBlob<256>[]> hashes(new BaseBlob<256>[txNum]);
 
   // Get hashes for all transactions
   if (txNum >= 1)
-    hashes[0].SetNull();
+    hashes[0].setNull();
   for (size_t i = 1; i < txNum; i++)
     hashes[i] = block.vtx[i].getWTxid();
 

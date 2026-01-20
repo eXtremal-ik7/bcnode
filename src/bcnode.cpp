@@ -125,7 +125,7 @@ void printHelpMessage()
 
   puts("bcnode options");
   puts("  --help:\t\tprint this message");
-  fprintf(stdout, "  --datadir:\t\tpath of data directory (default: %s)\n", defaultPath.u8string().c_str());
+  fprintf(stdout, "  --datadir:\t\tpath of data directory (default: %s)\n", defaultPath.c_str());
   puts("  --network:\t\tnetwork name (main, testnet, etc)");
   puts("  --reindex:\t\trebuild block index");
   puts("  --resync:\t\tdelete whole database and re-download it (not supported now)");
@@ -236,7 +236,7 @@ int main(int argc, char **argv)
     context.BlockIndex.blockHeightIndex().insert(std::pair(0, genesisIndex));
     context.BlockIndex.setGenesis(genesisIndex, context.ChainParams.GenesisBlock);
     context.BlockIndex.setBest(genesisIndex);
-    LOG_F(INFO, "Adding genesis block %s", hash.ToString().c_str());
+    LOG_F(INFO, "Adding genesis block %s", hash.getHexLE().c_str());
   }
 
   {
@@ -253,14 +253,14 @@ int main(int argc, char **argv)
     context.DataDir.append(gNetwork);
     std::filesystem::create_directories(context.DataDir);
     auto debugPath = context.DataDir / "debug.log";
-    loguru::add_file(debugPath.u8string().c_str(), loguru::Append, loguru::Verbosity_INFO);
+    loguru::add_file(debugPath.c_str(), loguru::Append, loguru::Verbosity_INFO);
     if (!gWatchLog)
       loguru::g_stderr_verbosity = loguru::Verbosity_ERROR;
-    LOG_F(INFO, "Using %s as data directory", context.DataDir.u8string().c_str());
+    LOG_F(INFO, "Using %s as data directory", context.DataDir.c_str());
 
     if (!std::filesystem::exists(context.DataDir)) {
       if (!std::filesystem::create_directories(context.DataDir)) {
-        LOG_F(ERROR, "Can't create data directory %s", context.DataDir.u8string().c_str());
+        LOG_F(ERROR, "Can't create data directory %s", context.DataDir.c_str());
         return 1;
       }
     }
@@ -285,7 +285,7 @@ int main(int argc, char **argv)
   bool archiveEnabled = false;
   if (std::filesystem::exists(configPath)) {
     try {
-      cfg->parse(configPath.u8string().c_str());
+      cfg->parse(configPath.c_str());
 
       cfg->lookupList("bcnode", "addNode", addNode, config4cpp::StringVector());
       cfg->lookupList("bcnode", "forceNode", forceNode, config4cpp::StringVector());

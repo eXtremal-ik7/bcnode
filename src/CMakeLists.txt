@@ -7,7 +7,7 @@ cxxpm_initialize(
 cmake_minimum_required(VERSION 3.11)
 project(bcnode)
 
-set (CMAKE_CXX_STANDARD 17)
+set (CMAKE_CXX_STANDARD 20)
 option(SANITIZER_ENABLED "Build with address sanitizer" OFF)
 option(PROFILE_ENABLED "Build for profiling" OFF)
 option(ASSERTS_ENABLED "Build Release/RelWithDebInfo with asserts" OFF)
@@ -89,12 +89,9 @@ include_directories(
 
 add_library(bcnodecommon STATIC
   loguru.cpp
-  common/arith_uint256.cpp
   common/base58.cpp
-  common/bigNum.cpp
   common/file.cpp
   common/serializedDataCache.cpp
-  common/uint256.cpp
   common/utils.cpp
 )
 

@@ -86,9 +86,9 @@ bool validateWitnessCommitment(const BlockTy &block, bool &hasWitness, std::stri
   const uint8_t *witnessNonce = coinbaseTxIn.witnessStack[0].data();
 
   // Calculate witness merkle root
-  uint256 witnessMerkleRoot = calculateBlockWitnessMerkleRoot(block);
+  BaseBlob<256> witnessMerkleRoot = calculateBlockWitnessMerkleRoot(block);
   // Calculate witness commitment
-  uint256 commitment;
+  BaseBlob<256> commitment;
   {
     CCtxSha256 ctx;
     sha256Init(&ctx);

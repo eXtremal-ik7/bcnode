@@ -5,6 +5,7 @@
 
 #include "ltc.h"
 #include "crypto/scrypt.h"
+#include "common/serializeUtils.h"
 #include "common/utils.h"
 
 namespace LTC {
@@ -21,7 +22,7 @@ bool setupChainParams(ChainParams *params, const char *network)
 
     params->PublicKeyPrefix = {48};
 
-    params->powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    params->powLimit = UInt<256>::fromHex("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     // Soft & hard forks
     params->BIP34Height = 710000;
@@ -29,7 +30,7 @@ bool setupChainParams(ChainParams *params, const char *network)
 
     {
       params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.hashPrevBlock.setNull();
       params->GenesisBlock.header.nTime = 1317972665;
       params->GenesisBlock.header.nBits = 0x1e0ffff0;
       params->GenesisBlock.header.nNonce = 2084524493;
@@ -40,7 +41,7 @@ bool setupChainParams(ChainParams *params, const char *network)
 
       tx.txIn.resize(1);
       tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputHash.setNull();
       tx.txIn[0].previousOutputIndex = -1;
       xmstream scriptSig;
       BTC::serialize(scriptSig, static_cast<uint8_t>(0x04));
@@ -84,7 +85,7 @@ bool setupChainParams(ChainParams *params, const char *network)
 
     params->PublicKeyPrefix = {111};
 
-    params->powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    params->powLimit = UInt<256>::fromHex("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     // Soft & hard forks
     params->BIP34Height = 76;
@@ -92,7 +93,7 @@ bool setupChainParams(ChainParams *params, const char *network)
 
     {
       params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.hashPrevBlock.setNull();
       params->GenesisBlock.header.nTime = 1486949366;
       params->GenesisBlock.header.nBits = 0x1e0ffff0;
       params->GenesisBlock.header.nNonce = 293345;
@@ -104,7 +105,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       xmstream scriptSig;
       tx.txIn.resize(1);
       tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputHash.setNull();
       tx.txIn[0].previousOutputIndex = -1;
       BTC::serialize(scriptSig, static_cast<uint8_t>(0x04));
       BTC::serialize(scriptSig, static_cast<uint32_t>(486604799));
@@ -140,7 +141,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->networkId = NetworkIdRegtest;
     params->magic = 0xDAB5BFFA;
 
-    params->powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    params->powLimit = UInt<256>::fromHex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     // Soft & hard forks
     params->BIP34Height = 500;
@@ -156,36 +157,35 @@ bool setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, uint256 &powLimit)
+bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, const UInt<256> &powLimit)
 {
-  uint256 scryptHash;
-  scrypt_1024_1_1_256(&header, scryptHash.begin());
+  UInt<256> scryptHash;
+  scrypt_1024_1_1_256(&header, reinterpret_cast<uint8_t*>(scryptHash.data()));
+  for (unsigned i = 0; i < 4; i++)
+    scryptHash.data()[i] = readle(scryptHash.data()[i]);
 
   bool fNegative;
   bool fOverflow;
-  arith_uint256 bnTarget;
-
-  bnTarget.SetCompact(nBits, &fNegative, &fOverflow);
+  UInt<256> bnTarget = uint256Compact(nBits, &fNegative, &fOverflow);
 
   // Check range
-  if (fNegative || bnTarget == 0 || fOverflow || bnTarget > UintToArith256(powLimit))
+  if (fNegative || bnTarget == 0 || fOverflow || bnTarget > powLimit)
       return false;
 
   // Check proof of work matches claimed amount
-  if (UintToArith256(scryptHash) > bnTarget)
+  if (scryptHash > bnTarget)
       return false;
 
   return true;
 }
 
-arith_uint256 GetBlockProof(const Proto::BlockHeader &header)
+UInt<256> GetBlockProof(const Proto::BlockHeader &header)
 {
-  arith_uint256 bnTarget;
   bool fNegative;
   bool fOverflow;
-  bnTarget.SetCompact(header.nBits, &fNegative, &fOverflow);
+  UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
   if (fNegative || fOverflow || bnTarget == 0)
-      return 0;
+    return 0;
   // We need to compute 2**256 / (bnTarget+1), but we can't represent 2**256
   // as it's too large for an arith_uint256. However, as 2**256 is at least as large
   // as bnTarget+1, it is equal to ((2**256 - bnTarget - 1) / (bnTarget+1)) + 1,

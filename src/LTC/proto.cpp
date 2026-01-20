@@ -9,7 +9,7 @@
 namespace LTC {
 Proto::BlockHashTy Proto::Transaction::getTxId() const
 {
-  uint256 result;
+  BaseBlob<256> result;
   uint8_t buffer[4096];
   xmstream stream(buffer, sizeof(buffer));
   stream.reset();
@@ -27,7 +27,7 @@ Proto::BlockHashTy Proto::Transaction::getTxId() const
 
 Proto::BlockHashTy Proto::Transaction::getWTxid() const
 {
-  uint256 result;
+  BaseBlob<256> result;
   uint8_t buffer[4096];
   xmstream stream(buffer, sizeof(buffer));
   stream.reset();

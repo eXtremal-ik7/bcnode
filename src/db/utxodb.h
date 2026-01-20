@@ -18,7 +18,7 @@ template<>
 class std::hash<CUnspentOutputKey> {
 public:
   size_t operator()(const CUnspentOutputKey &key) const noexcept {
-    return key.Tx.GetUint64(0) + key.Tx.GetUint64(1) * key.Index + key.Tx.GetUint64(2) * key.Index + key.Tx.GetUint64(3) * key.Index;
+    return key.Tx.get64(0) + key.Tx.get64(1) * key.Index + key.Tx.get64(2) * key.Index + key.Tx.get64(3) * key.Index;
   }
 };
 

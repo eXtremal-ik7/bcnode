@@ -5,6 +5,8 @@
 
 #include "blockDataBase.h"
 #include "db/storage.h"
+#include "common/fopen.h"
+#include "common/serializeUtils.h"
 #include <asyncio/asyncio.h>
 #include <p2putils/coreTypes.h>
 #include <p2putils/xmstream.h>
@@ -95,8 +97,8 @@ bool initializeLinkedOutputsContextual(BC::Proto::CBlockLinkedOutputs &linkedOut
       if (!db.query(txin.previousOutputHash, txin.previousOutputIndex, txinLinked)) {
         LOG_F(ERROR,
               " * Transaction %s refers non-existing utxo %s:%u",
-              tx.getTxId().GetHex().c_str(),
-              txin.previousOutputHash.GetHex().c_str(),
+              tx.getTxId().getHexLE().c_str(),
+              txin.previousOutputHash.getHexLE().c_str(),
               txin.previousOutputIndex);
         // exit(1);
         return false;
@@ -186,7 +188,7 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
   if (!linkedOutputs.AllOutputsFound && !initializeLinkedOutputsContextual(linkedOutputs, block, storage.utxodb())) {
     LOG_F(ERROR,
           "Block %s validation failed (non-existent utxo)",
-          block.header.GetHash().GetHex().c_str());
+          block.header.GetHash().getHexLE().c_str());
     return false;
   }
 
@@ -195,7 +197,7 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
     return false;
 
   if (!silent)
-    LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().ToString().c_str(), index->Height);
+    LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
   index->Prev->Next = index;
   blockIndex.blockHeightIndex()[index->Height] = index;
   storage.add(BC::DB::Connect, index, block, linkedOutputs, blockIndex);
@@ -211,7 +213,7 @@ static void DisconnectBlock(BlockInMemoryIndex &blockIndex,
     bool silent = true)
 {
   if (!silent)
-    LOG_F(INFO, "Disconnect block %s (%u)", index->Header.GetHash().ToString().c_str(), index->Height);
+    LOG_F(INFO, "Disconnect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
   index->Prev->Next = nullptr;
   blockIndex.blockHeightIndex()[index->Height] = nullptr;
   storage.add(BC::DB::Disconnect, index, block, linkedOutputs, blockIndex);
@@ -294,7 +296,7 @@ static intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndexChecked(BC::Com
 {
   auto object = objectByIndex(index, blockDb);
   if (!object.get()) {
-    LOG_F(ERROR, "Block index corrupted, failed to load block [%u]%s", index->Height, index->Header.GetHash().GetHex().c_str());
+    LOG_F(ERROR, "Block index corrupted, failed to load block [%u]%s", index->Height, index->Header.GetHash().getHexLE().c_str());
     abort();
   }
 
@@ -439,7 +441,7 @@ BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex, BC::Common::Ch
 
   // Check consensus (such as PoW)
   if (!BC::Common::checkConsensus(header, ccCtx, chainParams)) {
-    LOG_F(ERROR, "Check Proof-Of-Work failed for block %s", hash.ToString().c_str());
+    LOG_F(ERROR, "Check Proof-Of-Work failed for block %s", hash.getHexLE().c_str());
     return nullptr;
   }
 
@@ -507,7 +509,7 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
         // Locked header
         alreadyHaveHeader = true;
       } else {
-        LOG_F(WARNING, "Already have block %s (%u)", hash.ToString().c_str(), index->Height);
+        LOG_F(WARNING, "Already have block %s (%u)", hash.getHexLE().c_str(), index->Height);
         return index;
       }
     }
@@ -518,7 +520,7 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
   if (!alreadyHaveHeader) {
     // Check consensus (such as PoW)
     if (!BC::Common::checkConsensus(block->header, ccCtx, chainParams)) {
-      LOG_F(ERROR, "Check Proof-Of-Work failed for block %s", hash.ToString().c_str());
+      LOG_F(ERROR, "Check Proof-Of-Work failed for block %s", hash.getHexLE().c_str());
       return nullptr;
     }
   }
@@ -530,7 +532,7 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
   std::string error;
   unsigned blockGeneration = BC::Common::checkBlockStandalone(*block, serialized->validationData(), chainParams, error);
   if (blockGeneration == 0) {
-    LOG_F(WARNING, "block %s check failed, error: %s", block->header.GetHash().ToString().c_str(), error.c_str());
+    LOG_F(WARNING, "block %s check failed, error: %s", block->header.GetHash().getHexLE().c_str(), error.c_str());
     return nullptr;
   }
 
@@ -561,7 +563,7 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
         // Locked header
         alreadyHaveHeader = true;
       } else {
-        LOG_F(WARNING, "Already have block %s (%u)", hash.ToString().c_str(), index->Height);
+        LOG_F(WARNING, "Already have block %s (%u)", hash.getHexLE().c_str(), index->Height);
         return index;
       }
     } else {
@@ -649,7 +651,7 @@ static bool loadBlockIndexDeserializer(BlockInMemoryIndex &blockIndex, LoadingIn
     // Quick check of presence block on disk
     if (!(index->FileNo <= blockFileSizes.size() &&
           index->FileOffset < blockFileSizes[index->FileNo])) {
-      LOG_F(ERROR, "Index loader: no block data on disk for %s", index->Header.GetHash().ToString().c_str());
+      LOG_F(ERROR, "Index loader: no block data on disk for %s", index->Header.GetHash().getHexLE().c_str());
       return false;
     }
 
@@ -713,14 +715,14 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
 
     if (indexFileSize) {
       // Read index file
-      std::unique_ptr<FILE, std::function<void(FILE*)>> hFile(fopen(path.u8string().c_str(), "rb"), [](FILE *f) { fclose(f); });
+      std::unique_ptr<FILE, std::function<void(FILE*)>> hFile(fopen_path(path, "rb"), [](FILE *f) { fclose(f); });
       if (!hFile.get()) {
-        LOG_F(ERROR, "Can't open index file %s", path.u8string().c_str());
+        LOG_F(ERROR, "Can't open index file %s", path.c_str());
         return false;
       }
 
       if (fread(data.get(), indexFileSize, 1, hFile.get()) != 1) {
-        LOG_F(ERROR, "Can't read index file %s", path.u8string().c_str());
+        LOG_F(ERROR, "Can't read index file %s", path.c_str());
         return false;
       }
     }
@@ -732,7 +734,7 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
         uint32_t size;
         BC::unserialize(stream, size);
         if (!size || size > stream.remaining()) {
-          LOG_F(ERROR, "Invalid index size %u detected in file %s", size, path.u8string().c_str());
+          LOG_F(ERROR, "Invalid index size %u detected in file %s", size, path.c_str());
           return false;
         }
 
@@ -753,7 +755,7 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
       size_t off = offset;
       size_t size = workLoad + (i < workLoadExtra);
       offset += size;
-      workers[i] = std::async(std::launch::async, loadBlockIndexDeserializer, std::ref(blockIndex), std::ref(loadingIndexContext[i]), std::ref(blockFileSizes), &offsets[0] + off, size, path.u8string().c_str());
+      workers[i] = std::async(std::launch::async, loadBlockIndexDeserializer, std::ref(blockIndex), std::ref(loadingIndexContext[i]), std::ref(blockFileSizes), &offsets[0] + off, size, path.c_str());
     }
 
     for (unsigned i = 0; i < threadsNum; i++) {
@@ -784,7 +786,7 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
   if (blocksNum == 0)
     bestIndex = blockIndex.genesis();
 
-  LOG_F(INFO, "Found best index: %s (%u)", bestIndex->Header.GetHash().ToString().c_str(), bestIndex->Height);
+  LOG_F(INFO, "Found best index: %s (%u)", bestIndex->Header.GetHash().getHexLE().c_str(), bestIndex->Height);
   LOG_F(INFO, "Restore best chain...");
 
   BC::Common::BlockIndex *index = bestIndex;
@@ -792,9 +794,9 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
     if (index->Prev->Height != index->Height-1) {
       LOG_F(ERROR,
             "Index loader: block %s (%u) have invalid previous block %s with height %u",
-            index->Header.GetHash().ToString().c_str(),
+            index->Header.GetHash().getHexLE().c_str(),
             index->Height,
-            index->Prev->Header.GetHash().ToString().c_str(),
+            index->Prev->Header.GetHash().getHexLE().c_str(),
             index->Prev->Height);
       return false;
     }
@@ -808,9 +810,9 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
   if (index != blockIndex.genesis()) {
     LOG_F(ERROR, "Index for [%u]%s is broken (breaks at [%u]%s",
           bestIndex->Height,
-          bestIndex->Header.GetHash().GetHex().c_str(),
+          bestIndex->Header.GetHash().getHexLE().c_str(),
           index->Height,
-          index->Header.GetHash().GetHex().c_str());
+          index->Header.GetHash().getHexLE().c_str());
     return false;
   }
 
@@ -850,7 +852,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
 
     {
       // Read block file
-      std::unique_ptr<FILE, std::function<void(FILE*)>> hFile(fopen(path.u8string().c_str(), "rb"), [](FILE *f) { fclose(f); });
+      std::unique_ptr<FILE, std::function<void(FILE*)>> hFile(fopen_path(path, "rb"), [](FILE *f) { fclose(f); });
       if (!hFile.get()) {
         LOG_F(ERROR, "Can't open block file %s", path.c_str());
         // storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
@@ -896,7 +898,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
       size_t off = blockOffset;
       size_t size = workLoad + (i < workLoadExtra);
       blockOffset += size;
-      workers[i] = std::async(std::launch::async, loadBlocks, std::ref(blockIndex), std::ref(chainParams), std::ref(storage), path.u8string().c_str(), data.get(), &blockOffsets[0] + off, size, blkFileIndex);
+      workers[i] = std::async(std::launch::async, loadBlocks, std::ref(blockIndex), std::ref(chainParams), std::ref(storage), path.c_str(), data.get(), &blockOffsets[0] + off, size, blkFileIndex);
     }
 
     for (unsigned i = 0; i < threadsNum; i++) {
@@ -911,7 +913,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
           path.c_str(),
           storage.cache().size() / 1048576.0f,
           blockIndex.best()->Height,
-          blockIndex.best()->Header.GetHash().GetHex().c_str());
+          blockIndex.best()->Header.GetHash().getHexLE().c_str());
 
     totalBlockCount += blockOffsets.size();
     blkFileIndex++;
@@ -919,7 +921,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
 
   auto best = blockIndex.best();
   LOG_F(INFO, "%zu blocks loaded from disk", totalBlockCount);
-  LOG_F(INFO, "Best block is %s (%u)", best->Header.GetHash().ToString().c_str(), best->Height);
+  LOG_F(INFO, "Best block is %s (%u)", best->Header.GetHash().getHexLE().c_str(), best->Height);
   return true;
 }
 
@@ -1222,7 +1224,7 @@ void BlockBulkReader::fetchPending()
       LOG_F(ERROR,
             "BlockBulkReader: can't unserialize block [%u]%s",
             Indexes_[i]->Height,
-            Indexes_[i]->Header.GetHash().GetHex().c_str());
+            Indexes_[i]->Header.GetHash().getHexLE().c_str());
       ErrorHandler_();
       return;
     }
@@ -1232,7 +1234,7 @@ void BlockBulkReader::fetchPending()
       LOG_F(ERROR,
             "BlockBulkReader: can't unserialize linked outputs for block [%u]%s",
             Indexes_[i]->Height,
-            Indexes_[i]->Header.GetHash().GetHex().c_str());
+            Indexes_[i]->Header.GetHash().getHexLE().c_str());
       operator delete(block);
       ErrorHandler_();
       return;

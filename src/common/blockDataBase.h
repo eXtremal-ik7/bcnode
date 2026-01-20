@@ -61,7 +61,7 @@ class BlockInMemoryIndex {
 public:
   BlockInMemoryIndex() {}
 
-  BC::Common::BlockIndex *best() { return BestIndex_.load(std::memory_order::memory_order_relaxed); }
+  BC::Common::BlockIndex *best() { return BestIndex_.load(std::memory_order_relaxed); }
   BC::Common::BlockIndex *genesis() { return GenesisIndex_; }
   BC::Proto::Block &genesisBlock() { return GenesisBlock_; }
   void setBest(BC::Common::BlockIndex *index) { BestIndex_.store(index); }

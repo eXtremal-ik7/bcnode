@@ -1,6 +1,6 @@
 #pragma once
 #include "rapidjson/document.h"
-#include "common/uint256.h"
+#include "common/baseBlob.h"
 #include <optional>
 
 static inline uint8_t hexParse(char c)
@@ -32,10 +32,10 @@ static inline bool hexParse(uint8_t *out, const rapidjson::GenericValue<rapidjso
   return true;
 }
 
-template<unsigned BITS>
+template<unsigned Bits>
 static inline void jsonParseBaseBlob(rapidjson::Value &document,
                                      const char *name,
-                                     base_blob<BITS> &out,
+                                     BaseBlob<Bits> &out,
                                      bool *validAcc,
                                      std::string &errorPoint)
 {
@@ -47,7 +47,7 @@ static inline void jsonParseBaseBlob(rapidjson::Value &document,
   }
 
   const auto &field = document[name];
-  if (!field.IsString() || !hexParse(out.begin(), field, BITS/8)) {
+  if (!field.IsString() || !hexParse(out.begin(), field, Bits/8)) {
     *validAcc = false;
     if (errorPoint.empty())
       errorPoint = name;
@@ -55,11 +55,11 @@ static inline void jsonParseBaseBlob(rapidjson::Value &document,
   }
 }
 
-template<unsigned BITS>
+template<unsigned Bits>
 static inline void jsonParseBaseBlob(rapidjson::Value &document,
                                      const char *name,
-                                     base_blob<BITS> &out,
-                                     const base_blob<BITS> &defaultValue,
+                                     BaseBlob<Bits> &out,
+                                     const BaseBlob<Bits> &defaultValue,
                                      bool *validAcc,
                                      std::string &errorPoint)
 {
@@ -69,7 +69,7 @@ static inline void jsonParseBaseBlob(rapidjson::Value &document,
   }
 
   const auto &field = document[name];
-  if (!field.IsString() || !hexParse(out.begin(), field, BITS/8)) {
+  if (!field.IsString() || !hexParse(out.begin(), field, Bits/8)) {
     *validAcc = false;
     if (errorPoint.empty())
       errorPoint = name;
@@ -77,10 +77,10 @@ static inline void jsonParseBaseBlob(rapidjson::Value &document,
   }
 }
 
-template<unsigned BITS>
+template<unsigned Bits>
 static inline void jsonParseBaseBlob(rapidjson::Value &document,
                                      const char *name,
-                                     std::optional<base_blob<BITS>> &out,
+                                     std::optional<BaseBlob<Bits>> &out,
                                      bool *validAcc,
                                      std::string &errorPoint)
 {
@@ -91,7 +91,7 @@ static inline void jsonParseBaseBlob(rapidjson::Value &document,
 
   out.emplace();
   const auto &field = document[name];
-  if (!field.IsString() || !hexParse(out.value().begin(), field, BITS/8)) {
+  if (!field.IsString() || !hexParse(out.value().begin(), field, Bits/8)) {
     *validAcc = false;
     if (errorPoint.empty())
       errorPoint = name;

@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "common/uint256.h"
+#include "common/baseBlob.h"
 #include "loguru.hpp"
 
 std::string real_strprintf(const std::string &format, int dummy, ...);
@@ -19,10 +19,10 @@ bool parseMoneyValue(const char *value, const int64_t rationalPartSize, int64_t 
 template<typename X>
 static inline void genesis_block_hash_assert_eq(const typename X::Proto::BlockHeader &header, const char *targetHash)
 {
-  uint256 hash;
-  hash.SetHex(targetHash);
+  BaseBlob<256> hash;
+  hash.setHexLE(targetHash);
   if (header.GetHash() != hash) {
-    LOG_F(ERROR, "Genesis block hash mismatch, expected: %s, got %s", targetHash, header.GetHash().ToString().c_str());
+    LOG_F(ERROR, "Genesis block hash mismatch, expected: %s, got %s", targetHash, header.GetHash().getHexLE().c_str());
     abort();
   }
 } 

@@ -6,6 +6,7 @@
 #include "btc.h"
 #include "validation.h"
 #include "common/merkleTree.h"
+#include "common/serializeUtils.h"
 #include "common/utils.h"
 #include <p2putils/xmstream.h>
 
@@ -25,7 +26,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->ScriptPrefix = {5};
     params->SecretKeyPrefix = {128};
 
-    params->powLimit.SetHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    params->powLimit.setHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     // Soft & hard forks
     params->BIP34Height = 227931;
@@ -34,7 +35,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     {
       // Genesis block
       params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.hashPrevBlock.setNull();
       params->GenesisBlock.header.nTime = 1231006505;
       params->GenesisBlock.header.nBits = 0x1d00ffff;
       params->GenesisBlock.header.nNonce = 2083236893;
@@ -46,7 +47,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       xmstream scriptSig;
       tx.txIn.resize(1);
       tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputHash.setNull();
       tx.txIn[0].previousOutputIndex = -1;
       serialize(scriptSig, static_cast<uint8_t>(0x04));
       serialize(scriptSig, static_cast<uint32_t>(486604799));
@@ -95,7 +96,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->ScriptPrefix = {196};
     params->SecretKeyPrefix = {239};
 
-    params->powLimit.SetHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    params->powLimit.setHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     // Soft & hard forks
     params->BIP34Height = 21111;
@@ -104,7 +105,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     {
       // Genesis block
       params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.hashPrevBlock.setNull();
       params->GenesisBlock.header.nTime = 1296688602;
       params->GenesisBlock.header.nBits = 0x1d00ffff;
       params->GenesisBlock.header.nNonce = 414098458;
@@ -116,7 +117,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       xmstream scriptSig;
       tx.txIn.resize(1);
       tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputHash.setNull();
       tx.txIn[0].previousOutputIndex = -1;
       serialize(scriptSig, static_cast<uint8_t>(0x04));
       serialize(scriptSig, static_cast<uint32_t>(486604799));
@@ -163,7 +164,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->ScriptPrefix = {196};
     params->SecretKeyPrefix = {239};
 
-    params->powLimit.SetHex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    params->powLimit.setHex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     // Soft & hard forks
     params->BIP34Height = 500;
@@ -172,7 +173,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     {
       // Genesis block
       params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.hashPrevBlock.setNull();
       params->GenesisBlock.header.nTime = 1296688602;
       params->GenesisBlock.header.nBits = 0x207fffff;
       params->GenesisBlock.header.nNonce = 2;
@@ -182,7 +183,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       tx.lockTime = 0;
       tx.txIn.resize(1);
       tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputHash.setNull();
       tx.txIn[0].previousOutputIndex = -1;
       xmstream scriptSig;
       serialize(scriptSig, static_cast<uint8_t>(0x04));
@@ -218,12 +219,11 @@ bool setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-arith_uint256 GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams&)
-{
-  arith_uint256 bnTarget;
+UInt<256> GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams&)
+{ 
   bool fNegative;
   bool fOverflow;
-  bnTarget.SetCompact(header.nBits, &fNegative, &fOverflow);
+  UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
   if (fNegative || fOverflow || bnTarget == 0)
       return 0;
   // We need to compute 2**256 / (bnTarget+1), but we can't represent 2**256
@@ -238,16 +238,14 @@ bool checkConsensus(const BTC::Proto::BlockHeader &header, CheckConsensusCtx&, B
 {
   bool fNegative;
   bool fOverflow;
-  arith_uint256 bnTarget;
-
-  bnTarget.SetCompact(header.nBits, &fNegative, &fOverflow);
+  UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
 
   // Check range
-  if (fNegative || bnTarget == 0 || fOverflow || bnTarget > UintToArith256(chainParams.powLimit))
+  if (fNegative || bnTarget == 0 || fOverflow || bnTarget > chainParams.powLimit)
     return false;
 
   // Check proof of work matches claimed amount
-  if (UintToArith256(header.GetHash()) > bnTarget)
+  if (header.GetHashAsInteger() > bnTarget)
     return false;
 
   return true;

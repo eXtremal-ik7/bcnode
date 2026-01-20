@@ -436,7 +436,7 @@ void BC::Network::HttpApiConnection::onSystemHealth(rapidjson::Document&)
       JSON::Object node(stream);
       node.addBoolean("connected", Node_->PeerCount() > 0);
       node.addInt("best_block_height", BlockIndex_.best()->Height);
-      node.addString("best_block_hash", BlockIndex_.best()->Header.GetHash().ToString());
+      node.addString("best_block_hash", BlockIndex_.best()->Header.GetHash().getHexLE());
     }
     object.addInt("time", time(nullptr));
   }
@@ -457,7 +457,7 @@ void BC::Network::HttpApiConnection::onSystemSummary(rapidjson::Document&)
     object.addString("symbol", BC::Configuration::TickerName);
     object.addNull("chain");
     object.addInt("best_block_height", BlockIndex_.best()->Height);
-    object.addString("best_block_hash", BlockIndex_.best()->Header.GetHash().ToString());
+    object.addString("best_block_hash", BlockIndex_.best()->Header.GetHash().getHexLE());
     object.addNull("difficulty");
     object.addNull("hashrate");
     object.addNull("hashrate_unit");
@@ -512,7 +512,7 @@ void BC::Network::HttpApiConnection::onTxsByTxid(rapidjson::Document &request)
   const BC::Common::BlockIndex *best = BlockIndex_.best();
   BC::Common::BlockIndex *index = BlockIndex_.indexByHash(queryResult.Block);
   if (!index) {
-    replyWithError("BLOCK_NOT_FOUND", "", "", queryResult.Block.GetHex());
+    replyWithError("BLOCK_NOT_FOUND", "", "", queryResult.Block.getHexLE());
     return;
   }
 
@@ -644,19 +644,19 @@ void BC::Network::HttpApiConnection::serializeBlock(xmstream &stream,
 
   JSON::Object blockObject(stream);
   blockObject.addInt("height", index->Height);
-  blockObject.addString("hash", hash.GetHex());
+  blockObject.addString("hash", hash.getHexLE());
   if (index->Prev)
-    blockObject.addString("previous_hash", index->Prev->Header.GetHash().GetHex());
+    blockObject.addString("previous_hash", index->Prev->Header.GetHash().getHexLE());
   else
     blockObject.addNull("previous_hash");
 
   if (index->Next)
-    blockObject.addString("next_hash", index->Next->Header.GetHash().GetHex());
+    blockObject.addString("next_hash", index->Next->Header.GetHash().getHexLE());
   else
     blockObject.addNull("next_hash");
 
   blockObject.addInt("timestamp", index->Header.nTime);
-  blockObject.addString("merkle_root", index->Header.hashMerkleRoot.GetHex());
+  blockObject.addString("merkle_root", index->Header.hashMerkleRoot.getHexLE());
   blockObject.addInt("version", index->Header.nVersion);
   blockObject.addString("bits", bin2hexLowerCase(&bits, sizeof(bits)));
   blockObject.addInt("nonce", index->Header.nNonce);
@@ -700,9 +700,9 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
     fee = valueIn - valueOut;
   }
 
-  txObject.addString("txid", tx.getTxId().GetHex());
-  txObject.addString("hash", tx.getWTxid().GetHex());
-  txObject.addString("block_hash", index->Header.GetHash().GetHex());
+  txObject.addString("txid", tx.getTxId().getHexLE());
+  txObject.addString("hash", tx.getWTxid().getHexLE());
+  txObject.addString("block_hash", index->Header.GetHash().getHexLE());
   txObject.addInt("block_height", index->Height);
   txObject.addInt("timestamp", index->Header.nTime);
   txObject.addInt("size_bytes", tx.SerializedDataSize);
@@ -736,7 +736,7 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
       inputsArray.addField();
       {
         JSON::Object inputObject(stream);
-        inputObject.addString("txid", txin.previousOutputHash.GetHex());
+        inputObject.addString("txid", txin.previousOutputHash.getHexLE());
         inputObject.addInt("vout_index", txin.previousOutputIndex);
         if (!address58.empty())
           inputObject.addString("address", address58);

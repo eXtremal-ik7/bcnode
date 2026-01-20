@@ -90,7 +90,7 @@ namespace Common {
   void initialize();
   static inline bool hasWitness() { return false; }
 
-  arith_uint256 GetBlockProof(const XPM::Proto::BlockHeader &header, const ChainParams &chainParams);
+  UInt<256> GetBlockProof(const XPM::Proto::BlockHeader &header, const ChainParams &chainParams);
 
   // Consensus (PoW)
   void checkConsensusInitialize(CheckConsensusCtx &ctx);

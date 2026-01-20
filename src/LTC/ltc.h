@@ -61,10 +61,10 @@ namespace Common {
 
   unsigned getBlockGeneration(const ChainParams &chainParams, LTC::Common::BlockIndex *index);
 
-  bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx &, uint256 &powLimit);
-  arith_uint256 GetBlockProof(const Proto::BlockHeader &header);
+  bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx &, const UInt<256> &powLimit);
+  UInt<256> GetBlockProof(const Proto::BlockHeader &header);
 
-  static inline arith_uint256 GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) { return GetBlockProof(header); }
+  static inline UInt<256> GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) { return GetBlockProof(header); }
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
   static inline bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) { return checkPow(header, header.nBits, ctx, chainParams.powLimit); }
 

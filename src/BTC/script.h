@@ -60,8 +60,8 @@ public:
 
     union {
       uint8_t PubKeyCompressed[33];
-      uint160 PubKeyHash;
-      uint160 ScriptHash;
+      BaseBlob<160> PubKeyHash;
+      BaseBlob<160> ScriptHash;
       uint8_t CustomData[1];
     };
 

@@ -65,10 +65,10 @@ public:
     Offset_ -= std::min(Offset_, size);
   }
 
-  uint64_t generationId() { return GenerationId_.load(std::memory_order::memory_order_seq_cst); }
+  uint64_t generationId() { return GenerationId_.load(std::memory_order_seq_cst); }
 
   void reset() {
-    GenerationId_.fetch_add(1, std::memory_order::memory_order_seq_cst);
+    GenerationId_.fetch_add(1, std::memory_order_seq_cst);
     Offset_ = 0;
   }
 

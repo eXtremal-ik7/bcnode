@@ -86,9 +86,9 @@ void BlockSource::processTask(TaskHP *task)
     if (!stalledBlocks.empty())
       LOG_F(INFO, "Retry download %zu blocks in range %s(%u): %s(%u)",
             stalledBlocks.size(),
-            stalledBlocks.front()->Header.GetHash().ToString().c_str(),
+            stalledBlocks.front()->Header.GetHash().getHexLE().c_str(),
             stalledBlocks.front()->Height,
-            stalledBlocks.back()->Header.GetHash().ToString().c_str(),
+            stalledBlocks.back()->Header.GetHash().getHexLE().c_str(),
             stalledBlocks.back()->Height);
 
     for (auto index: stalledBlocks)

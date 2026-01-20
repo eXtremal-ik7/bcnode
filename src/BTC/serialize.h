@@ -1,9 +1,8 @@
 #pragma once
 
-#include "common/arith_uint256.h"
-#include "common/serializeUtils.h"
+#include "common/baseBlob.h"
+#include "common/uint.h"
 #include "common/xvector.h"
-#include "common/uint256.h"
 #include "p2putils/xmstream.h"
 #include <array>
 #include <string>
@@ -121,21 +120,26 @@ template<> struct Io<bool> {
 };
 
 // Serialization for base_blob (including uint256) types
-template<unsigned int BITS> struct Io<base_blob<BITS>> {
-  static inline size_t getSerializedSize(const base_blob<BITS>&) { return BITS/8; }
+template<unsigned Bits> struct Io<BaseBlob<Bits>> {
+  static inline size_t getSerializedSize(const BaseBlob<Bits>&) { return Bits/8; }
   static inline size_t getUnpackedExtraSize(xmstream &src) {
-    src.seek(BITS/8);
+    src.seek(Bits / 8);
     return 0;
   }
-  static inline void serialize(xmstream &stream, const base_blob<BITS> &data) { stream.write(data.begin(), data.size()); }
-  static inline void unserialize(xmstream &stream, base_blob<BITS> &data) { stream.read(data.begin(), data.size()); }
-  static inline void unpack2(xmstream &src, uint256 *data, uint8_t**) { unserialize(src, *data); }
+  static inline void serialize(xmstream &stream, const BaseBlob<Bits> &data) { stream.write(data.begin(), data.size()); }
+  static inline void unserialize(xmstream &stream, BaseBlob<Bits> &data) { stream.read(data.begin(), data.size()); }
+  static inline void unpack2(xmstream &src, BaseBlob<Bits> *data, uint8_t**) { unserialize(src, *data); }
 };
 
-template<> struct Io<arith_uint256> {
-  static inline size_t getSerializedSize(const arith_uint256&) { return sizeof(uint256); }
-  static inline void serialize(xmstream &stream, const arith_uint256 &data) { stream.write(data.begin(), 32); }
-  static inline void unserialize(xmstream &stream, arith_uint256 &data) { stream.read(data.begin(), 32); }
+template<unsigned Bits> struct Io<UInt<Bits>> {
+  static inline size_t getSerializedSize(const UInt<Bits>&) { return Bits/8; }
+  static inline size_t getUnpackedExtraSize(xmstream &src) {
+    src.seek(Bits / 8);
+    return 0;
+  }
+  static inline void serialize(xmstream &stream, const UInt<Bits> &data) { stream.write(data.data(), Bits / 8); }
+  static inline void unserialize(xmstream &stream, UInt<Bits> &data) { stream.read(data.data(), Bits / 8); }
+  static inline void unpack2(xmstream &src, UInt<Bits> *data, uint8_t**) { unserialize(src, *data); }
 };
 
 // string

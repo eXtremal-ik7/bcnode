@@ -414,7 +414,7 @@ void Peer::onAddr(BC::Proto::MessageAddr &addr)
 
 void Peer::onHeaders(BC::Proto::MessageHeaders &headers)
 {
-  if (!headerChainHeight.IsNull() && !headers.headers.empty() && headers.headers[0].header.hashPrevBlock != headerChainHeight) {
+  if (!headerChainHeight.isNull() && !headers.headers.empty() && headers.headers[0].header.hashPrevBlock != headerChainHeight) {
     LOG_F(INFO, "%s: invalid header sequence received", Name.c_str());
     return;
   } else {
@@ -545,7 +545,7 @@ void Peer::onInv(BC::Proto::MessageInv &inv)
   for (const auto &element: inv.Inventory) {
     switch (element.type) {
       case BC::Proto::InventoryVector::ERROR :
-        LOG_F(WARNING, "Peer %s send error: %s", Name.c_str(), element.hash.ToString().c_str());
+        LOG_F(WARNING, "Peer %s send error: %s", Name.c_str(), element.hash.getHexLE().c_str());
         break;
       case BC::Proto::InventoryVector::MSG_TX :
       case BC::Proto::InventoryVector::MSG_WITNESS_TX :
@@ -958,9 +958,9 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
     // Continue downloading headers
     BC::Proto::BlockHashTy hash = headers.back().header.GetHash();
     BC::Proto::BlockHashTy hashStop;
-    hashStop.SetNull();
+    hashStop.setNull();
     currentPeer->downloadHeaders({hash}, hashStop);
-    LOG_F(INFO, "Continue headers downloading from %s (start from %s)", currentPeer->Name.c_str(), hash.ToString().c_str());
+    LOG_F(INFO, "Continue headers downloading from %s (start from %s)", currentPeer->Name.c_str(), hash.getHexLE().c_str());
 
     // Accept received headers
     BC::Common::CheckConsensusCtx ccCtx;
@@ -979,7 +979,7 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
 
       index = AddHeader(*BlockIndex_, *ChainParams_, header, ccCtx);
       if (!index) {
-        LOG_F(INFO, "%s: invalid header with hash %s received", currentPeer->Name.c_str(), header.GetHash().ToString().c_str());
+        LOG_F(INFO, "%s: invalid header with hash %s received", currentPeer->Name.c_str(), header.GetHash().getHexLE().c_str());
         disconnectPeerFromBlockSource(currentPeer, blockSourcePtr);
         return;
       }
@@ -1051,7 +1051,7 @@ void Node::Sync(Peer *peer, BC::Common::CIndexCacheObject *object, bool schedule
   if ( (index = AddBlock(*BlockIndex_, *ChainParams_, *Storage_, object, ccCtx, callback)) ) {
     BC::Proto::BlockHashTy hash = index->Header.GetHash();
     if (index->Height == std::numeric_limits<uint32_t>::max()) {
-      LOG_F(INFO, "%s: orhpan block %s received, node possible not synchronized", peer->Name.c_str(), hash.ToString().c_str());
+      LOG_F(INFO, "%s: orhpan block %s received, node possible not synchronized", peer->Name.c_str(), hash.getHexLE().c_str());
 
       bool newSourceCreated = false;
       auto blockSource = BlockSources_.head(ThreadsNum_, true, newSourceCreated);
@@ -1076,11 +1076,11 @@ void Node::Sync(Peer *peer, BC::Common::CIndexCacheObject *object, bool schedule
     auto newBest = BlockIndex_->best();
     if (downloadFinished) {
       LOG_F(INFO, "Best chain: %s(%u); Last received: %s(%u); cache: %.3lfM",
-            newBest->Header.GetHash().ToString().c_str(), newBest->Height,
-            index->Header.GetHash().ToString().c_str(), index->Height,
+            newBest->Header.GetHash().getHexLE().c_str(), newBest->Height,
+            index->Header.GetHash().getHexLE().c_str(), index->Height,
             Storage_->cache().size() / 1048576.0f);
     } else if (!scheduledBlock && newBest != oldBest) {
-      LOG_F(INFO, "New best chain: %s(%u)", newBest->Header.GetHash().ToString().c_str(), newBest->Height);
+      LOG_F(INFO, "New best chain: %s(%u)", newBest->Header.GetHash().getHexLE().c_str(), newBest->Height);
     }
   }
 
@@ -1150,7 +1150,7 @@ bool Node::connectPeerToBlockSource(Peer *peer, BlockSource *current, BlockSourc
     if (isProducer) {
       xvector<BC::Proto::BlockHashTy> blockLocator;
       buildBlockLocator(blockLocator, BlockIndex_->best());
-      peer->downloadHeaders(std::move(blockLocator), BC::Proto::BlockHashTy::getNull());
+      peer->downloadHeaders(std::move(blockLocator), BC::Proto::BlockHashTy::zero());
     }
 
     if (peer->startDownloadBlocks())
@@ -1262,7 +1262,7 @@ bool Node::scheduleBlocksDownload(Peer *slave)
   std::vector<BC::Proto::BlockHashTy> hashes;
   for (const auto &index: indexes) {
     auto downloadTime = std::chrono::duration_cast<std::chrono::seconds>(now - index->DownloadingStartTime).count();
-    if (index->IndexState.load(std::memory_order::memory_order_relaxed) == BSHeader &&
+    if (index->IndexState.load(std::memory_order_relaxed) == BSHeader &&
         (index->DownloadingStartTime == TimeUnknown || downloadTime > 8)) {
       index->DownloadingStartTime = now;
       hashes.emplace_back(index->Header.GetHash());

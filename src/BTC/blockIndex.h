@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include "common/arith_uint256.h"
 #include "common/intrusive_ptr.h"
 #include "common/serializedDataCache.h"
 #include "common/serializeJson.h"
@@ -91,7 +90,7 @@ public:
 
   bool OnChain = false;
 
-  arith_uint256 ChainWork;
+  UInt<256> ChainWork;
   atomic_intrusive_ptr<CIndexCacheObject> Serialized;
   // TODO: make union with other field for save memory
   std::chrono::time_point<std::chrono::steady_clock> DownloadingStartTime = std::chrono::time_point<std::chrono::steady_clock>::max();

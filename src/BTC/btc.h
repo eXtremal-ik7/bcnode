@@ -2,7 +2,6 @@
 
 #include "proto.h"
 #include "validation.h"
-#include "common/uint256.h"
 #include <openssl/sha.h>
 #include <string.h>
 #include <stdint.h>
@@ -65,7 +64,7 @@ namespace Common {
     std::vector<const char*> DNSSeeds;
 
     // ...
-    uint256 powLimit;
+    UInt<256> powLimit;
   };
 
   struct CheckConsensusCtx {};
@@ -76,7 +75,7 @@ namespace Common {
   bool setupChainParams(ChainParams *params, const char *network);
   static inline bool hasWitness() { return true; }
 
-  arith_uint256 GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams &chainParams);
+  UInt<256> GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams &chainParams);
 
   // Check functions
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}

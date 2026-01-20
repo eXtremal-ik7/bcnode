@@ -116,22 +116,22 @@ public:
         }
 
         case BC::Proto::InventoryVector::MSG_TX : {
-          write("transaction %s\n", inv.hash.ToString().c_str());
+          write("transaction %s\n", inv.hash.getHexLE().c_str());
           break;
         }
 
         case BC::Proto::InventoryVector::MSG_BLOCK : {
-          write("block %s\n", inv.hash.ToString().c_str());
+          write("block %s\n", inv.hash.getHexLE().c_str());
           break;
         }
 
         case BC::Proto::InventoryVector::MSG_CMPCT_BLOCK : {
-          write("compact block %s\n", inv.hash.ToString().c_str());
+          write("compact block %s\n", inv.hash.getHexLE().c_str());
           break;
         }
 
         case BC::Proto::InventoryVector::MSG_FILTERED_BLOCK : {
-          write("filtered block %s\n", inv.hash.ToString().c_str());
+          write("filtered block %s\n", inv.hash.getHexLE().c_str());
           break;
         }
       }

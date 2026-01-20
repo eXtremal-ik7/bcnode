@@ -4,18 +4,20 @@
 #include <string.h>
 #include <string>
 #include "serialize.h"
-#include "common/uint256.h"
+#include "common/baseBlob.h"
+#include "common/endiantools.h"
+#include "common/uint.h"
 #include "crypto/sha256.h"
+#include <vector>
 #include "../loguru.hpp"
-
 
 namespace BTC {
 class Proto {
 public:
-  using BlockHashTy = ::uint256;
-  using TxHashTy = ::uint256;
-  using AddressTy = ::uint160;
-  using PrivateKeyTy = ::uint256;
+  using BlockHashTy = ::BaseBlob<256>;
+  using TxHashTy = ::BaseBlob<256>;
+  using AddressTy = ::BaseBlob<160>;
+  using PrivateKeyTy = ::BaseBlob<256>;
 
   enum class ServicesTy : uint64_t {
     Network = 1,
@@ -75,14 +77,14 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
 #pragma pack(push, 1)
   struct BlockHeader {
     int32_t nVersion;
-    uint256 hashPrevBlock;
-    uint256 hashMerkleRoot;
+    BaseBlob<256> hashPrevBlock;
+    BaseBlob<256> hashMerkleRoot;
     uint32_t nTime;
     uint32_t nBits;
     uint32_t nNonce;
 
     BlockHashTy GetHash() const {
-      uint256 result;
+      BaseBlob<256> result;
       CCtxSha256 sha256;
       sha256Init(&sha256);
       sha256Update(&sha256, this, sizeof(*this));
@@ -92,11 +94,25 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
       sha256Final(&sha256, result.begin());
       return result;
     }
+
+    UInt<256> GetHashAsInteger() const {
+      UInt<256> result;
+      CCtxSha256 sha256;
+      sha256Init(&sha256);
+      sha256Update(&sha256, this, sizeof(*this));
+      sha256Final(&sha256, reinterpret_cast<uint8_t*>(result.data()));
+      sha256Init(&sha256);
+      sha256Update(&sha256, result.data(), sizeof(result));
+      sha256Final(&sha256, reinterpret_cast<uint8_t*>(result.data()));
+      for (unsigned i = 0; i < 4; i++)
+        result.data()[i] = readle(result.data()[i]);
+      return result;
+    }
   };
 #pragma pack(pop)
 
   struct TxIn {
-    uint256 previousOutputHash;
+    TxHashTy previousOutputHash;
     uint32_t previousOutputIndex;
     xvector<uint8_t> scriptSig;
     xvector<xvector<uint8_t>> witnessStack;
@@ -197,7 +213,7 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     };
 
     uint32_t type;
-    uint256 hash;
+    BaseBlob<256> hash;
   };
 
   // Template messages
@@ -221,14 +237,14 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
 
   struct MessageGetHeaders {
     uint32_t version;
-    xvector<uint256> BlockLocatorHashes;
-    uint256 HashStop;
+    xvector<BaseBlob<256>> BlockLocatorHashes;
+    BaseBlob<256> HashStop;
   };
 
   struct MessageGetBlocks {
     uint32_t version;
-    xvector<uint256> BlockLocatorHashes;
-    uint256 HashStop;
+    xvector<BaseBlob<256>> BlockLocatorHashes;
+    BaseBlob<256> HashStop;
   };
 
   struct MessageInv {
