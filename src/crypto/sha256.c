@@ -45,7 +45,7 @@ static inline void sha256TransformGeneric(uint32_t state[8], const uint32_t in[1
   uint32_t data[16];
   if (bswap) {
     for (unsigned i = 0; i < 16; i++) {
-      data[i] = __builtin_bswap32(in[i]);
+      data[i] = bswap32(in[i]);
     }
   } else {
     memcpy(data, in, 64);
@@ -321,7 +321,7 @@ void sha256llFinal(const uint32_t state[8], uint8_t *hash, int bswap)
   uint32_t *hash32 = (uint32_t*)hash;
   if (bswap) {
     for (unsigned i = 0; i < 8; i++)
-      hash32[i] = __builtin_bswap32(state[i]);
+      hash32[i] = bswap32(state[i]);
   } else {
     memcpy(hash, state, 32);
   }
@@ -381,12 +381,12 @@ void sha256Final(CCtxSha256 *ctx, uint8_t *hash)
     memset(ctx->buffer + ctx->bufferSize + 1, 0, 64 - (ctx->bufferSize + 1));
     sha256llTransform(ctx->state, (const uint32_t*)ctx->buffer, 1);
     // last transform only with message length
-    uint64_t bitsBigEndian = __builtin_bswap64(ctx->MsgSize * 8);
+    uint64_t bitsBigEndian = bswap64(ctx->MsgSize * 8);
     uint32_t lastMsg[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, bitsBigEndian, bitsBigEndian >> 32};
     sha256llTransform(ctx->state, lastMsg, 1);
   } else {
     memset(ctx->buffer + ctx->bufferSize + 1, 0, 56 - (ctx->bufferSize + 1));
-    *(uint64_t*)(ctx->buffer + 56) = __builtin_bswap64(ctx->MsgSize * 8);
+    *(uint64_t*)(ctx->buffer + 56) = bswap64(ctx->MsgSize * 8);
     sha256llTransform(ctx->state, (const uint32_t*)ctx->buffer, 1);
   }
 
@@ -419,7 +419,7 @@ void sha256(const void *data, size_t size, uint8_t *hash)
   memset(buffer.b8, 0, sizeof(buffer.b8));
   memcpy(buffer.b8, p, bufferSize);
   buffer.b8[bufferSize] = 0x80;
-  uint64_t bitsBigEndian = __builtin_bswap64(size * 8);
+  uint64_t bitsBigEndian = bswap64(size * 8);
   if (bufferSize > 64 - 1 - 8) {
     // fill remaining buffer with zeroes and transform
     sha256llTransform(state, buffer.b32, 1);

@@ -7,6 +7,7 @@
 
 #include "common/blockDataBase.h"
 #include "common/mlog.h"
+#include "common/utils.h"
 
 #include "config4cpp/Configuration.h"
 #include <rocksdb/db.h>
@@ -164,10 +165,10 @@ public:
       rocksdb::Options options;
       options.create_if_missing = true;
       options.merge_operator.reset(mergeOperator());
-      std::string shardPathUtf8(reinterpret_cast<const char*>(shardPath.u8string().data()), shardPath.u8string().size());
+      std::string shardPathUtf8 = pathToUtf8(shardPath);
       rocksdb::Status status = rocksdb::DB::Open(options, shardPathUtf8, &db);
       if (!status.ok()) {
-        LOG_F(ERROR, "Can't open or create txdb database at %s", shardPath.c_str());
+        LOG_F(ERROR, "Can't open or create txdb database at %s", shardPathUtf8.c_str());
         return false;
       }
 
@@ -204,7 +205,7 @@ public:
       std::string stampData;
       if (!isEmpty && db->Get(rocksdb::ReadOptions(), rocksdb::Slice("stamp"), &stampData).ok()) {
         if (stampData.size() != sizeof(BC::Proto::BlockHashTy)) {
-          LOG_F(ERROR, "%s is corrupted: invalid stamp size (%s)", Name_.c_str(), shardPath.c_str());
+          LOG_F(ERROR, "%s is corrupted: invalid stamp size (%s)", Name_.c_str(), shardPathUtf8.c_str());
           return false;
         }
 
@@ -218,7 +219,7 @@ public:
                   "%s is corrupted: stamp %s not exists in block index (%s)",
                   Name_.c_str(),
                   stamp.getHexLE().c_str(),
-                  shardPath.c_str());
+                  shardPathUtf8.c_str());
             return false;
           }
 
@@ -463,8 +464,8 @@ private:
                               rocksdb::Logger*) const override {
       assert(left.size() >= 8);
       assert(right.size() >= 8);
-      uint64_t leftChunkOffset = *reinterpret_cast<const uint64_t*>(left.data());
-      uint64_t rightChunkOffset = *reinterpret_cast<const uint64_t*>(right.data());
+      [[maybe_unused]] uint64_t leftChunkOffset = *reinterpret_cast<const uint64_t*>(left.data());
+      [[maybe_unused]] uint64_t rightChunkOffset = *reinterpret_cast<const uint64_t*>(right.data());
       assert(leftChunkOffset + left.size() - sizeof(uint64_t) == rightChunkOffset);
 
       out->assign(left.data(), left.data() + left.size());

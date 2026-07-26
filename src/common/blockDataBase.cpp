@@ -7,6 +7,7 @@
 #include "db/storage.h"
 #include "common/fopen.h"
 #include "common/serializeUtils.h"
+#include "common/utils.h"
 #include <asyncio/asyncio.h>
 #include <p2putils/coreTypes.h>
 #include <p2putils/xmstream.h>
@@ -710,6 +711,9 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
     if (!std::filesystem::exists(path))
       break;
 
+    // outlives the workers below, which keep the pointer while they run
+    std::string pathUtf8 = pathToUtf8(path);
+
     size_t indexFileSize = std::filesystem::file_size(path);
     std::unique_ptr<uint8_t[]> data(new uint8_t[indexFileSize]);
 
@@ -717,12 +721,12 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
       // Read index file
       std::unique_ptr<FILE, std::function<void(FILE*)>> hFile(fopen_path(path, "rb"), [](FILE *f) { fclose(f); });
       if (!hFile.get()) {
-        LOG_F(ERROR, "Can't open index file %s", path.c_str());
+        LOG_F(ERROR, "Can't open index file %s", pathUtf8.c_str());
         return false;
       }
 
       if (fread(data.get(), indexFileSize, 1, hFile.get()) != 1) {
-        LOG_F(ERROR, "Can't read index file %s", path.c_str());
+        LOG_F(ERROR, "Can't read index file %s", pathUtf8.c_str());
         return false;
       }
     }
@@ -734,7 +738,7 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
         uint32_t size;
         BC::unserialize(stream, size);
         if (!size || size > stream.remaining()) {
-          LOG_F(ERROR, "Invalid index size %u detected in file %s", size, path.c_str());
+          LOG_F(ERROR, "Invalid index size %u detected in file %s", size, pathUtf8.c_str());
           return false;
         }
 
@@ -755,7 +759,7 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
       size_t off = offset;
       size_t size = workLoad + (i < workLoadExtra);
       offset += size;
-      workers[i] = std::async(std::launch::async, loadBlockIndexDeserializer, std::ref(blockIndex), std::ref(loadingIndexContext[i]), std::ref(blockFileSizes), &offsets[0] + off, size, path.c_str());
+      workers[i] = std::async(std::launch::async, loadBlockIndexDeserializer, std::ref(blockIndex), std::ref(loadingIndexContext[i]), std::ref(blockFileSizes), &offsets[0] + off, size, pathUtf8.c_str());
     }
 
     for (unsigned i = 0; i < threadsNum; i++) {
@@ -841,7 +845,10 @@ bool reindex(BlockInMemoryIndex &blockIndex,
     if (!std::filesystem::exists(path))
       break;
 
-    LOG_F(INFO, "Loading block file %s ...", path.c_str());
+    // outlives the workers below, which keep the pointer while they run
+    std::string pathUtf8 = pathToUtf8(path);
+
+    LOG_F(INFO, "Loading block file %s ...", pathUtf8.c_str());
 
     // Allocate memory for block file
     size_t blockFileSize = std::filesystem::file_size(path);
@@ -854,13 +861,13 @@ bool reindex(BlockInMemoryIndex &blockIndex,
       // Read block file
       std::unique_ptr<FILE, std::function<void(FILE*)>> hFile(fopen_path(path, "rb"), [](FILE *f) { fclose(f); });
       if (!hFile.get()) {
-        LOG_F(ERROR, "Can't open block file %s", path.c_str());
+        LOG_F(ERROR, "Can't open block file %s", pathUtf8.c_str());
         // storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
         return false;
       }
 
       if (fread(data.get(), 1, blockFileSize, hFile.get()) != blockFileSize) {
-        LOG_F(ERROR, "Can't read block file %s", path.c_str());
+        LOG_F(ERROR, "Can't read block file %s", pathUtf8.c_str());
         // storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
         return false;
       }
@@ -878,7 +885,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
           continue;
 
         if (magic != chainParams.magic) {
-          LOG_F(ERROR, "Can't parse block file %s (invalid magic)", path.c_str());
+          LOG_F(ERROR, "Can't parse block file %s (invalid magic)", pathUtf8.c_str());
           return false;
         }
 
@@ -898,7 +905,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
       size_t off = blockOffset;
       size_t size = workLoad + (i < workLoadExtra);
       blockOffset += size;
-      workers[i] = std::async(std::launch::async, loadBlocks, std::ref(blockIndex), std::ref(chainParams), std::ref(storage), path.c_str(), data.get(), &blockOffsets[0] + off, size, blkFileIndex);
+      workers[i] = std::async(std::launch::async, loadBlocks, std::ref(blockIndex), std::ref(chainParams), std::ref(storage), pathUtf8.c_str(), data.get(), &blockOffsets[0] + off, size, blkFileIndex);
     }
 
     for (unsigned i = 0; i < threadsNum; i++) {
@@ -910,7 +917,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
     LOG_F(INFO,
           "%u blocks loaded from %s; cache size: %.3lfM best: [%u]%s",
           static_cast<unsigned>(blockOffsets.size()),
-          path.c_str(),
+          pathUtf8.c_str(),
           storage.cache().size() / 1048576.0f,
           blockIndex.best()->Height,
           blockIndex.best()->Header.GetHash().getHexLE().c_str());
@@ -1076,7 +1083,7 @@ void BlockSearcher::fetchPending()
       char fileName[64];
       snprintf(fileName, sizeof(fileName), "blk%05u.dat", fileNo);
       std::filesystem::path path = blocksDirectory / fileName;
-      LOG_F(ERROR, "Invalid block data in file %s", path.c_str());
+      LOG_F(ERROR, "Invalid block data in file %s", pathToUtf8(path).c_str());
       ErrorHandler_();
       return;
     }
@@ -1085,7 +1092,7 @@ void BlockSearcher::fetchPending()
       char fileName[64];
       snprintf(fileName, sizeof(fileName), "blk%05u.dat", fileNo);
       std::filesystem::path path = blocksDirectory / fileName;
-      LOG_F(ERROR, "Invalid block data in file %s: mismatch block size in index(%u) and data file(%u)", path.c_str(), ExpectedBlockSizes_[expectedIndex], blockSize);
+      LOG_F(ERROR, "Invalid block data in file %s: mismatch block size in index(%u) and data file(%u)", pathToUtf8(path).c_str(), ExpectedBlockSizes_[expectedIndex], blockSize);
       ErrorHandler_();
       return;
     }

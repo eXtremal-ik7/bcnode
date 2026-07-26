@@ -8,7 +8,9 @@
 #include "BC/nativeApi.h"
 
 #include "common/blockDataBase.h"
+#include "common/macro.h"
 #include "common/thread.h"
+#include "common/utils.h"
 #include <db/archive.h>
 #include <db/storage.h>
 #include "loguru.hpp"
@@ -33,6 +35,8 @@ __NO_DEPRECATED_END
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#else
+#include <windows.h>
 #endif
 
 static int gReindex = 0;
@@ -77,15 +81,13 @@ static bool LookupPeers(std::vector<const char*> &addresses, uint16_t defaultPor
 {
   for (size_t i = threadIdx; i < addresses.size(); i += threadsNum) {
     URI uri;
-    std::string fakeUrl = "http://";
-    fakeUrl.append(addresses[i]);
-    if (!uriParse(fakeUrl.c_str(), &uri)) {
+    if (!uriParseHostPort(addresses[i], &uri, defaultPort)) {
       LOG_F(ERROR, "Can't parse address %s", addresses[i]);
       return false;
     }
 
-    uint16_t port = uri.port ? uri.port : defaultPort;
-    if (!uri.domain.empty()) {
+    uint16_t port = static_cast<uint16_t>(uri.port);
+    if (uri.hostType == URI::HostTypeDNS) {
       struct hostent *host = gethostbyname(uri.domain.c_str());
       if (host) {
         struct in_addr **hostAddrList = (struct in_addr**)host->h_addr_list;
@@ -93,16 +95,16 @@ static bool LookupPeers(std::vector<const char*> &addresses, uint16_t defaultPor
         while (hostAddrList[j]) {
           HostAddress ha;
           ha.ipv4 = hostAddrList[j]->s_addr;
-          ha.port = htons(port);
+          ha.port = port;
           ha.family = AF_INET;
           output.push_back(ha);
           j++;
         }
       }
-    } else if (uri.ipv4) {
+    } else if (uri.hostType == URI::HostTypeIPv4) {
       HostAddress ha;
       ha.ipv4 = uri.ipv4;
-      ha.port = htons(port);
+      ha.port = port;
       ha.family = AF_INET;
       output.push_back(ha);
     } else {
@@ -125,7 +127,7 @@ void printHelpMessage()
 
   puts("bcnode options");
   puts("  --help:\t\tprint this message");
-  fprintf(stdout, "  --datadir:\t\tpath of data directory (default: %s)\n", defaultPath.c_str());
+  fprintf(stdout, "  --datadir:\t\tpath of data directory (default: %s)\n", pathToUtf8(defaultPath).c_str());
   puts("  --network:\t\tnetwork name (main, testnet, etc)");
   puts("  --reindex:\t\trebuild block index");
   puts("  --resync:\t\tdelete whole database and re-download it (not supported now)");
@@ -159,7 +161,12 @@ struct Context {
 };
 
 int main(int argc, char **argv)
-{ 
+{
+#ifdef WIN32
+  // Paths are logged as UTF-8; without this the console decodes them as the active code page
+  SetConsoleOutputCP(CP_UTF8);
+#endif
+
   // Parsing command line
   int res;
   int index = 0;
@@ -185,9 +192,13 @@ int main(int argc, char **argv)
     }
   }
 
-  initializeSocketSubsystem();
   loguru::init(argc, argv);
   loguru::set_thread_name("main");
+
+  if (initializeAsyncIo(aiNone) != 0) {
+    LOG_F(ERROR, "Can't initialize asyncio library");
+    return 1;
+  }
 
   Context context;
   if (!dataDir.empty())
@@ -253,14 +264,15 @@ int main(int argc, char **argv)
     context.DataDir.append(gNetwork);
     std::filesystem::create_directories(context.DataDir);
     auto debugPath = context.DataDir / "debug.log";
-    loguru::add_file(debugPath.c_str(), loguru::Append, loguru::Verbosity_INFO);
+    // add_file opens the name with _fsopen/fopen, so it wants the narrow OS encoding
+    loguru::add_file(debugPath.string().c_str(), loguru::Append, loguru::Verbosity_INFO);
     if (!gWatchLog)
       loguru::g_stderr_verbosity = loguru::Verbosity_ERROR;
-    LOG_F(INFO, "Using %s as data directory", context.DataDir.c_str());
+    LOG_F(INFO, "Using %s as data directory", pathToUtf8(context.DataDir).c_str());
 
     if (!std::filesystem::exists(context.DataDir)) {
       if (!std::filesystem::create_directories(context.DataDir)) {
-        LOG_F(ERROR, "Can't create data directory %s", context.DataDir.c_str());
+        LOG_F(ERROR, "Can't create data directory %s", pathToUtf8(context.DataDir).c_str());
         return 1;
       }
     }
@@ -285,7 +297,7 @@ int main(int argc, char **argv)
   bool archiveEnabled = false;
   if (std::filesystem::exists(configPath)) {
     try {
-      cfg->parse(configPath.c_str());
+      cfg->parse(configPath.string().c_str());
 
       cfg->lookupList("bcnode", "addNode", addNode, config4cpp::StringVector());
       cfg->lookupList("bcnode", "forceNode", forceNode, config4cpp::StringVector());
@@ -399,7 +411,11 @@ int main(int argc, char **argv)
       return 1;
   }
 
-  context.MainBase = createAsyncBase(amOSDefault);
+  context.MainBase = createAsyncBase(amOSDefault, totalThreadsNum);
+  if (!context.MainBase) {
+    LOG_F(ERROR, "Can't create asyncio base");
+    return 1;
+  }
 
   // Initialize storage manager
   if (!context.Storage.run([&context]() { postQuitOperation(context.MainBase); }))
@@ -429,7 +445,7 @@ int main(int argc, char **argv)
         addrEnumeration.append(", ");
       addrEnumeration.append(inet_ntoa(addr));
       addrEnumeration.push_back(':');
-      addrEnumeration.append(std::to_string(htons(seeds[i][j].port)));
+      addrEnumeration.append(std::to_string(seeds[i][j].port));
       context.Node.AddPeer(seeds[i][j], inet_ntoa(addr), nullptr);
     }
 
@@ -446,18 +462,21 @@ int main(int argc, char **argv)
     address.ipv4 = 0;
 
     // Start main bcnode server
-    address.port = htons(bcnodePort);
+    address.port = bcnodePort;
     if (!context.Node.StartBCNodeServer(address))
       return 1;
 
     // Start http api
-    address.port = htons(httpApiPort);
+    address.port = httpApiPort;
     if (!context.httpApiNode.init(&context.BlockIndex, &context.ChainParams, &context.BlockDb, &context.Node, context.Archive, context.MainBase, address))
       return 1;
 
     // Start native api
-    if (nativeApiPort && !context.nativeApiNode.init(context.MainBase, address))
-      return 1;
+    if (nativeApiPort) {
+      address.port = nativeApiPort;
+      if (!context.nativeApiNode.init(context.MainBase, address))
+        return 1;
+    }
   }
 
   std::unique_ptr<std::thread[]> workerThreads(new std::thread[totalThreadsNum]);

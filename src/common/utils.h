@@ -7,6 +7,15 @@
 
 #include "common/baseBlob.h"
 #include "loguru.hpp"
+#include <filesystem>
+
+// For logging only. path::string() would use the active code page on Windows, which loses
+// characters outside it and mixes encodings within one log file.
+static inline std::string pathToUtf8(const std::filesystem::path &path)
+{
+  auto utf8 = path.u8string();
+  return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+}
 
 std::string real_strprintf(const std::string &format, int dummy, ...);
 #define strprintf(format, ...) real_strprintf(format, 0, __VA_ARGS__)

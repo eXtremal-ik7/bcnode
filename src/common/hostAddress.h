@@ -12,10 +12,9 @@ struct HostAddressCompare {
     if (address.family == AF_INET) {
       return address.ipv4 ^ address.port;
     } else {
-      const size_t *ipv6 = reinterpret_cast<const size_t*>(address.ipv6);
       size_t hash = 0;
-      for (unsigned i = 0; i < sizeof(address.ipv6) / sizeof(uint16_t); i++)
-        hash ^= ipv6[i];
+      for (unsigned i = 0; i < sizeof(address.ipv6) / sizeof(address.ipv6[0]); i++)
+        hash = (hash << 1) ^ address.ipv6[i];
       hash ^= address.port;
       hash ^= address.family;
       return hash;

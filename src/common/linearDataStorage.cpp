@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "linearDataStorage.h"
+#include "common/utils.h"
 #include "loguru.hpp"
 #include <system_error>
 
@@ -21,7 +22,7 @@ FileDescriptor LinearDataStorage::file(uint32_t fileNo)
   if (!Files_[fileNo].isOpened()) {
     auto path = getFilePath(fileNo);
     if (!Files_[fileNo].open(path))
-      LOG_F(ERROR, "Can't open block data file %s", path.u8string().c_str());
+      LOG_F(ERROR, "Can't open block data file %s", pathToUtf8(path).c_str());
   }
 
   return Files_[fileNo];
@@ -37,7 +38,7 @@ bool LinearDataStorage::flush()
   FileDescriptor hFile = file(FileNo_);
   auto result = hFile.write(Data_.data(), FileOffset_, Data_.sizeOf());
   if (result < 0 || static_cast<size_t>(result) != Data_.sizeOf()) {
-    LOG_F(ERROR, "Can't write data to %s", getFilePath(FileNo_).u8string().c_str());
+    LOG_F(ERROR, "Can't write data to %s", pathToUtf8(getFilePath(FileNo_)).c_str());
     return false;
   }
 
@@ -59,7 +60,7 @@ bool LinearDataStorage::init(const std::filesystem::path &directory, const char 
   char fileName[64];
   std::error_code errorCode;
   if (!std::filesystem::create_directory(Directory_, errorCode) && errorCode.value() != 0) {
-    LOG_F(ERROR, "Cant create directory %s (%s)", Directory_.u8string().c_str(), errorCode.message().c_str());
+    LOG_F(ERROR, "Cant create directory %s (%s)", pathToUtf8(Directory_).c_str(), errorCode.message().c_str());
     return false;
   }
 
@@ -89,11 +90,11 @@ bool LinearDataStorage::init(const std::filesystem::path &directory, const char 
     std::filesystem::path path = Directory_ / fileName;
     FileDescriptor hFile = file(FileNo_);
     if (!hFile.isOpened()) {
-      LOG_F(ERROR, "Can't open block storage file %s for writting", path.u8string().c_str());
+      LOG_F(ERROR, "Can't open block storage file %s for writting", pathToUtf8(path).c_str());
       return false;
     }
 
-    LOG_F(INFO, "Storage inititialized, current file/offset: %s/%u", path.u8string().c_str(), FileOffset_);
+    LOG_F(INFO, "Storage inititialized, current file/offset: %s/%u", pathToUtf8(path).c_str(), FileOffset_);
   }
 
   LastWritePoint_ = std::chrono::steady_clock::now();
@@ -127,7 +128,7 @@ bool LinearDataStorage::allocate(uint32_t size, std::pair<uint32_t, uint32_t> &p
   if (!hFile.isOpened())
     return false;
   if (!hFile.truncate(FileOffset_)) {
-    LOG_F(ERROR, "Can't open block storage file %s for writting", getFilePath(FileNo_).u8string().c_str());
+    LOG_F(ERROR, "Can't open block storage file %s for writting", pathToUtf8(getFilePath(FileNo_)).c_str());
     return false;
   }
   position.first = FileNo_;

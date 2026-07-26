@@ -59,7 +59,6 @@ void Io<Proto::NetworkAddress>::unserialize(xmstream &src, BTC::Proto::NetworkAd
   BTC::unserialize(src, data.services);
   src.read(data.ipv6.u8, sizeof(data.ipv6.u8));
   BTC::unserialize(src, data.port);
-  data.port = data.port;
 }
 
 void Io<Proto::NetworkAddressWithoutTime>::serialize(xmstream &dst, const BTC::Proto::NetworkAddressWithoutTime &data)
@@ -581,26 +580,25 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tr
 
 std::string encodeBase58WithCrc(const uint8_t *prefix, unsigned prefixSize, const uint8_t *address, unsigned addressSize)
 {
-  // Using dynamic stack allocation
-  uint8_t data[prefixSize + 4 + addressSize];
+  std::vector<uint8_t> data(prefixSize + 4 + addressSize);
   for (unsigned i = 0; i < prefixSize; i++)
     data[i] = prefix[i];
-  memcpy(data + prefixSize, address, addressSize);
+  memcpy(data.data() + prefixSize, address, addressSize);
 
   {
     uint8_t sha256[32];
     CCtxSha256 ctx;
     sha256Init(&ctx);
-    sha256Update(&ctx, &data[0], sizeof(data) - 4);
+    sha256Update(&ctx, data.data(), data.size() - 4);
     sha256Final(&ctx, sha256);
 
     sha256Init(&ctx);
     sha256Update(&ctx, sha256, sizeof(sha256));
     sha256Final(&ctx, sha256);
-    memcpy(data + prefixSize + addressSize, sha256, 4);
+    memcpy(data.data() + prefixSize + addressSize, sha256, 4);
   }
 
-  return EncodeBase58(data, data + sizeof(data));
+  return EncodeBase58(data.data(), data.data() + data.size());
 }
 
 bool decodeBase58WithCrc(const std::string &base58, const uint8_t *prefix, unsigned prefixSize, uint8_t *address, unsigned addressSize)

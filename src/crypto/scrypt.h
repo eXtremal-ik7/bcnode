@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-static const int LTC_SCRATCHPAD_SIZE = 131072 + 63;
+enum { LTC_SCRATCHPAD_SIZE = 131072 + 63 };
 
 #ifdef __cplusplus
 extern "C" {

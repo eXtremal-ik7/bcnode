@@ -11,7 +11,7 @@ typedef struct HMAC_SHA256Context {
   CCtxSha256 octx;
 } HMAC_SHA256_CTX;
 
-static inline void be32enc(void *pp, uint32_t x) { *((uint32_t*)pp) = __builtin_bswap32(x); }
+static inline void be32enc(void *pp, uint32_t x) { *((uint32_t*)pp) = bswap32(x); }
 static inline uint32_t le32dec(const void *pp) { return *(uint32_t*)pp; }
 static inline void le32enc(void *pp, uint32_t x) { *((uint32_t*)pp) = x; }
 

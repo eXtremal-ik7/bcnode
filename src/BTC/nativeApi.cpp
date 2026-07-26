@@ -27,7 +27,7 @@ bool BC::Network::NativeApiNode::init(asyncBase *mainBase, HostAddress localAddr
   {
     struct in_addr a;
     a.s_addr = LocalAddress.ipv4;
-    snprintf(addressAsString, sizeof(addressAsString), "%s:%u", inet_ntoa(a), static_cast<unsigned>(htons(LocalAddress.port)));
+    snprintf(addressAsString, sizeof(addressAsString), "%s:%u", inet_ntoa(a), static_cast<unsigned>(LocalAddress.port));
   }
 
   socketTy socketFd = socketCreate(AF_INET, SOCK_STREAM, IPPROTO_TCP, 1);

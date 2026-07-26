@@ -42,26 +42,23 @@ static option cmdLineOpts[] = {
 static bool lookupPeer(const char *address, HostAddress *out, uint16_t defaultPort)
 {
     URI uri;
-    std::string fakeUrl = "http://";
-    fakeUrl.append(address);
-    if (!uriParse(fakeUrl.c_str(), &uri)) {
+    if (!uriParseHostPort(address, &uri, defaultPort))
       return false;
-    }
 
-    uint16_t port = uri.port ? static_cast<uint16_t>(uri.port) : defaultPort;
-    if (!uri.domain.empty()) {
+    uint16_t port = static_cast<uint16_t>(uri.port);
+    if (uri.hostType == URI::HostTypeDNS) {
       struct hostent *host = gethostbyname(uri.domain.c_str());
       if (host) {
         struct in_addr **hostAddrList = reinterpret_cast<struct in_addr**>(host->h_addr_list);
         out->ipv4 = hostAddrList[0]->s_addr;
-        out->port = htons(port);
+        out->port = port;
         out->family = AF_INET;
       } else {
         return false;
       }
-    } else if (uri.ipv4) {
+    } else if (uri.hostType == URI::HostTypeIPv4) {
       out->ipv4 = uri.ipv4;
-      out->port = htons(port);
+      out->port = port;
       out->family = AF_INET;
     } else {
       return false;
@@ -282,7 +279,10 @@ void printHelpMessage(const char *name) {
 
 int main(int argc, char **argv)
 {
-  initializeSocketSubsystem();
+  if (initializeAsyncIo(aiNone) != 0) {
+    fprintf(stderr, "ERROR: Can't initialize asyncio library\n");
+    return 1;
+  }
 
   // Parsing command line
   int res;
@@ -331,7 +331,12 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  asyncBase *base = createAsyncBase(amOSDefault);
+  asyncBase *base = createAsyncBase(amOSDefault, 1);
+  if (!base) {
+    fprintf(stderr, "ERROR: Can't create asyncio base\n");
+    return 1;
+  }
+
   TextTerminal handler(base, addressString);
   BC::Network::Connection<TextTerminal> connection(handler, base, address, magic);
   connection.start();

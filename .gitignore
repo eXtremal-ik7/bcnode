@@ -1,0 +1,11 @@
+# Notes and reviews kept in the repository root
+/*.md
+!/README.md
+
+.DS_Store
+
+# Sources fetched by FetchContent (asyncio, config4cpp, secp256k1)
+/dependencies/
+
+/src/.qtcreator/
+/src/CMakeLists.txt.user*

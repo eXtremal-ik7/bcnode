@@ -849,7 +849,7 @@ void Node::OnGetAddr(Peer *peer)
   enumeratePeers([&addr](Peer *connectedPeer) {
     BC::Proto::NetworkAddress networkAddress;
     networkAddress.setIpv4(connectedPeer->Address.ipv4);
-    networkAddress.port = connectedPeer->Address.port;
+    networkAddress.port = htons(connectedPeer->Address.port);
     networkAddress.services = connectedPeer->Services;
     networkAddress.time = static_cast<uint32_t>(time(nullptr));
     addr.addr_list.emplace_back(networkAddress);
@@ -874,7 +874,7 @@ void Node::OnBCNodeConnection(HostAddress address, aioObject *object)
   {
     struct in_addr a;
     a.s_addr = address.ipv4;
-    snprintf(addressAsString, sizeof(addressAsString), "%s:%u", inet_ntoa(a), static_cast<unsigned>(htons(address.port)));
+    snprintf(addressAsString, sizeof(addressAsString), "%s:%u", inet_ntoa(a), static_cast<unsigned>(address.port));
   }
 
   LOG_F(INFO, "Incoming connection from %s", addressAsString);
@@ -1099,7 +1099,7 @@ bool Node::StartTcpServer(HostAddress address, const char *name, aioObject **soc
   {
     struct in_addr a;
     a.s_addr = address.ipv4;
-    snprintf(addressAsString, sizeof(addressAsString), "%s:%u", inet_ntoa(a), static_cast<unsigned>(htons(address.port)));
+    snprintf(addressAsString, sizeof(addressAsString), "%s:%u", inet_ntoa(a), static_cast<unsigned>(address.port));
   }
 
   socketTy socketFd = socketCreate(AF_INET, SOCK_STREAM, IPPROTO_TCP, 1);
@@ -1117,7 +1117,7 @@ bool Node::StartTcpServer(HostAddress address, const char *name, aioObject **soc
   }
 
   *socket = newSocketIo(Base, socketFd);
-  aioAccept(bcNodeSocket, 0, callback, this);
+  aioAccept(*socket, 0, callback, this);
   LOG_F(INFO, "%s server started at %s", name, addressAsString);
   return true;
 }

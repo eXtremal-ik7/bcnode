@@ -1,30 +1,44 @@
 include("cmake/cxx-pm.cmake")
 cxxpm_initialize(
-  https://github.com/eXtremal-ik7/cxx-pm/archive/refs/tags/0.0.4.tar.gz
-  409fdb16b267926d0cae526041f6b6174fe17b7170519e3d35ae2486e9139f1a
+  https://github.com/eXtremal-ik7/cxx-pm/archive/refs/tags/0.0.5.tar.gz
+  d520a56610477f1911d1a390775e2ce19c47dfaa098d9692de5340cb174e3c43
 )
 
 cmake_minimum_required(VERSION 3.11)
 project(bcnode)
 
 set (CMAKE_CXX_STANDARD 20)
-option(SANITIZER_ENABLED "Build with address sanitizer" OFF)
-option(PROFILE_ENABLED "Build for profiling" OFF)
-option(ASSERTS_ENABLED "Build Release/RelWithDebInfo with asserts" OFF)
 option(BCNODE_DOGE "Build bcnode for dogecoin" OFF)
 option(BCNODE_ZEC "Build bcnode for ZCash" OFF)
 
-if (SANITIZER_ENABLED)
+# Whole-program build modes. The names are shared by convention across projects in one
+# build tree (cache is common, so the same option here and in asyncio merges into a single
+# switch); each project applies the flags to its own scope.
+option(BUILD_SANITIZE_ADDRESS "Build with address sanitizer" OFF)
+option(BUILD_SANITIZE_THREAD "Build with thread sanitizer" OFF)
+option(BUILD_PROFILING "Build for profiling" OFF)
+option(BUILD_WITH_ASSERTS "Keep asserts in Release/RelWithDebInfo" OFF)
+
+if (BUILD_SANITIZE_ADDRESS AND BUILD_SANITIZE_THREAD)
+  message(FATAL_ERROR "BUILD_SANITIZE_ADDRESS and BUILD_SANITIZE_THREAD are mutually exclusive")
+endif()
+
+if (BUILD_SANITIZE_ADDRESS)
   set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
 endif()
 
-if (PROFILE_ENABLED)
+if (BUILD_SANITIZE_THREAD)
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=thread")
+  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=thread")
+endif()
+
+if (BUILD_PROFILING)
   set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -fno-inline -fno-omit-frame-pointer")
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-inline -fno-omit-frame-pointer")
 endif()
 
-if (NOT ASSERTS_ENABlED)
+if (BUILD_WITH_ASSERTS)
   add_definitions(-UNDEBUG)
 endif()
 
@@ -50,6 +64,7 @@ if(MSVC)
   )
 
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /GR-")
+  # getopt only; the c99 shims live in asyncio and are added below, after it is populated
   include_directories(${CMAKE_CURRENT_SOURCE_DIR}/msvc/include)
   set(GETOPT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/msvc/getopt.c
@@ -75,17 +90,23 @@ else()
 endif()
 
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectConfig4cpp.cmake)
-include(${CMAKE_SOURCE_DIR}/cmake/ProjectLibp2p.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/ProjectAsyncio.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectSecp256k1.cmake)
 
 include_directories(
   ${CMAKE_SOURCE_DIR}
-  ${libp2p_SOURCE_DIR}/src/include
-  ${libp2p_BINARY_DIR}/include
+  ${asyncio_SOURCE_DIR}/src/include
+  ${asyncio_BINARY_DIR}/include
   ${config4cpp_SOURCE_DIR}/src/include
   ${secp256k1_SOURCE_DIR}/include
   ${RAPIDJSON_INCLUDE_DIRECTORY}
 )
+
+if (MSVC AND MSVC_VERSION LESS 1800)
+  # inttypes.h/stdint.h appeared in VS2013; older compilers use the shims bundled with
+  # asyncio, for newer ones the shims must not shadow the system headers
+  include_directories(${asyncio_SOURCE_DIR}/src/msvc/include/c99)
+endif()
 
 add_library(bcnodecommon STATIC
   loguru.cpp
@@ -141,8 +162,8 @@ set(BASE_SOURCES
 set(COMMON_LIBRARIES
   bcnodecommon
   bcnodecrypto
-  asyncio-0.5
-  asyncioextras-0.5
+  asyncio-0.6
+  asyncioextras-0.6
   p2putils
   config4cpp
   secp256k1

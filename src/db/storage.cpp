@@ -31,7 +31,12 @@ bool Storage::run(std::function<void()> errorHandler)
 {
   ErrorHandler_ = errorHandler;
 
-  Base_ = createAsyncBase(amOSDefault);
+  Base_ = createAsyncBase(amOSDefault, 1);
+  if (!Base_) {
+    LOG_F(ERROR, "Can't create asyncio base for storage");
+    return false;
+  }
+
   NewTaskEvent_ = newUserEvent(Base_, 0, newTaskCb, this);
   TimerEvent_ = newUserEvent(Base_, 0, timerCb, this);
 
