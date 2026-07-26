@@ -51,10 +51,10 @@ public:
   template<size_t MLEN>
   struct NoteEncryption {
       enum { CLEN=MLEN+NOTEENCRYPTION_AUTH_BYTES };
-      uint256 epk;
-      uint256 esk;
+      BaseBlob<256> epk;
+      BaseBlob<256> esk;
       unsigned char nonce;
-      uint256 hSig;
+      BaseBlob<256> hSig;
   };
 
   using ZCNoteEncryption = NoteEncryption<ZC_NOTEPLAINTEXT_SIZE>;
@@ -66,30 +66,30 @@ public:
 
   public:
     int32_t nVersion;
-    uint256 hashPrevBlock;
-    uint256 hashMerkleRoot;
-    uint256 hashLightClientRoot;
+    BaseBlob<256> hashPrevBlock;
+    BaseBlob<256> hashMerkleRoot;
+    BaseBlob<256> hashLightClientRoot;
     uint32_t nTime;
     uint32_t nBits;
-    uint256 nNonce;
+    BaseBlob<256> nNonce;
     xvector<uint8_t> nSolution;
 
     BlockHashTy GetHash() const {
       uint8_t buffer[2048];
-      uint256 result;
+      BaseBlob<256> result;
       xmstream localStream(buffer, sizeof(buffer));
       localStream.reset();
       BTC::serialize(localStream, nSolution);
 
-      SHA256_CTX sha256;
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, this, HEADER_SIZE);
-      SHA256_Update(&sha256, localStream.data(), localStream.sizeOf());
-      SHA256_Final(result.begin(), &sha256);
+      CCtxSha256 sha256;
+      sha256Init(&sha256);
+      sha256Update(&sha256, this, HEADER_SIZE);
+      sha256Update(&sha256, localStream.data(), localStream.sizeOf());
+      sha256Final(&sha256, result.begin());
 
-      SHA256_Init(&sha256);
-      SHA256_Update(&sha256, result.begin(), sizeof(result));
-      SHA256_Final(result.begin(), &sha256);
+      sha256Init(&sha256);
+      sha256Update(&sha256, result.begin(), sizeof(result));
+      sha256Final(&sha256, result.begin());
       return result;
     }
   };
@@ -103,14 +103,18 @@ public:
   using TxIn = BTC::Proto::TxIn;
   using TxOut = BTC::Proto::TxOut;
 
+  using CBlockValidationData = BTC::Proto::CBlockValidationData;
+  using CBlockLinkedOutputs = BTC::Proto::CBlockLinkedOutputs;
+  using CTxLinkedOutputs = BTC::Proto::CTxLinkedOutputs;
+
   struct CompressedG1 {
     bool y_lsb;
-    base_blob<256> x;
+    BaseBlob<256> x;
   };
 
   struct CompressedG2 {
     bool y_gt;
-    base_blob<512> x;
+    BaseBlob<512> x;
   };
 
   struct PHGRProof {
@@ -125,18 +129,18 @@ public:
   };
 
   struct SpendDescription {
-    uint256 cv;
-    uint256 anchor;
-    uint256 nullifer;
-    uint256 rk;
+    BaseBlob<256> cv;
+    BaseBlob<256> anchor;
+    BaseBlob<256> nullifer;
+    BaseBlob<256> rk;
     std::array<uint8_t, GROTH_PROOF_SIZE> zkproof;
     std::array<uint8_t, 64> spendAuthSig;
   };
 
   struct OutputDescription {
-    uint256 cv;
-    uint256 cmu;
-    uint256 ephemeralKey;
+    BaseBlob<256> cv;
+    BaseBlob<256> cmu;
+    BaseBlob<256> ephemeralKey;
     std::array<uint8_t, ZC_SAPLING_ENCCIPHERTEXT_SIZE> encCiphertext;
     std::array<uint8_t, ZC_SAPLING_OUTCIPHERTEXT_SIZE> outCiphertext;
     std::array<uint8_t, GROTH_PROOF_SIZE> zkproof;
@@ -145,17 +149,17 @@ public:
   struct JSDescription {
     int64_t vpub_old;
     int64_t vpub_new;
-    uint256 anchor;
-    uint256 nullifier1;
-    uint256 nullifier2;
-    uint256 commitment1;
-    uint256 commitment2;
-    uint256 ephemeralKey;
+    BaseBlob<256> anchor;
+    BaseBlob<256> nullifier1;
+    BaseBlob<256> nullifier2;
+    BaseBlob<256> commitment1;
+    BaseBlob<256> commitment2;
+    BaseBlob<256> ephemeralKey;
     std::array<uint8_t, ZCNoteEncryption::CLEN> ciphertext1;
     std::array<uint8_t, ZCNoteEncryption::CLEN> ciphertext2;
-    uint256 randomSeed;
-    uint256 mac1;
-    uint256 mac2;
+    BaseBlob<256> randomSeed;
+    BaseBlob<256> mac1;
+    BaseBlob<256> mac2;
 
     PHGRProof phgrProof;
     std::array<uint8_t, GROTH_PROOF_SIZE> zkproof;
@@ -182,6 +186,8 @@ public:
     uint32_t SerializedDataSize = 0;
 
     BlockHashTy getTxId() const;
+    // ZEC has no witness data, wtxid is always the same as txid
+    BlockHashTy getWTxid() const { return getTxId(); }
   };
 
   using MessageVersion = BTC::Proto::MessageVersion;

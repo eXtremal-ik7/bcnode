@@ -30,6 +30,7 @@ public:
   static constexpr size_t MaxBlockSize = LTC::Configuration::MaxBlockSize;
   static constexpr uint32_t BlocksFileLimit = LTC::Configuration::BlocksFileLimit;
   static constexpr size_t DefaultBlockCacheSize = LTC::Configuration::DefaultBlockCacheSize;
+  static constexpr uint64_t RationalPartSize = LTC::Configuration::RationalPartSize;
 
   static constexpr const char *ProjectName = "Dogecoin";
   static constexpr const char *TickerName = "DOGE";
@@ -42,28 +43,8 @@ public:
 using Script = LTC::Script;
 
 namespace Common {
-  // Inherit BTC chain params
-  struct ChainParams {
-    int networkId;
-    uint32_t magic;
-    DOGE::Proto::Block GenesisBlock;
-
-    // Soft&hard forks
-    uint32_t BIP34Height;
-    uint32_t SegwitHeight;
-
-    // Prefixes
-    std::vector<uint8_t> PublicKeyPrefix;
-
-    // Network
-    uint16_t DefaultPort;
-    uint16_t DefaultRPCPort;
-    std::vector<const char*> DNSSeeds;
-
-    // ...
-    uint256 powLimit;
-
-    // DOGE aux pow settings
+  // Inherit BTC chain params, add the aux pow settings on top
+  struct ChainParams: public BTC::Common::ChainParamsTy<DOGE::Proto> {
     bool StrictChainId;
   };
 
@@ -74,29 +55,28 @@ namespace Common {
   };
 
   using BlockIndex = BTC::Common::BlockIndexTy<DOGE::Proto>;
+  using CIndexCacheObject = BTC::Common::CIndexCacheObject;
   using CheckConsensusCtx = LTC::Common::CheckConsensusCtx;
 
   bool setupChainParams(ChainParams *params, const char *network);
   static inline bool hasWitness() { return true; }
 
-  // Validation functions
-  using ValidateStandaloneTy = std::function<bool(const Proto::Block&, const ChainParams&, std::string &error)>;
-  using ValidateContextualTy = std::function<bool(const Common::BlockIndex&, const Proto::Block&, const ChainParams&, std::string &error)>;
-  static inline void applyStandaloneValidation(ValidateStandaloneTy function, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
-    if (*isValid)
-      *isValid = function(block, chainParams, error);
-  }
-  static inline void applyContextualValidation(ValidateContextualTy function, const Common::BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error, bool *isValid) {
-    if (*isValid)
-      *isValid = function(index, block, chainParams, error);
-  }
-
   unsigned getBlockGeneration(const ChainParams &chainParams, BlockIndex *index);
-  void initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb);
-  unsigned checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error);
-  bool checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error);
 
-  static inline arith_uint256 GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) {
+  static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
+
+  bool checkBlockStandalone(const Proto::Block &block,
+                            Proto::CBlockValidationData &validation,
+                            const ChainParams &chainParams,
+                            std::string &error);
+  bool checkBlockContextual(const BlockIndex &index,
+                            const Proto::Block &block,
+                            const Proto::CBlockValidationData &validation,
+                            const Proto::CBlockLinkedOutputs &linkedOutputs,
+                            const ChainParams &chainParams,
+                            std::string &error);
+
+  static inline UInt<256> GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) {
     return LTC::Common::GetBlockProof(header);
   }
 

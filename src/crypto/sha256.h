@@ -2,16 +2,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// __builtin_bswap* are GCC/clang builtins; MSVC has its own intrinsics
-#if defined(_MSC_VER)
-#include <stdlib.h>
-static inline uint32_t bswap32(uint32_t value) { return _byteswap_ulong(value); }
-static inline uint64_t bswap64(uint64_t value) { return _byteswap_uint64(value); }
-#else
-static inline uint32_t bswap32(uint32_t value) { return __builtin_bswap32(value); }
-static inline uint64_t bswap64(uint64_t value) { return __builtin_bswap64(value); }
-#endif
-
 #ifdef __cplusplus
 extern "C" {
 #endif

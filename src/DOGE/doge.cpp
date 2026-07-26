@@ -6,6 +6,8 @@
 #include "doge.h"
 #include "validation.h"
 #include "crypto/scrypt.h"
+#include "common/serializeUtils.h"
+#include "common/utils.h"
 
 bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
 {
@@ -18,7 +20,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
 
     params->PublicKeyPrefix = {30};
 
-    params->powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    params->powLimit = UInt<256>::fromHex("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     // Soft & hard forks
     params->BIP34Height = 1034383;
@@ -27,7 +29,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
 
     {
       params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.hashPrevBlock.setNull();
       params->GenesisBlock.header.nTime = 1386325540;
       params->GenesisBlock.header.nBits = 0x1e0ffff0;
       params->GenesisBlock.header.nNonce = 99943;
@@ -38,7 +40,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
 
       tx.txIn.resize(1);
       tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputHash.setNull();
       tx.txIn[0].previousOutputIndex = -1;
       xmstream scriptSig;
       BTC::serialize(scriptSig, static_cast<uint8_t>(0x04));
@@ -85,7 +87,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
 
     params->PublicKeyPrefix = {113};
 
-    params->powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    params->powLimit = UInt<256>::fromHex("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     // Soft & hard forks
     params->BIP34Height = 708658;
@@ -94,7 +96,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
 
     {
       params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.SetNull();
+      params->GenesisBlock.header.hashPrevBlock.setNull();
       params->GenesisBlock.header.nTime = 1391503289;
       params->GenesisBlock.header.nBits = 0x1e0ffff0;
       params->GenesisBlock.header.nNonce = 997879;
@@ -106,7 +108,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
       xmstream scriptSig;
       tx.txIn.resize(1);
       tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.SetNull();
+      tx.txIn[0].previousOutputHash.setNull();
       tx.txIn[0].previousOutputIndex = -1;
       BTC::serialize(scriptSig, static_cast<uint8_t>(0x04));
       BTC::serialize(scriptSig, static_cast<uint32_t>(486604799));
@@ -143,7 +145,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->networkId = NetworkIdRegtest;
     params->magic = 0xDAB5BFFA;
 
-    params->powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    params->powLimit = UInt<256>::fromHex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     // Soft & hard forks
     params->BIP34Height = 500;
@@ -162,27 +164,36 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-void DOGE::Common::initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
-{
-  ::initializeValidationContext<DOGE::X>(block, utxodb);
-}
-
-unsigned DOGE::Common::checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool DOGE::Common::checkBlockStandalone(const Proto::Block &block,
+                                        Proto::CBlockValidationData &validation,
+                                        const ChainParams &chainParams,
+                                        std::string &error)
 {
   bool isValid = true;
-  memset(&block.validationData, 0, sizeof(block.validationData));
-  applyStandaloneValidation(validateBlockSize<DOGE::X>, block, chainParams, error, &isValid);
-  applyStandaloneValidation(validateMerkleRoot<DOGE::X>, block, chainParams, error, &isValid);
-  applyStandaloneValidation(validateWitnessCommitment<DOGE::X>, block, chainParams, error, &isValid);
-  applyStandaloneValidation(validateAuxPow, block, chainParams, error, &isValid);
+  bool hasWitnessData = false;
+
+  // Block validation
+  isValid |= BTC::validateBlockSize(block, DOGE::Configuration::MaxBlockSize, error);
+  isValid |= BTC::validateMerkleRoot(block, error);
+  isValid |= BTC::validateWitnessCommitment(block, hasWitnessData, error);
+  isValid |= validateAuxPow(block, chainParams, error);
+
+  validation.HasWitnessData = hasWitnessData;
+
+  // TODO: Transaction validation
   return isValid;
 }
 
-bool DOGE::Common::checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool DOGE::Common::checkBlockContextual(const BlockIndex &index,
+                                        const Proto::Block &block,
+                                        const Proto::CBlockValidationData &validation,
+                                        const Proto::CBlockLinkedOutputs&,
+                                        const ChainParams &chainParams,
+                                        std::string &error)
 {
   bool isValid = true;
-  applyContextualValidation(validateBIP34<DOGE::X>, index, block, chainParams, error, &isValid);
-  applyContextualValidation(validateUnexpectedWitness<DOGE::X>, index, block, chainParams, error, &isValid);
+  isValid |= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
+  isValid |= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);
   return isValid;
 }
 

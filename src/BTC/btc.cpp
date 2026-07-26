@@ -224,13 +224,13 @@ UInt<256> GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams
   bool fNegative;
   bool fOverflow;
   UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
-  if (fNegative || fOverflow || bnTarget == 0)
-      return 0;
+  if (fNegative || fOverflow || bnTarget.isZero())
+      return UInt<256>::zero();
   // We need to compute 2**256 / (bnTarget+1), but we can't represent 2**256
   // as it's too large for an arith_uint256. However, as 2**256 is at least as large
   // as bnTarget+1, it is equal to ((2**256 - bnTarget - 1) / (bnTarget+1)) + 1,
   // or ~bnTarget / (bnTarget+1) + 1.
-  return (~bnTarget / (bnTarget + 1)) + 1;
+  return (~bnTarget / (bnTarget + 1u)) + 1u;
 }
 
 
@@ -241,7 +241,7 @@ bool checkConsensus(const BTC::Proto::BlockHeader &header, CheckConsensusCtx&, B
   UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
 
   // Check range
-  if (fNegative || bnTarget == 0 || fOverflow || bnTarget > chainParams.powLimit)
+  if (fNegative || bnTarget.isZero() || fOverflow || bnTarget > chainParams.powLimit)
     return false;
 
   // Check proof of work matches claimed amount

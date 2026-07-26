@@ -8,7 +8,7 @@
 
 namespace BTC {
 
-size_t Io<ZEC::Proto::CompressedG1>::getSerializedSize(const ZEC::Proto::CompressedG1 &data)
+size_t Io<ZEC::Proto::CompressedG1>::getSerializedSize(const ZEC::Proto::CompressedG1&)
 {
   return 1 + 32;
 }
@@ -177,7 +177,7 @@ void Io<ZEC::Proto::SpendDescription>::unserialize(xmstream &src, ZEC::Proto::Sp
   BTC::unserialize(src, data.spendAuthSig);
 }
 
-void Io<ZEC::Proto::SpendDescription>::unpack2(xmstream &src, ZEC::Proto::SpendDescription *data, uint8_t **extraData)
+void Io<ZEC::Proto::SpendDescription>::unpack2(xmstream &src, ZEC::Proto::SpendDescription *data, uint8_t**)
 {
   unserialize(src, *data);
 }
@@ -222,7 +222,7 @@ void Io<ZEC::Proto::OutputDescription>::unserialize(xmstream &src, ZEC::Proto::O
   BTC::unserialize(src, data.zkproof);
 }
 
-void Io<ZEC::Proto::OutputDescription>::unpack2(xmstream &src, ZEC::Proto::OutputDescription *data, uint8_t **extraData)
+void Io<ZEC::Proto::OutputDescription>::unpack2(xmstream &src, ZEC::Proto::OutputDescription *data, uint8_t**)
 {
   unserialize(src, *data);
 }
@@ -311,7 +311,7 @@ void Io<ZEC::Proto::JSDescription, bool>::unserialize(xmstream &src, ZEC::Proto:
   BTC::unserialize(src, data.ciphertext2);
 }
 
-void Io<ZEC::Proto::JSDescription, bool>::unpack2(xmstream &src, ZEC::Proto::JSDescription *data, uint8_t **extraData, bool useGroth)
+void Io<ZEC::Proto::JSDescription, bool>::unpack2(xmstream &src, ZEC::Proto::JSDescription *data, uint8_t**, bool useGroth)
 {
   unserialize(src, *data, useGroth);
 }
@@ -410,7 +410,7 @@ size_t Io<ZEC::Proto::Transaction>::getUnpackedExtraSize(xmstream &src)
   uint32_t header;
   bool fOverwintered;
   int32_t version;
-  uint32_t nVersionGroupId;
+  uint32_t nVersionGroupId = 0;
 
   BTC::unserialize(src, header);
   fOverwintered = header >> 31;
@@ -604,19 +604,19 @@ void Io<ZEC::Proto::Transaction>::unpack2(xmstream &src, ZEC::Proto::Transaction
 namespace ZEC {
 Proto::BlockHashTy Proto::Transaction::getTxId() const
 {
-  uint256 result;
+  BaseBlob<256> result;
   uint8_t buffer[4096];
   xmstream stream(buffer, sizeof(buffer));
   stream.reset();
   BTC::Io<Proto::Transaction>::serialize(stream, *this);
 
-  SHA256_CTX sha256;
-  SHA256_Init(&sha256);
-  SHA256_Update(&sha256, stream.data(), stream.sizeOf());
-  SHA256_Final(result.begin(), &sha256);
-  SHA256_Init(&sha256);
-  SHA256_Update(&sha256, result.begin(), sizeof(result));
-  SHA256_Final(result.begin(), &sha256);
+  CCtxSha256 sha256;
+  sha256Init(&sha256);
+  sha256Update(&sha256, stream.data(), stream.sizeOf());
+  sha256Final(&sha256, result.begin());
+  sha256Init(&sha256);
+  sha256Update(&sha256, result.begin(), sizeof(result));
+  sha256Final(&sha256, result.begin());
   return result;
 }
 }

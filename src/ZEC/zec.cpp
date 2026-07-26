@@ -5,17 +5,19 @@
 
 #include "zec.h"
 #include "BTC/script.h"
+#include "common/serializeUtils.h"
+#include "common/utils.h"
 
-static ZEC::Proto::Block createGenesisBlock(int64_t genesisReward, uint32_t nTime, uint32_t nBits, const uint256 &nNonce, const std::string &equihashSolution)
+static ZEC::Proto::Block createGenesisBlock(int64_t genesisReward, uint32_t nTime, uint32_t nBits, const char *nNonceHex, const std::string &equihashSolution)
 {
   ZEC::Proto::Block block;
   block.header.nVersion = 4;
-  block.header.hashPrevBlock.SetNull();
-  block.header.hashMerkleRoot.SetNull();
-  block.header.hashLightClientRoot.SetNull();
+  block.header.hashPrevBlock.setNull();
+  block.header.hashMerkleRoot.setNull();
+  block.header.hashLightClientRoot.setNull();
   block.header.nTime = nTime;
   block.header.nBits = nBits;
-  block.header.nNonce = nNonce;
+  block.header.nNonce.setHexLE(nNonceHex);
   block.header.nSolution.resize(equihashSolution.size() / 2);
   hex2bin(equihashSolution.data(), equihashSolution.size(), block.header.nSolution.data());
 
@@ -35,7 +37,7 @@ static ZEC::Proto::Block createGenesisBlock(int64_t genesisReward, uint32_t nTim
     xvectorFromStream(std::move(stream), tx.txIn[0].scriptSig);
   }
 
-  txin.previousOutputHash.SetNull();
+  txin.previousOutputHash.setNull();
   txin.previousOutputIndex = 0xFFFFFFFF;
   txin.sequence = 0xFFFFFFFF;
 
@@ -66,7 +68,11 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 8232;
     params->PublicKeyPrefix = {0x1C,0xB8};    // t1
 
-    params->powLimit = uint256S("0007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    // ZCash has neither BIP34 nor segwit, checkBlockContextual does not look at these
+    params->BIP34Height = 0;
+    params->SegwitHeight = 0;
+
+    params->powLimit = UInt<256>::fromHex("0007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     {
       static const std::string equihashSolution =
@@ -88,7 +94,7 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
           "8fde9ad71dab024779dcdde0b6602b5ae0a6265c14b94edd83b37403f4b78fcd2ed555b596402c28ee81d87a909c4e8722b30c71ecdd861b05f61f8b1231795c76adba2fdefa451b283a5d527955b9f3"
          "de1b9828e7b2e74123dd47062ddcc09b05e7fa13cb2212a6fdbc65d7e852cec463ec6fd929f5b8483cf3052113b13dac91b69f49d1b7d1aec01c4a68e41ce157";
 
-      params->GenesisBlock = createGenesisBlock(0, 1477641360, 0x1f07ffff, uint256S("0x0000000000000000000000000000000000000000000000000000000000001257"), equihashSolution);
+      params->GenesisBlock = createGenesisBlock(0, 1477641360, 0x1f07ffff, "0x0000000000000000000000000000000000000000000000000000000000001257", equihashSolution);
       genesis_block_hash_assert_eq<ZEC::X>(params->GenesisBlock.header, "00040fe8ec8471911baa1db1266ea15dd06b4a8a5c453883c000b031973dce08");
     }
 
@@ -106,7 +112,12 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultPort = 18233;
     params->DefaultRPCPort = 18232;
     params->PublicKeyPrefix = {0x1D,0x25};    // tm
-    params->powLimit = uint256S("07ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+    // ZCash has neither BIP34 nor segwit, checkBlockContextual does not look at these
+    params->BIP34Height = 0;
+    params->SegwitHeight = 0;
+
+    params->powLimit = UInt<256>::fromHex("07ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
     {
       static const std::string equihashSolution =
@@ -128,7 +139,7 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
           "8a24119968b14783cafa713bc5f2a65205a42e4ce9dc7ba462bdb1f3e4553afc15f5f39998fdb53e7e231e3e520a46943734a007c2daa1eda9f495791657eefcac5c32833936e568d06187857ed04d7b"
           "97167ae207c5c5ae54e528c36016a984235e9c5b2f0718d7b3aa93c7822ccc772580b6599671b3c02ece8a21399abd33cfd3028790133167d0a97e7de53dc8ff";
 
-      params->GenesisBlock = createGenesisBlock(0, 1477648033, 0x2007ffff, uint256S("0x0000000000000000000000000000000000000000000000000000000000000006"), equihashSolution);
+      params->GenesisBlock = createGenesisBlock(0, 1477648033, 0x2007ffff, "0x0000000000000000000000000000000000000000000000000000000000000006", equihashSolution);
       genesis_block_hash_assert_eq<ZEC::X>(params->GenesisBlock.header, "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38");
     }
 
@@ -144,7 +155,12 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultPort = 18344;
     params->DefaultRPCPort = 18232;
     params->PublicKeyPrefix = {0x1D,0x25};    // tm
-    params->powLimit = uint256S("0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f");
+
+    // ZCash has neither BIP34 nor segwit, checkBlockContextual does not look at these
+    params->BIP34Height = 0;
+    params->SegwitHeight = 0;
+
+    params->powLimit = UInt<256>::fromHex("0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f");
 
     // Soft & hard forks
     {
@@ -167,7 +183,7 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
           "8a24119968b14783cafa713bc5f2a65205a42e4ce9dc7ba462bdb1f3e4553afc15f5f39998fdb53e7e231e3e520a46943734a007c2daa1eda9f495791657eefcac5c32833936e568d06187857ed04d7b"
           "97167ae207c5c5ae54e528c36016a984235e9c5b2f0718d7b3aa93c7822ccc772580b6599671b3c02ece8a21399abd33cfd3028790133167d0a97e7de53dc8ff";
 
-      params->GenesisBlock = createGenesisBlock(0, 1296688602, 0x200f0f0f, uint256S("0x0000000000000000000000000000000000000000000000000000000000000009"), equihashSolution);
+      params->GenesisBlock = createGenesisBlock(0, 1296688602, 0x200f0f0f, "0x0000000000000000000000000000000000000000000000000000000000000009", equihashSolution);
       genesis_block_hash_assert_eq<ZEC::X>(params->GenesisBlock.header, "0000000000000000000000000000000000000000000000000000000000000000");
     }
   } else {
@@ -177,43 +193,49 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-bool ZEC::Common::checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, uint256 &powLimit)
+bool ZEC::Common::checkPow(const Proto::BlockHeader&, uint32_t, CheckConsensusCtx&, const UInt<256>&)
 {
   // TODO: equihash check implement
   return true;
 }
 
-arith_uint256 ZEC::Common::GetBlockProof(const Proto::BlockHeader &header)
+UInt<256> ZEC::Common::GetBlockProof(const Proto::BlockHeader &header)
 {
-  arith_uint256 bnTarget;
   bool fNegative;
   bool fOverflow;
-  bnTarget.SetCompact(header.nBits, &fNegative, &fOverflow);
-  if (fNegative || fOverflow || bnTarget == 0)
-      return 0;
+  UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
+  if (fNegative || fOverflow || bnTarget.isZero())
+      return UInt<256>::zero();
   // We need to compute 2**256 / (bnTarget+1), but we can't represent 2**256
   // as it's too large for an arith_uint256. However, as 2**256 is at least as large
   // as bnTarget+1, it is equal to ((2**256 - bnTarget - 1) / (bnTarget+1)) + 1,
   // or ~bnTarget / (bnTarget+1) + 1.
-  return (~bnTarget / (bnTarget + 1)) + 1;
+  return (~bnTarget / (bnTarget + 1u)) + 1u;
 }
 
-void ZEC::Common::initializeValidationContext(const Proto::Block &block, DB::UTXODb &utxodb)
-{
-  ::initializeValidationContext<ZEC::X>(block, utxodb);
-}
-
-unsigned ZEC::Common::checkBlockStandalone(Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool ZEC::Common::checkBlockStandalone(const Proto::Block &block,
+                                      Proto::CBlockValidationData&,
+                                      const ChainParams&,
+                                      std::string &error)
 {
   bool isValid = true;
-  memset(&block.validationData, 0, sizeof(block.validationData));
-  applyStandaloneValidation(validateBlockSize<ZEC::X>, block, chainParams, error, &isValid);
-  applyStandaloneValidation(validateMerkleRoot<ZEC::X>, block, chainParams, error, &isValid);
+
+  // Block validation
+  isValid |= BTC::validateBlockSize(block, ZEC::Configuration::MaxBlockSize, error);
+  isValid |= BTC::validateMerkleRoot(block, error);
+
+  // ZEC has no witness data, HasWitnessData stays false as initialized
+
+  // TODO: Transaction validation
   return isValid;
 }
 
-bool ZEC::Common::checkBlockContextual(const BlockIndex &index, const Proto::Block &block, const ChainParams &chainParams, std::string &error)
+bool ZEC::Common::checkBlockContextual(const BlockIndex&,
+                                      const Proto::Block&,
+                                      const Proto::CBlockValidationData&,
+                                      const Proto::CBlockLinkedOutputs&,
+                                      const ChainParams&,
+                                      std::string&)
 {
-  bool isValid = true;
-  return isValid;
+  return true;
 }

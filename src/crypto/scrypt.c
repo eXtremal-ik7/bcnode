@@ -1,19 +1,25 @@
 #include "scrypt.h"
 #include "sha256.h"
+#include "endianc.h"
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
-#ifdef LIBPOW_SSE2_ENABLED
-#include <immintrin.h>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define LIBPOW_ALIGN(n) __attribute__((aligned(n)))
+#define LIBPOW_NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define LIBPOW_ALIGN(n) __declspec(align(n))
+#define LIBPOW_NOINLINE __declspec(noinline)
+#else
+#define LIBPOW_ALIGN(n)
+#define LIBPOW_NOINLINE
 #endif
 
 typedef struct HMAC_SHA256Context {
   CCtxSha256 ictx;
   CCtxSha256 octx;
 } HMAC_SHA256_CTX;
-
-static inline void be32enc(void *pp, uint32_t x) { *((uint32_t*)pp) = bswap32(x); }
-static inline uint32_t le32dec(const void *pp) { return *(uint32_t*)pp; }
-static inline void le32enc(void *pp, uint32_t x) { *((uint32_t*)pp) = x; }
 
 // Initialize an HMAC-SHA256 operation with the given key.
 static void HMAC_SHA256_Init(HMAC_SHA256_CTX *ctx, const void *_K, size_t Klen)
@@ -90,7 +96,7 @@ static void PBKDF2_SHA256(const uint8_t *passwd,
   // Iterate through the blocks
   for (i = 0; i * 32 < dkLen; i++) {
     // Generate INT(i + 1)
-    be32enc(ivec, (uint32_t)(i + 1));
+    storebe32(ivec, (uint32_t)(i + 1));
 
     // Compute U_1 = PRF(P, S || INT(i))
     memcpy(&hctx, &PShctx, sizeof(HMAC_SHA256_CTX));
@@ -119,15 +125,175 @@ static void PBKDF2_SHA256(const uint8_t *passwd,
   }
 }
 
+#if defined(LIBPOW_SSE2_ENABLED) && !defined(LIBPOW_SCRYPT_SSE2_DISABLED)
+#include <emmintrin.h>
+
+static inline __m128i rol32sse2(__m128i x, int n) {
+  return _mm_or_si128(_mm_slli_epi32(x, n), _mm_srli_epi32(x, 32 - n));
+}
+
+static void xorSalsa8sse2(uint32_t B[16], const uint32_t Bx[16])
+{
+  __m128i *B128 = (__m128i *)B;
+  const __m128i *Bx128 = (const __m128i *)Bx;
+
+  B128[0] = _mm_xor_si128(B128[0], Bx128[0]);
+  B128[1] = _mm_xor_si128(B128[1], Bx128[1]);
+  B128[2] = _mm_xor_si128(B128[2], Bx128[2]);
+  B128[3] = _mm_xor_si128(B128[3], Bx128[3]);
+
+  __m128i X0 = B128[0], X1 = B128[1], X2 = B128[2], X3 = B128[3];
+  __m128i orig0 = X0, orig1 = X1, orig2 = X2, orig3 = X3;
+  __m128i T;
+
+  for (int i = 0; i < 4; i++) {
+    T = _mm_add_epi32(X0, X3);  X1 = _mm_xor_si128(X1, rol32sse2(T,  7));
+    T = _mm_add_epi32(X1, X0);  X2 = _mm_xor_si128(X2, rol32sse2(T,  9));
+    T = _mm_add_epi32(X2, X1);  X3 = _mm_xor_si128(X3, rol32sse2(T, 13));
+    T = _mm_add_epi32(X3, X2);  X0 = _mm_xor_si128(X0, rol32sse2(T, 18));
+    X1 = _mm_shuffle_epi32(X1, 0x93);
+    X2 = _mm_shuffle_epi32(X2, 0x4E);
+    X3 = _mm_shuffle_epi32(X3, 0x39);
+    T = _mm_add_epi32(X0, X1);  X3 = _mm_xor_si128(X3, rol32sse2(T,  7));
+    T = _mm_add_epi32(X3, X0);  X2 = _mm_xor_si128(X2, rol32sse2(T,  9));
+    T = _mm_add_epi32(X2, X3);  X1 = _mm_xor_si128(X1, rol32sse2(T, 13));
+    T = _mm_add_epi32(X1, X2);  X0 = _mm_xor_si128(X0, rol32sse2(T, 18));
+    X1 = _mm_shuffle_epi32(X1, 0x39);
+    X2 = _mm_shuffle_epi32(X2, 0x4E);
+    X3 = _mm_shuffle_epi32(X3, 0x93);
+  }
+
+  B128[0] = _mm_add_epi32(X0, orig0);
+  B128[1] = _mm_add_epi32(X1, orig1);
+  B128[2] = _mm_add_epi32(X2, orig2);
+  B128[3] = _mm_add_epi32(X3, orig3);
+}
+
+static void scrypt_1024_1_1_256_sp(const char *input, char *output, char *scratchpad)
+{
+  uint8_t B[128];
+  LIBPOW_ALIGN(16) uint32_t X[32];
+  uint32_t *V;
+  uint32_t i, j;
+  __m128i *X128 = (__m128i *)X;
+
+  V = (uint32_t *)(((uintptr_t)(scratchpad) + 63) & ~ (uintptr_t)(63));
+
+  PBKDF2_SHA256((const uint8_t *)input, 80, (const uint8_t *)input, 80, 1, B, 128);
+
+  // Linear to diagonal: diag0={0,5,10,15} diag1={4,9,14,3} diag2={8,13,2,7} diag3={12,1,6,11}
+  {
+    const uint32_t *S = (const uint32_t *)B;
+    X[0]  = S[0];
+    X[1]  = S[5];
+    X[2]  = S[10];
+    X[3]  = S[15];
+    X[4]  = S[4];
+    X[5]  = S[9];
+    X[6]  = S[14];
+    X[7]  = S[3];
+    X[8]  = S[8];
+    X[9]  = S[13];
+    X[10] = S[2];
+    X[11] = S[7];
+    X[12] = S[12];
+    X[13] = S[1];
+    X[14] = S[6];
+    X[15] = S[11];
+    S += 16;
+    X[16] = S[0];
+    X[17] = S[5];
+    X[18] = S[10];
+    X[19] = S[15];
+    X[20] = S[4];
+    X[21] = S[9];
+    X[22] = S[14];
+    X[23] = S[3];
+    X[24] = S[8];
+    X[25] = S[13];
+    X[26] = S[2];
+    X[27] = S[7];
+    X[28] = S[12];
+    X[29] = S[1];
+    X[30] = S[6];
+    X[31] = S[11];
+  }
+
+  for (i = 0; i < 1024; i++) {
+    __m128i *dst = (__m128i *)&V[i * 32];
+    dst[0] = X128[0]; dst[1] = X128[1];
+    dst[2] = X128[2]; dst[3] = X128[3];
+    dst[4] = X128[4]; dst[5] = X128[5];
+    dst[6] = X128[6]; dst[7] = X128[7];
+    xorSalsa8sse2(&X[0], &X[16]);
+    xorSalsa8sse2(&X[16], &X[0]);
+  }
+  for (i = 0; i < 1024; i++) {
+    j = 32 * (X[16] & 1023);
+    const __m128i *src = (const __m128i *)&V[j];
+    X128[0] = _mm_xor_si128(X128[0], src[0]);
+    X128[1] = _mm_xor_si128(X128[1], src[1]);
+    X128[2] = _mm_xor_si128(X128[2], src[2]);
+    X128[3] = _mm_xor_si128(X128[3], src[3]);
+    X128[4] = _mm_xor_si128(X128[4], src[4]);
+    X128[5] = _mm_xor_si128(X128[5], src[5]);
+    X128[6] = _mm_xor_si128(X128[6], src[6]);
+    X128[7] = _mm_xor_si128(X128[7], src[7]);
+    xorSalsa8sse2(&X[0], &X[16]);
+    xorSalsa8sse2(&X[16], &X[0]);
+  }
+
+  // Diagonal to linear
+  {
+    uint32_t *D = (uint32_t *)B;
+    D[0]  = X[0];
+    D[5]  = X[1];
+    D[10] = X[2];
+    D[15] = X[3];
+    D[4]  = X[4];
+    D[9]  = X[5];
+    D[14] = X[6];
+    D[3]  = X[7];
+    D[8]  = X[8];
+    D[13] = X[9];
+    D[2]  = X[10];
+    D[7]  = X[11];
+    D[12] = X[12];
+    D[1]  = X[13];
+    D[6]  = X[14];
+    D[11] = X[15];
+    D += 16;
+    D[0]  = X[16];
+    D[5]  = X[17];
+    D[10] = X[18];
+    D[15] = X[19];
+    D[4]  = X[20];
+    D[9]  = X[21];
+    D[14] = X[22];
+    D[3]  = X[23];
+    D[8]  = X[24];
+    D[13] = X[25];
+    D[2]  = X[26];
+    D[7]  = X[27];
+    D[12] = X[28];
+    D[1]  = X[29];
+    D[6]  = X[30];
+    D[11] = X[31];
+  }
+
+  PBKDF2_SHA256((const uint8_t *)input, 80, B, 128, 1, (uint8_t *)output, 32);
+}
+
+#else // scalar fallback
+
 static inline uint32_t rol32(const uint32_t x, const int n)
 {
   return (x << n) | (x >> (32 - n));
 }
 
-static inline void xorSalsa8(uint32_t B[16], const uint32_t Bx[16])
+static void LIBPOW_NOINLINE xorSalsa8(uint32_t B[16], const uint32_t Bx[16])
 {
   uint32_t x00,x01,x02,x03,x04,x05,x06,x07,x08,x09,x10,x11,x12,x13,x14,x15;
-  int i;
 
   x00 = (B[ 0] ^= Bx[ 0]);
   x01 = (B[ 1] ^= Bx[ 1]);
@@ -146,26 +312,77 @@ static inline void xorSalsa8(uint32_t B[16], const uint32_t Bx[16])
   x14 = (B[14] ^= Bx[14]);
   x15 = (B[15] ^= Bx[15]);
 
-  for (i = 0; i < 8; i += 2) {
-    // Operate on columns
-    x04 ^= rol32(x00 + x12,  7);  x09 ^= rol32(x05 + x01,  7);
-    x14 ^= rol32(x10 + x06,  7);  x03 ^= rol32(x15 + x11,  7);
-    x08 ^= rol32(x04 + x00,  9);  x13 ^= rol32(x09 + x05,  9);
-    x02 ^= rol32(x14 + x10,  9);  x07 ^= rol32(x03 + x15,  9);
-    x12 ^= rol32(x08 + x04, 13);  x01 ^= rol32(x13 + x09, 13);
-    x06 ^= rol32(x02 + x14, 13);  x11 ^= rol32(x07 + x03, 13);
-    x00 ^= rol32(x12 + x08, 18);  x05 ^= rol32(x01 + x13, 18);
-    x10 ^= rol32(x06 + x02, 18);  x15 ^= rol32(x11 + x07, 18);
-    // Operate on rows
-    x01 ^= rol32(x00 + x03,  7);  x06 ^= rol32(x05 + x04,  7);
-    x11 ^= rol32(x10 + x09,  7);  x12 ^= rol32(x15 + x14,  7);
-    x02 ^= rol32(x01 + x00,  9);  x07 ^= rol32(x06 + x05,  9);
-    x08 ^= rol32(x11 + x10,  9);  x13 ^= rol32(x12 + x15,  9);
-    x03 ^= rol32(x02 + x01, 13);  x04 ^= rol32(x07 + x06, 13);
-    x09 ^= rol32(x08 + x11, 13);  x14 ^= rol32(x13 + x12, 13);
-    x00 ^= rol32(x03 + x02, 18);  x05 ^= rol32(x04 + x07, 18);
-    x10 ^= rol32(x09 + x08, 18);  x15 ^= rol32(x14 + x13, 18);
-  }
+  // Round 1-2
+  x04 ^= rol32(x00 + x12,  7);  x09 ^= rol32(x05 + x01,  7);
+  x14 ^= rol32(x10 + x06,  7);  x03 ^= rol32(x15 + x11,  7);
+  x08 ^= rol32(x04 + x00,  9);  x13 ^= rol32(x09 + x05,  9);
+  x02 ^= rol32(x14 + x10,  9);  x07 ^= rol32(x03 + x15,  9);
+  x12 ^= rol32(x08 + x04, 13);  x01 ^= rol32(x13 + x09, 13);
+  x06 ^= rol32(x02 + x14, 13);  x11 ^= rol32(x07 + x03, 13);
+  x00 ^= rol32(x12 + x08, 18);  x05 ^= rol32(x01 + x13, 18);
+  x10 ^= rol32(x06 + x02, 18);  x15 ^= rol32(x11 + x07, 18);
+  x01 ^= rol32(x00 + x03,  7);  x06 ^= rol32(x05 + x04,  7);
+  x11 ^= rol32(x10 + x09,  7);  x12 ^= rol32(x15 + x14,  7);
+  x02 ^= rol32(x01 + x00,  9);  x07 ^= rol32(x06 + x05,  9);
+  x08 ^= rol32(x11 + x10,  9);  x13 ^= rol32(x12 + x15,  9);
+  x03 ^= rol32(x02 + x01, 13);  x04 ^= rol32(x07 + x06, 13);
+  x09 ^= rol32(x08 + x11, 13);  x14 ^= rol32(x13 + x12, 13);
+  x00 ^= rol32(x03 + x02, 18);  x05 ^= rol32(x04 + x07, 18);
+  x10 ^= rol32(x09 + x08, 18);  x15 ^= rol32(x14 + x13, 18);
+
+  // Round 3-4
+  x04 ^= rol32(x00 + x12,  7);  x09 ^= rol32(x05 + x01,  7);
+  x14 ^= rol32(x10 + x06,  7);  x03 ^= rol32(x15 + x11,  7);
+  x08 ^= rol32(x04 + x00,  9);  x13 ^= rol32(x09 + x05,  9);
+  x02 ^= rol32(x14 + x10,  9);  x07 ^= rol32(x03 + x15,  9);
+  x12 ^= rol32(x08 + x04, 13);  x01 ^= rol32(x13 + x09, 13);
+  x06 ^= rol32(x02 + x14, 13);  x11 ^= rol32(x07 + x03, 13);
+  x00 ^= rol32(x12 + x08, 18);  x05 ^= rol32(x01 + x13, 18);
+  x10 ^= rol32(x06 + x02, 18);  x15 ^= rol32(x11 + x07, 18);
+  x01 ^= rol32(x00 + x03,  7);  x06 ^= rol32(x05 + x04,  7);
+  x11 ^= rol32(x10 + x09,  7);  x12 ^= rol32(x15 + x14,  7);
+  x02 ^= rol32(x01 + x00,  9);  x07 ^= rol32(x06 + x05,  9);
+  x08 ^= rol32(x11 + x10,  9);  x13 ^= rol32(x12 + x15,  9);
+  x03 ^= rol32(x02 + x01, 13);  x04 ^= rol32(x07 + x06, 13);
+  x09 ^= rol32(x08 + x11, 13);  x14 ^= rol32(x13 + x12, 13);
+  x00 ^= rol32(x03 + x02, 18);  x05 ^= rol32(x04 + x07, 18);
+  x10 ^= rol32(x09 + x08, 18);  x15 ^= rol32(x14 + x13, 18);
+
+  // Round 5-6
+  x04 ^= rol32(x00 + x12,  7);  x09 ^= rol32(x05 + x01,  7);
+  x14 ^= rol32(x10 + x06,  7);  x03 ^= rol32(x15 + x11,  7);
+  x08 ^= rol32(x04 + x00,  9);  x13 ^= rol32(x09 + x05,  9);
+  x02 ^= rol32(x14 + x10,  9);  x07 ^= rol32(x03 + x15,  9);
+  x12 ^= rol32(x08 + x04, 13);  x01 ^= rol32(x13 + x09, 13);
+  x06 ^= rol32(x02 + x14, 13);  x11 ^= rol32(x07 + x03, 13);
+  x00 ^= rol32(x12 + x08, 18);  x05 ^= rol32(x01 + x13, 18);
+  x10 ^= rol32(x06 + x02, 18);  x15 ^= rol32(x11 + x07, 18);
+  x01 ^= rol32(x00 + x03,  7);  x06 ^= rol32(x05 + x04,  7);
+  x11 ^= rol32(x10 + x09,  7);  x12 ^= rol32(x15 + x14,  7);
+  x02 ^= rol32(x01 + x00,  9);  x07 ^= rol32(x06 + x05,  9);
+  x08 ^= rol32(x11 + x10,  9);  x13 ^= rol32(x12 + x15,  9);
+  x03 ^= rol32(x02 + x01, 13);  x04 ^= rol32(x07 + x06, 13);
+  x09 ^= rol32(x08 + x11, 13);  x14 ^= rol32(x13 + x12, 13);
+  x00 ^= rol32(x03 + x02, 18);  x05 ^= rol32(x04 + x07, 18);
+  x10 ^= rol32(x09 + x08, 18);  x15 ^= rol32(x14 + x13, 18);
+
+  // Round 7-8
+  x04 ^= rol32(x00 + x12,  7);  x09 ^= rol32(x05 + x01,  7);
+  x14 ^= rol32(x10 + x06,  7);  x03 ^= rol32(x15 + x11,  7);
+  x08 ^= rol32(x04 + x00,  9);  x13 ^= rol32(x09 + x05,  9);
+  x02 ^= rol32(x14 + x10,  9);  x07 ^= rol32(x03 + x15,  9);
+  x12 ^= rol32(x08 + x04, 13);  x01 ^= rol32(x13 + x09, 13);
+  x06 ^= rol32(x02 + x14, 13);  x11 ^= rol32(x07 + x03, 13);
+  x00 ^= rol32(x12 + x08, 18);  x05 ^= rol32(x01 + x13, 18);
+  x10 ^= rol32(x06 + x02, 18);  x15 ^= rol32(x11 + x07, 18);
+  x01 ^= rol32(x00 + x03,  7);  x06 ^= rol32(x05 + x04,  7);
+  x11 ^= rol32(x10 + x09,  7);  x12 ^= rol32(x15 + x14,  7);
+  x02 ^= rol32(x01 + x00,  9);  x07 ^= rol32(x06 + x05,  9);
+  x08 ^= rol32(x11 + x10,  9);  x13 ^= rol32(x12 + x15,  9);
+  x03 ^= rol32(x02 + x01, 13);  x04 ^= rol32(x07 + x06, 13);
+  x09 ^= rol32(x08 + x11, 13);  x14 ^= rol32(x13 + x12, 13);
+  x00 ^= rol32(x03 + x02, 18);  x05 ^= rol32(x04 + x07, 18);
+  x10 ^= rol32(x09 + x08, 18);  x15 ^= rol32(x14 + x13, 18);
 
   B[ 0] += x00;
   B[ 1] += x01;
@@ -185,66 +402,7 @@ static inline void xorSalsa8(uint32_t B[16], const uint32_t Bx[16])
   B[15] += x15;
 }
 
-#ifdef LIBPOW_SSE2_ENABLED
-static inline void xorSalsa8SSE2(__m128i B[4], const __m128i Bx[4])
-{
-  __m128i X0, X1, X2, X3;
-  __m128i T;
-  int i;
-
-  X0 = B[0] = _mm_xor_si128(B[0], Bx[0]);
-  X1 = B[1] = _mm_xor_si128(B[1], Bx[1]);
-  X2 = B[2] = _mm_xor_si128(B[2], Bx[2]);
-  X3 = B[3] = _mm_xor_si128(B[3], Bx[3]);
-
-  for (i = 0; i < 8; i += 2) {
-    // Operate on "columns"
-    T = _mm_add_epi32(X0, X3);
-    X1 = _mm_xor_si128(X1, _mm_slli_epi32(T, 7));
-    X1 = _mm_xor_si128(X1, _mm_srli_epi32(T, 25));
-    T = _mm_add_epi32(X1, X0);
-    X2 = _mm_xor_si128(X2, _mm_slli_epi32(T, 9));
-    X2 = _mm_xor_si128(X2, _mm_srli_epi32(T, 23));
-    T = _mm_add_epi32(X2, X1);
-    X3 = _mm_xor_si128(X3, _mm_slli_epi32(T, 13));
-    X3 = _mm_xor_si128(X3, _mm_srli_epi32(T, 19));
-    T = _mm_add_epi32(X3, X2);
-    X0 = _mm_xor_si128(X0, _mm_slli_epi32(T, 18));
-    X0 = _mm_xor_si128(X0, _mm_srli_epi32(T, 14));
-
-    // Rearrange data
-    X1 = _mm_shuffle_epi32(X1, 0x93);
-    X2 = _mm_shuffle_epi32(X2, 0x4E);
-    X3 = _mm_shuffle_epi32(X3, 0x39);
-
-    // Operate on "rows"
-    T = _mm_add_epi32(X0, X1);
-    X3 = _mm_xor_si128(X3, _mm_slli_epi32(T, 7));
-    X3 = _mm_xor_si128(X3, _mm_srli_epi32(T, 25));
-    T = _mm_add_epi32(X3, X0);
-    X2 = _mm_xor_si128(X2, _mm_slli_epi32(T, 9));
-    X2 = _mm_xor_si128(X2, _mm_srli_epi32(T, 23));
-    T = _mm_add_epi32(X2, X3);
-    X1 = _mm_xor_si128(X1, _mm_slli_epi32(T, 13));
-    X1 = _mm_xor_si128(X1, _mm_srli_epi32(T, 19));
-    T = _mm_add_epi32(X1, X2);
-    X0 = _mm_xor_si128(X0, _mm_slli_epi32(T, 18));
-    X0 = _mm_xor_si128(X0, _mm_srli_epi32(T, 14));
-
-    // Rearrange data
-    X1 = _mm_shuffle_epi32(X1, 0x39);
-    X2 = _mm_shuffle_epi32(X2, 0x4E);
-    X3 = _mm_shuffle_epi32(X3, 0x93);
-  }
-
-  B[0] = _mm_add_epi32(B[0], X0);
-  B[1] = _mm_add_epi32(B[1], X1);
-  B[2] = _mm_add_epi32(B[2], X2);
-  B[3] = _mm_add_epi32(B[3], X3);
-}
-#endif
-
-void scrypt_1024_1_1_256_sp_generic(const char *input, char *output, char *scratchpad)
+static void scrypt_1024_1_1_256_sp(const char *input, char *output, char *scratchpad)
 {
   uint8_t B[128];
   uint32_t X[32];
@@ -255,8 +413,12 @@ void scrypt_1024_1_1_256_sp_generic(const char *input, char *output, char *scrat
 
   PBKDF2_SHA256((const uint8_t *)input, 80, (const uint8_t *)input, 80, 1, B, 128);
 
-  for (k = 0; k < 32; k++)
-    X[k] = le32dec(&B[4 * k]);
+  if (isLittleEndian()) {
+    memcpy(X, B, 128);
+  } else {
+    for (k = 0; k < 32; k++)
+      X[k] = loadle32(&B[4 * k]);
+  }
 
   for (i = 0; i < 1024; i++) {
     memcpy(&V[i * 32], X, 128);
@@ -271,63 +433,20 @@ void scrypt_1024_1_1_256_sp_generic(const char *input, char *output, char *scrat
     xorSalsa8(&X[16], &X[0]);
   }
 
-  for (k = 0; k < 32; k++)
-    le32enc(&B[4 * k], X[k]);
-
-  PBKDF2_SHA256((const uint8_t *)input, 80, B, 128, 1, (uint8_t *)output, 32);
-}
-
-#ifdef LIBPOW_SSE2_ENABLED
-void scrypt_1024_1_1_256_sp_sse2(const char *input, char *output, char *scratchpad)
-{
-  uint8_t B[128];
-  union {
-    __m128i i128[8];
-    uint32_t u32[32];
-  } X;
-  __m128i *V;
-  uint32_t i, j, k;
-
-  V = (__m128i *)(((uintptr_t)(scratchpad) + 63) & ~ (uintptr_t)(63));
-
-  PBKDF2_SHA256((const uint8_t *)input, 80, (const uint8_t *)input, 80, 1, B, 128);
-
-  for (k = 0; k < 2; k++) {
-    for (i = 0; i < 16; i++) {
-      X.u32[k * 16 + i] = le32dec(&B[(k * 16 + (i * 5 % 16)) * 4]);
-    }
-  }
-
-  for (i = 0; i < 1024; i++) {
-    for (k = 0; k < 8; k++)
-      V[i * 8 + k] = X.i128[k];
-    xorSalsa8SSE2(&X.i128[0], &X.i128[4]);
-    xorSalsa8SSE2(&X.i128[4], &X.i128[0]);
-  }
-  for (i = 0; i < 1024; i++) {
-    j = 8 * (X.u32[16] & 1023);
-    for (k = 0; k < 8; k++)
-      X.i128[k] = _mm_xor_si128(X.i128[k], V[j + k]);
-    xorSalsa8SSE2(&X.i128[0], &X.i128[4]);
-    xorSalsa8SSE2(&X.i128[4], &X.i128[0]);
-  }
-
-  for (k = 0; k < 2; k++) {
-    for (i = 0; i < 16; i++) {
-      le32enc(&B[(k * 16 + (i * 5 % 16)) * 4], X.u32[k * 16 + i]);
-    }
+  if (isLittleEndian()) {
+    memcpy(B, X, 128);
+  } else {
+    for (k = 0; k < 32; k++)
+      storele32(&B[4 * k], X[k]);
   }
 
   PBKDF2_SHA256((const uint8_t *)input, 80, B, 128, 1, (uint8_t *)output, 32);
 }
-#endif
+
+#endif // LIBPOW_SSE2_ENABLED && !LIBPOW_SCRYPT_SSE2_DISABLED
 
 void scrypt_1024_1_1_256(const void *input, uint8_t output[32])
 {
   char scratchpad[LTC_SCRATCHPAD_SIZE];
-#ifdef LIBPOW_SSE2_ENABLED
-  scrypt_1024_1_1_256_sp_sse2(input, (char*)output, scratchpad);
-#else
-  scrypt_1024_1_1_256_sp_generic(input, (char*)output, scratchpad);
-#endif
+  scrypt_1024_1_1_256_sp(input, (char*)output, scratchpad);
 }

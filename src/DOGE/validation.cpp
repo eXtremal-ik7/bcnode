@@ -38,7 +38,7 @@ bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainPa
 
   // Check parent block merkle tree
   {
-    uint256 parentBlockCoinbaseTxHash = block.header.ParentBlockCoinbaseTx.getTxId();
+    BaseBlob<256> parentBlockCoinbaseTxHash = block.header.ParentBlockCoinbaseTx.getTxId();
     if (calculateMerkleRoot(parentBlockCoinbaseTxHash, &block.header.MerkleBranch[0], block.header.MerkleBranch.size(), 0) != block.header.ParentBlock.hashMerkleRoot) {
       error = "Aux POW merkle root incorrect";
       return false;
@@ -46,7 +46,7 @@ bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainPa
   }
 
   // Check parent block's coinbase txin format
-  uint256 chainMerkleRoot =
+  BaseBlob<256> chainMerkleRoot =
     calculateMerkleRoot(block.header.GetHash(), &block.header.ChainMerkleBranch[0], block.header.ChainMerkleBranch.size(), block.header.ChainIndex);
   std::reverse(chainMerkleRoot.begin(), chainMerkleRoot.end());
 
@@ -76,7 +76,7 @@ bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainPa
     }
   }
 
-  auto chainMerkleTreeSizePos = chainMerkleRootPos + sizeof(uint256);
+  auto chainMerkleTreeSizePos = chainMerkleRootPos + chainMerkleRoot.size();
   if (parentCoinbaseScript.end() - chainMerkleTreeSizePos < 8) {
     error = "Aux POW missing chain merkle tree size and nonce in parent coinbase";
     return false;
@@ -94,7 +94,7 @@ bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainPa
     return false;
   }
 
-  if (block.header.ChainIndex != getExpectedIndex(extraNoncePart, chainId, block.header.ChainMerkleBranch.size())) {
+  if (static_cast<uint32_t>(block.header.ChainIndex) != getExpectedIndex(extraNoncePart, chainId, block.header.ChainMerkleBranch.size())) {
     error = "Aux POW wrong index";
     return false;
   }

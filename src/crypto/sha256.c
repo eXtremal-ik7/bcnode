@@ -1,22 +1,27 @@
 #include "sha256.h"
+#include "endianc.h"
 #include <string.h>
 #ifdef LIBPOW_SHANI_ENABLED
 #include <immintrin.h>
 #endif
+#ifdef LIBPOW_ARM_SHA2_ENABLED
+#include <arm_neon.h>
+#endif
 
-#ifdef LIBPOW_SHANI_ENABLED
-static uint32_t __sha256_k[64] = {
-    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+#if defined(LIBPOW_SHANI_ENABLED) || defined(LIBPOW_ARM_SHA2_ENABLED)
+static const uint32_t sha256_k[64] = {
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
 };
 #endif
 
+#if !defined(LIBPOW_SHANI_ENABLED) && !defined(LIBPOW_ARM_SHA2_ENABLED)
 static inline uint32_t rol32(const uint32_t x, const int n)
 {
   return (x << n) | (x >> (32 - n));
@@ -143,11 +148,12 @@ static inline void sha256TransformGeneric(uint32_t state[8], const uint32_t in[1
   state[6] += G;
   state[7] += H;
 }
+#endif // !LIBPOW_SHANI_ENABLED && !LIBPOW_ARM_SHA2_ENABLED
 
 #ifdef LIBPOW_SHANI_ENABLED
 static inline void sha256TransformShaNI(uint32_t state[8], const uint32_t in[16], int bswap)
 { 
-  const __m128i* k128 = (const __m128i*)(__sha256_k);
+  const __m128i* k128 = (const __m128i*)(sha256_k);
   const __m128i* in128 = (const __m128i*)(in);
 
   __m128i state0 = _mm_loadu_si128((__m128i*)(&state[0]));
@@ -295,6 +301,159 @@ static inline void sha256TransformShaNI(uint32_t state[8], const uint32_t in[16]
 }
 #endif
 
+#ifdef LIBPOW_ARM_SHA2_ENABLED
+static inline void sha256TransformArmSha2(uint32_t state[8], const uint32_t in[16], int bswap)
+{
+  uint32x4_t abcd = vld1q_u32(&state[0]);
+  uint32x4_t efgh = vld1q_u32(&state[4]);
+
+  const uint32x4_t abcd_save = abcd;
+  const uint32x4_t efgh_save = efgh;
+
+  uint32x4_t msg0, msg1, msg2, msg3;
+  if (bswap) {
+    msg0 = vreinterpretq_u32_u8(vrev32q_u8(vreinterpretq_u8_u32(vld1q_u32(in + 0))));
+    msg1 = vreinterpretq_u32_u8(vrev32q_u8(vreinterpretq_u8_u32(vld1q_u32(in + 4))));
+    msg2 = vreinterpretq_u32_u8(vrev32q_u8(vreinterpretq_u8_u32(vld1q_u32(in + 8))));
+    msg3 = vreinterpretq_u32_u8(vrev32q_u8(vreinterpretq_u8_u32(vld1q_u32(in + 12))));
+  } else {
+    msg0 = vld1q_u32(in + 0);
+    msg1 = vld1q_u32(in + 4);
+    msg2 = vld1q_u32(in + 8);
+    msg3 = vld1q_u32(in + 12);
+  }
+
+  uint32x4_t tmp, tmp2;
+
+  // Rounds 0-3
+  tmp = vaddq_u32(msg0, vld1q_u32(&sha256_k[0]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+
+  // Rounds 4-7
+  tmp = vaddq_u32(msg1, vld1q_u32(&sha256_k[4]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg0 = vsha256su0q_u32(msg0, msg1);
+
+  // Rounds 8-11
+  tmp = vaddq_u32(msg2, vld1q_u32(&sha256_k[8]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg1 = vsha256su0q_u32(msg1, msg2);
+  msg0 = vsha256su1q_u32(msg0, msg2, msg3);
+
+  // Rounds 12-15
+  tmp = vaddq_u32(msg3, vld1q_u32(&sha256_k[12]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg2 = vsha256su0q_u32(msg2, msg3);
+  msg1 = vsha256su1q_u32(msg1, msg3, msg0);
+
+  // Rounds 16-19
+  tmp = vaddq_u32(msg0, vld1q_u32(&sha256_k[16]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg3 = vsha256su0q_u32(msg3, msg0);
+  msg2 = vsha256su1q_u32(msg2, msg0, msg1);
+
+  // Rounds 20-23
+  tmp = vaddq_u32(msg1, vld1q_u32(&sha256_k[20]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg0 = vsha256su0q_u32(msg0, msg1);
+  msg3 = vsha256su1q_u32(msg3, msg1, msg2);
+
+  // Rounds 24-27
+  tmp = vaddq_u32(msg2, vld1q_u32(&sha256_k[24]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg1 = vsha256su0q_u32(msg1, msg2);
+  msg0 = vsha256su1q_u32(msg0, msg2, msg3);
+
+  // Rounds 28-31
+  tmp = vaddq_u32(msg3, vld1q_u32(&sha256_k[28]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg2 = vsha256su0q_u32(msg2, msg3);
+  msg1 = vsha256su1q_u32(msg1, msg3, msg0);
+
+  // Rounds 32-35
+  tmp = vaddq_u32(msg0, vld1q_u32(&sha256_k[32]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg3 = vsha256su0q_u32(msg3, msg0);
+  msg2 = vsha256su1q_u32(msg2, msg0, msg1);
+
+  // Rounds 36-39
+  tmp = vaddq_u32(msg1, vld1q_u32(&sha256_k[36]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg0 = vsha256su0q_u32(msg0, msg1);
+  msg3 = vsha256su1q_u32(msg3, msg1, msg2);
+
+  // Rounds 40-43
+  tmp = vaddq_u32(msg2, vld1q_u32(&sha256_k[40]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg1 = vsha256su0q_u32(msg1, msg2);
+  msg0 = vsha256su1q_u32(msg0, msg2, msg3);
+
+  // Rounds 44-47
+  tmp = vaddq_u32(msg3, vld1q_u32(&sha256_k[44]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg2 = vsha256su0q_u32(msg2, msg3);
+  msg1 = vsha256su1q_u32(msg1, msg3, msg0);
+
+  // Rounds 48-51
+  tmp = vaddq_u32(msg0, vld1q_u32(&sha256_k[48]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg3 = vsha256su0q_u32(msg3, msg0);
+  msg2 = vsha256su1q_u32(msg2, msg0, msg1);
+
+  // Rounds 52-55
+  tmp = vaddq_u32(msg1, vld1q_u32(&sha256_k[52]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+  msg3 = vsha256su1q_u32(msg3, msg1, msg2);
+
+  // Rounds 56-59
+  tmp = vaddq_u32(msg2, vld1q_u32(&sha256_k[56]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+
+  // Rounds 60-63
+  tmp = vaddq_u32(msg3, vld1q_u32(&sha256_k[60]));
+  tmp2 = abcd;
+  abcd = vsha256hq_u32(abcd, efgh, tmp);
+  efgh = vsha256h2q_u32(efgh, tmp2, tmp);
+
+  // Add back to state
+  abcd = vaddq_u32(abcd, abcd_save);
+  efgh = vaddq_u32(efgh, efgh_save);
+
+  vst1q_u32(&state[0], abcd);
+  vst1q_u32(&state[4], efgh);
+}
+#endif
+
 void sha256llInit(uint32_t state[8])
 {
   state[0] = 0x6a09e667;
@@ -311,6 +470,8 @@ void sha256llTransform(uint32_t state[8], const uint32_t in[16], int bswap)
 {
 #ifdef LIBPOW_SHANI_ENABLED
   sha256TransformShaNI(state, in, bswap);
+#elif defined(LIBPOW_ARM_SHA2_ENABLED)
+  sha256TransformArmSha2(state, in, bswap);
 #else
   sha256TransformGeneric(state, in, bswap);
 #endif
@@ -344,7 +505,7 @@ void sha256Update(CCtxSha256 *ctx, const void *data, size_t size)
     size_t maxSize = 64 - ctx->bufferSize;
     size_t copySize = maxSize <= remaining ? maxSize : remaining;
     memcpy(ctx->buffer + ctx->bufferSize, data, copySize);
-    ctx->bufferSize += copySize;
+    ctx->bufferSize += (uint32_t)copySize;
     remaining -= copySize;
     p += copySize;
     if (ctx->bufferSize == 64) {
@@ -364,7 +525,7 @@ void sha256Update(CCtxSha256 *ctx, const void *data, size_t size)
 
     // step 3: copy remainder
     memcpy(ctx->buffer, p, remaining);
-    ctx->bufferSize = remaining;
+    ctx->bufferSize = (uint32_t)remaining;
   }
 
   ctx->MsgSize += size;
@@ -382,7 +543,7 @@ void sha256Final(CCtxSha256 *ctx, uint8_t *hash)
     sha256llTransform(ctx->state, (const uint32_t*)ctx->buffer, 1);
     // last transform only with message length
     uint64_t bitsBigEndian = bswap64(ctx->MsgSize * 8);
-    uint32_t lastMsg[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, bitsBigEndian, bitsBigEndian >> 32};
+    uint32_t lastMsg[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (uint32_t)bitsBigEndian, (uint32_t)(bitsBigEndian >> 32)};
     sha256llTransform(ctx->state, lastMsg, 1);
   } else {
     memset(ctx->buffer + ctx->bufferSize + 1, 0, 56 - (ctx->bufferSize + 1));
@@ -424,7 +585,7 @@ void sha256(const void *data, size_t size, uint8_t *hash)
     // fill remaining buffer with zeroes and transform
     sha256llTransform(state, buffer.b32, 1);
     // last transform only with message length
-    uint32_t lastMsg[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, bitsBigEndian, bitsBigEndian >> 32};
+    uint32_t lastMsg[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (uint32_t)bitsBigEndian, (uint32_t)(bitsBigEndian >> 32)};
     sha256llTransform(state, (const uint32_t*)lastMsg, 1);
   } else {
     buffer.b64[7] = bitsBigEndian;

@@ -25,7 +25,7 @@ size_t BTC::Io<DOGE::Proto::BlockHeader>::getUnpackedExtraSize(xmstream &src)
 
   if (nVersion & DOGE::Proto::BlockHeader::VERSION_AUXPOW) {
     result += BTC::Io<decltype (DOGE::Proto::BlockHeader::ParentBlockCoinbaseTx)>::getUnpackedExtraSize(src);
-    src.seek(sizeof(uint256));
+    src.seek(sizeof(DOGE::Proto::BlockHeader::HashBlock));
     result += BTC::Io<decltype (DOGE::Proto::BlockHeader::MerkleBranch)>::getUnpackedExtraSize(src);
     src.seek(sizeof(int));
     result += BTC::Io<decltype (DOGE::Proto::BlockHeader::ChainMerkleBranch)>::getUnpackedExtraSize(src);

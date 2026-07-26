@@ -129,14 +129,25 @@ target_link_libraries(bcnodecommon
 
 option(LIBPOW_SSE2_ENABLED off)
 option(LIBPOW_SHANI_ENABLED off)
+option(LIBPOW_ARM_SHA2_ENABLED off)
+option(LIBPOW_SCRYPT_SSE2_DISABLED off)
 
 if (LIBPOW_SHANI_ENABLED)
   add_definitions(-DLIBPOW_SHANI_ENABLED)
-  set_source_files_properties(sha256.c PROPERTIES COMPILE_FLAGS -march=znver1)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msha -msse4.1")
+endif()
+
+if (LIBPOW_ARM_SHA2_ENABLED)
+  add_definitions(-DLIBPOW_ARM_SHA2_ENABLED)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8-a+crypto")
 endif()
 
 if (LIBPOW_SSE2_ENABLED)
   add_definitions(-DLIBPOW_SSE2_ENABLED)
+endif()
+
+if (LIBPOW_SCRYPT_SSE2_DISABLED)
+  add_definitions(-DLIBPOW_SCRYPT_SSE2_DISABLED)
 endif()
 
 add_library(bcnodecrypto STATIC
@@ -336,6 +347,7 @@ if (BCNODE_DOGE)
     ${BASE_SOURCES}
     ${BTC_SOURCES}
     LTC/ltc.cpp
+    LTC/proto.cpp
     DOGE/doge.cpp
     DOGE/proto.cpp
     DOGE/validation.cpp
@@ -344,6 +356,7 @@ if (BCNODE_DOGE)
   add_executable(bcterminal-doge
     bcterminal.cpp
     LTC/ltc.cpp
+    LTC/proto.cpp
     DOGE/doge.cpp
     DOGE/proto.cpp
     DOGE/validation.cpp

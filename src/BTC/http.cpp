@@ -13,7 +13,18 @@
 #include "BC/network.h"
 #include <asyncio/socket.h>
 #include <stdio.h>
+#include <type_traits>
 #include "../loguru.hpp"
+
+// The block nonce is a 32 bit integer in most coins, but a 256 bit blob in ZEC
+template<typename T>
+static inline void addNonce(JSON::Object &object, const T &nonce)
+{
+  if constexpr (std::is_integral_v<T>)
+    object.addInt("nonce", nonce);
+  else
+    object.addString("nonce", nonce.getHexLE());
+}
 
 namespace BC {
 namespace Network {
@@ -654,7 +665,7 @@ void BC::Network::HttpApiConnection::serializeBlock(xmstream &stream,
   blockObject.addString("merkle_root", index->Header.hashMerkleRoot.getHexLE());
   blockObject.addInt("version", index->Header.nVersion);
   blockObject.addString("bits", bin2hexLowerCase(&bits, sizeof(bits)));
-  blockObject.addInt("nonce", index->Header.nNonce);
+  addNonce(blockObject, index->Header.nNonce);
   blockObject.addInt("size_bytes", index->SerializedBlockSize);
   blockObject.addNull("weight");
   blockObject.addInt("tx_count", object->block()->vtx.size());

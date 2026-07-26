@@ -27,15 +27,18 @@ public:
     static const int32_t VERSION_AUXPOW = (1 << 8);
     // AuxPow
     Transaction ParentBlockCoinbaseTx;
-    uint256 HashBlock;
-    xvector<uint256> MerkleBranch;
+    BaseBlob<256> HashBlock;
+    xvector<BaseBlob<256>> MerkleBranch;
     int Index;
-    xvector<uint256> ChainMerkleBranch;
+    xvector<BaseBlob<256>> ChainMerkleBranch;
     int ChainIndex;
     PureBlockHeader ParentBlock;
   };
 
   using CTxValidationData = BTC::Proto::CTxValidationData;
+  using CBlockValidationData = BTC::Proto::CBlockValidationData;
+  using CBlockLinkedOutputs = BTC::Proto::CBlockLinkedOutputs;
+  using CTxLinkedOutputs = BTC::Proto::CTxLinkedOutputs;
 
   using BlockHeaderNet = BTC::Proto::BlockHeaderNetTy<DOGE::Proto>;
   using Block = BTC::Proto::BlockTy<DOGE::Proto>;
