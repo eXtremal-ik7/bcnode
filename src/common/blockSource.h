@@ -60,8 +60,8 @@ private:
   Combiner<Task> Combiner_;
   Combiner<TaskHP> CombinerHP_;
   bool HeadersLastPortion_ = false;
-  bool HeadersFinished_ = false;
-  bool DownloadingFinished_ = false;
+  std::atomic<bool> HeadersFinished_ = false;
+  std::atomic<bool> DownloadingFinished_ = false;
   BC::Common::BlockIndex *LastKnownIndex_ = nullptr;
   std::unordered_map<BC::Common::BlockIndex*, std::vector<BC::Common::BlockIndex*>> EnqueuedTasks_;
   tbb::concurrent_queue<BC::Common::BlockIndex*> DownloadQueue_;
@@ -103,7 +103,12 @@ private:
   atomic_intrusive_ptr<BlockSource> Head_;
 
 public:
-  bool hasActiveBlockSource() { return Head_.get() != nullptr; }
+  // Head_ is parked on the last finished source until a walk advances it, so a plain null check
+  // is not enough: walk the chain to the first active source instead
+  bool hasActiveBlockSource() {
+    bool newSourceCreated;
+    return BlockSource::getOrCreateBlockSource(Head_, 0, false, newSourceCreated).get() != nullptr;
+  }
   intrusive_ptr<BlockSource> head(unsigned threadsNum, bool createNew, bool &newSourceCreated);
   void releaseBlockSource(BlockSource *source);
 };

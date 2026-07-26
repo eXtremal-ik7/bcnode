@@ -73,8 +73,10 @@ public:
 
         // If pointer reference counter below ReferenceCacheLimit, other thread already did flush work
         tag = oldValue.tag();
-        if (tag < ReferenceCacheLimit)
+        if (tag < ReferenceCacheLimit) {
+          object_release(object, StrongRef);
           return;
+        }
       }
     } else {
       uintptr_t tag = initialTag;
@@ -92,7 +94,10 @@ public:
 
 public:
   atomic_intrusive_ptr() : _ptr(nullptr) {}
-  atomic_intrusive_ptr(T *object) : _ptr(object) { object_addref(_ptr, StrongRef); }
+  atomic_intrusive_ptr(T *object) : _ptr(object) {
+    if (object)
+      object_addref(object, StrongRef);
+  }
   ~atomic_intrusive_ptr() { reset(); }
 
   atomic_intrusive_ptr(atomic_intrusive_ptr &ptr) {
@@ -214,8 +219,11 @@ public:
   }
 
   intrusive_ptr &operator=(intrusive_ptr &&ptr) {
-    _ptr = ptr._ptr;
+    T *tmp = ptr._ptr;
     ptr._ptr = nullptr;
+    if (_ptr)
+      object_release(_ptr, atomic_intrusive_ptr<T, deleter, tagSize>::WeakRef);
+    _ptr = tmp;
     return *this;
   }
 

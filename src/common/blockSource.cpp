@@ -14,6 +14,10 @@ intrusive_ptr<BlockSource> BlockSource::getOrCreateBlockSource(atomic_intrusive_
 {
   newSourceCreated = false;
   // Insertion point follows the walk: a new source goes where the chain ends, not into the starting slot.
+  // The starting slot is advanced past its finished prefix by a best-effort CAS (helping pattern) once the
+  // walk finds the active source. The slot is never set to null: a null store is the only way a concurrent
+  // tail append can become unreachable, so releasing a source is reduced to marking it finished.
+  intrusive_ptr<BlockSource> first;
   intrusive_ptr<BlockSource> parent;
   atomic_intrusive_ptr<BlockSource> *slot = &blockSource;
   for (;;) {
@@ -25,15 +29,25 @@ intrusive_ptr<BlockSource> BlockSource::getOrCreateBlockSource(atomic_intrusive_
       BlockSource *newValue = new BlockSource(threadsNum);
       if (slot->compare_and_exchange(nullptr, newValue)) {
         newSourceCreated = true;
-        return intrusive_ptr<BlockSource>(newValue);
+        intrusive_ptr<BlockSource> result(newValue);
+        // 'first' and 'result' keep both CAS arguments alive: no ABA on the expected pointer
+        if (first.get() != nullptr)
+          blockSource.compare_and_exchange(first.get(), newValue);
+        return result;
       }
 
       // Lost the race; compare_and_exchange already deleted newValue. Re-read the filled slot.
       continue;
     }
 
-    if (!current.get()->DownloadingFinished_)
+    if (!current.get()->DownloadingFinished_) {
+      if (first.get() != nullptr)
+        blockSource.compare_and_exchange(first.get(), current.get());
       return current;
+    }
+
+    if (slot == &blockSource)
+      first = current;
 
     // Keeps the node alive: slot points into its Next_
     parent = current;
@@ -180,20 +194,9 @@ intrusive_ptr<BlockSource> BlockSourceList::head(unsigned threadsNum, bool creat
 
 void BlockSourceList::releaseBlockSource(BlockSource *source)
 {
+  // Walkers in getOrCreateBlockSource route around finished sources and advance the head past
+  // them themselves, so releasing is reduced to marking: no CAS on Head_ here means no way to
+  // lose a concurrently appended source.
   source->HeadersFinished_ = true;
   source->DownloadingFinished_ = true;
-  if (Head_.get() != source)
-    return;
-
-  intrusive_ptr<BlockSource> current(source->Next_);
-  for (;;) {
-    if (current.get() == nullptr || !current.get()->DownloadingFinished_) {
-      Head_.compare_and_exchange(source, current.get());
-      return;
-    }
-
-    current = current.get()->Next_;
-  }
-
-  Head_.compare_and_exchange(source, nullptr);
 }

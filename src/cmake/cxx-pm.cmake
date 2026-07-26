@@ -23,7 +23,18 @@ function(cxxpm_initialize url hash)
   else()
     set(CXXPM_EXECUTABLE ${USER_HOME_DIRECTORY}/.cxxpm/self/cxx-pm)
   endif()
-  
+
+  # Bundle first in PATH: helpers in usr/lib/git-core resolve msys-2.0.dll through
+  # PATH, and a foreign msys2 winning that lookup hangs them. Inherited by children.
+  if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+    get_property(CXXPM_PATH_PREPENDED GLOBAL PROPERTY CXXPM_PATH_PREPENDED)
+    if (NOT CXXPM_PATH_PREPENDED)
+      file(TO_NATIVE_PATH "${USER_HOME_DIRECTORY}/.cxxpm/self/usr/bin" CXXPM_MSYS2_BIN)
+      set(ENV{PATH} "${CXXPM_MSYS2_BIN};$ENV{PATH}")
+      set_property(GLOBAL PROPERTY CXXPM_PATH_PREPENDED TRUE)
+    endif()
+  endif()
+
   if (EXISTS ${CXXPM_EXECUTABLE})
       execute_process(COMMAND ${CXXPM_EXECUTABLE} "--version" OUTPUT_VARIABLE INSTALLED_VERSION_OUTPUT)
       string(STRIP ${INSTALLED_VERSION_OUTPUT} INSTALLED_VERSION)
