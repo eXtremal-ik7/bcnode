@@ -327,8 +327,11 @@ template<typename T> struct Io<Proto::BlockTy<T>> {
   }
 
   static inline size_t getUnpackedExtraSize(xmstream &src) {
-    return Io<decltype(Proto::BlockTy<T>::header)>::getUnpackedExtraSize(src) +
-           Io<decltype(Proto::BlockTy<T>::vtx)>::getUnpackedExtraSize(src);
+    // Both calls advance src, and operands of + are not sequenced: the measuring
+    // pass has to walk the stream in the same order unpack2 does, header first.
+    size_t headerExtraSize = Io<decltype(Proto::BlockTy<T>::header)>::getUnpackedExtraSize(src);
+    size_t vtxExtraSize = Io<decltype(Proto::BlockTy<T>::vtx)>::getUnpackedExtraSize(src);
+    return headerExtraSize + vtxExtraSize;
   }
 
   static inline void serialize(xmstream &dst, const BTC::Proto::BlockTy<T> &data) {

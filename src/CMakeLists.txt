@@ -4,7 +4,7 @@ cxxpm_initialize(
   d520a56610477f1911d1a390775e2ce19c47dfaa098d9692de5340cb174e3c43
 )
 
-cmake_minimum_required(VERSION 3.11)
+cmake_minimum_required(VERSION 3.21)
 project(bcnode)
 
 set (CMAKE_CXX_STANDARD 20)
@@ -386,4 +386,21 @@ if (BCNODE_ZEC)
   target_include_directories(bcterminal-zec PUBLIC ${CMAKE_BINARY_DIR}/ZEC)
   target_compile_definitions(bcterminal-zec PUBLIC -DBC=ZEC)
   target_link_libraries(bcterminal-zec ${COMMON_LIBRARIES})
+endif()
+
+# Windows has no rpath: DLLs of imported shared packages (mpir and the like) are
+# looked up through PATH at run time, so drop them next to the executable instead.
+# The generator expression picks the DLL matching the configuration being built.
+if (WIN32)
+  get_property(BCNODE_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach (BCNODE_TARGET IN LISTS BCNODE_TARGETS)
+    get_target_property(BCNODE_TARGET_TYPE ${BCNODE_TARGET} TYPE)
+    if (BCNODE_TARGET_TYPE STREQUAL "EXECUTABLE")
+      add_custom_command(TARGET ${BCNODE_TARGET} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          $<TARGET_RUNTIME_DLLS:${BCNODE_TARGET}> $<TARGET_FILE_DIR:${BCNODE_TARGET}>
+        COMMAND_EXPAND_LISTS
+      )
+    endif()
+  endforeach()
 endif()
