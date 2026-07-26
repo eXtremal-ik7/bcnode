@@ -1204,12 +1204,12 @@ namespace loguru
       file = filename(file);
     }
 
-    char level_buff[6];
+    char level_buff[12];
     const char* custom_level_name = get_verbosity_name(verbosity);
     if (custom_level_name) {
-      snprintf(level_buff, sizeof(level_buff) - 1, "%s", custom_level_name);
+      snprintf(level_buff, sizeof(level_buff), "%s", custom_level_name);
     } else {
-      snprintf(level_buff, sizeof(level_buff) - 1, "% 4d", verbosity);
+      snprintf(level_buff, sizeof(level_buff), "% 4d", verbosity);
     }
 
     long pos = 0;
@@ -1237,7 +1237,7 @@ namespace loguru
                      LOGURU_FILENAME_WIDTH, shortened_filename, line);
     }
     if (g_preamble_verbose && pos < out_buff_size) {
-      pos += snprintf(out_buff + pos, out_buff_size - pos, "%4s",
+      pos += snprintf(out_buff + pos, out_buff_size - pos, "%4.4s",
                      level_buff);
     }
     if (g_preamble_pipe && pos < out_buff_size) {

@@ -89,6 +89,13 @@ else()
   set(BIGNUM_LIBRARIES ${MPIR_LIBRARIES})
 endif()
 
+# The modules below drive FetchContent by hand: asyncio is added from a non-default source
+# subdirectory and all three need EXCLUDE_FROM_ALL, which FetchContent_MakeAvailable only
+# supports from CMake 3.28. Keep FetchContent_Populate until the minimum version is raised.
+if (POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
+
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectConfig4cpp.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectAsyncio.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectSecp256k1.cmake)
@@ -289,11 +296,11 @@ add_executable(bcterminal-ltc
 
 target_include_directories(bcnode-ltc PUBLIC ${CMAKE_BINARY_DIR}/LTC)
 target_compile_definitions(bcnode-ltc PUBLIC -DBC=LTC)
-target_link_libraries(bcnode-ltc ${COMMON_LIBRARIES} bcnodecrypto)
+target_link_libraries(bcnode-ltc ${COMMON_LIBRARIES})
 
 target_include_directories(bcterminal-ltc PUBLIC ${CMAKE_BINARY_DIR}/LTC)
 target_compile_definitions(bcterminal-ltc PUBLIC -DBC=LTC)
-target_link_libraries(bcterminal-ltc ${COMMON_LIBRARIES} bcnodecrypto)
+target_link_libraries(bcterminal-ltc ${COMMON_LIBRARIES})
 
 # XPM
 prepare_bc_env(XPM)
@@ -346,11 +353,11 @@ if (BCNODE_DOGE)
 
   target_include_directories(bcnode-doge PUBLIC ${CMAKE_BINARY_DIR}/DOGE)
   target_compile_definitions(bcnode-doge PUBLIC -DBC=DOGE)
-  target_link_libraries(bcnode-doge ${COMMON_LIBRARIES} bcnodecrypto)
+  target_link_libraries(bcnode-doge ${COMMON_LIBRARIES})
 
   target_include_directories(bcterminal-doge PUBLIC ${CMAKE_BINARY_DIR}/DOGE)
   target_compile_definitions(bcterminal-doge PUBLIC -DBC=DOGE)
-  target_link_libraries(bcterminal-doge ${COMMON_LIBRARIES} bcnodecrypto)
+  target_link_libraries(bcterminal-doge ${COMMON_LIBRARIES})
 endif()
 
 # ZEC
@@ -374,9 +381,9 @@ if (BCNODE_ZEC)
 
   target_include_directories(bcnode-zec PUBLIC ${CMAKE_BINARY_DIR}/ZEC)
   target_compile_definitions(bcnode-zec PUBLIC -DBC=ZEC)
-  target_link_libraries(bcnode-zec ${COMMON_LIBRARIES} bcnodecrypto)
+  target_link_libraries(bcnode-zec ${COMMON_LIBRARIES})
 
   target_include_directories(bcterminal-zec PUBLIC ${CMAKE_BINARY_DIR}/ZEC)
   target_compile_definitions(bcterminal-zec PUBLIC -DBC=ZEC)
-  target_link_libraries(bcterminal-zec ${COMMON_LIBRARIES} bcnodecrypto)
+  target_link_libraries(bcterminal-zec ${COMMON_LIBRARIES})
 endif()

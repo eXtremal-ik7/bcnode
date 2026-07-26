@@ -26,7 +26,7 @@ enum ActionTy {
 };
 
 struct Task {
-  ActionTy Type;
+  ActionTy Type = Connect;
   BC::Common::BlockIndex *Index = nullptr;
   Task() {};
   Task(ActionTy type, BC::Common::BlockIndex *index) : Type(type), Index(index) {}

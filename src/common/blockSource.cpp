@@ -13,26 +13,31 @@ intrusive_ptr<BlockSource> BlockSource::getOrCreateBlockSource(atomic_intrusive_
                                                                bool &newSourceCreated)
 {
   newSourceCreated = false;
-  intrusive_ptr<BlockSource> current(blockSource);
+  // Insertion point follows the walk: a new source goes where the chain ends, not into the starting slot.
+  intrusive_ptr<BlockSource> parent;
+  atomic_intrusive_ptr<BlockSource> *slot = &blockSource;
   for (;;) {
-    if (current.get() == nullptr && createNew) {
+    intrusive_ptr<BlockSource> current(*slot);
+    if (current.get() == nullptr) {
+      if (!createNew)
+        return current;
+
       BlockSource *newValue = new BlockSource(threadsNum);
-      if (blockSource.compare_and_exchange(nullptr, newValue)) {
+      if (slot->compare_and_exchange(nullptr, newValue)) {
         newSourceCreated = true;
         return intrusive_ptr<BlockSource>(newValue);
-      } else {
-        // newValue was deleted in this branch
-        // TODO: fix it
-        current = current.get()->Next_;
-        if (!current.get()->DownloadingFinished_)
-          return current;
       }
-    } else {
-      if (!current.get() || !current.get()->DownloadingFinished_)
-        return current;
+
+      // Lost the race; compare_and_exchange already deleted newValue. Re-read the filled slot.
+      continue;
     }
 
-    current = current.get()->Next_;
+    if (!current.get()->DownloadingFinished_)
+      return current;
+
+    // Keeps the node alive: slot points into its Next_
+    parent = current;
+    slot = &parent.get()->Next_;
   }
 }
 

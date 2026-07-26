@@ -15,11 +15,6 @@
 #include <stdio.h>
 #include "../loguru.hpp"
 
-static inline bool rawcmp(Raw data, const char *operand) {
-  size_t opSize = strlen(operand);
-  return data.size == opSize && memcmp(data.data, operand, opSize) == 0;
-}
-
 namespace BC {
 namespace Network {
 
@@ -721,7 +716,7 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
       const auto &linkedTxin = txOutputs.TxIn[i];
       std::string address58;
       BC::Proto::AddressTy address;
-      int64_t value;
+      int64_t value = 0;
 
       if (!isCoinbase) {
         BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
@@ -795,7 +790,7 @@ void BC::Network::HttpApiConnection::finishChunk(xmstream &stream, size_t offset
 {
   char hex[16];
   char finishData[] = "\r\n0\r\n\r\n";
-  sprintf(hex, "%08x", static_cast<unsigned>(stream.offsetOf() - offset - 10));
+  snprintf(hex, sizeof(hex), "%08x", static_cast<unsigned>(stream.offsetOf() - offset - 10));
   memcpy(stream.data<uint8_t>() + offset, hex, 8);
   stream.write(finishData, sizeof(finishData));
 }

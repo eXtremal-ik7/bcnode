@@ -210,6 +210,7 @@ public:
     if (_ptr)
       object_release(_ptr, atomic_intrusive_ptr<T, deleter, tagSize>::WeakRef);
     _ptr = ptr._ptr;
+    return *this;
   }
 
   intrusive_ptr &operator=(intrusive_ptr &&ptr) {

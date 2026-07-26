@@ -111,6 +111,13 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src 
 if (NOT MSVC)
   set(GEN_CONTEXT_COMPILE_OPTIONS -Wall -Wextra -Wno-unused-function)
   set(DEFAULT_COMPILE_OPTIONS -DHAVE_CONFIG_H -DSECP256K1_BUILD -std=c89 -pedantic -Wall -Wextra -Wcast-align -Wnested-externs -Wshadow -Wstrict-prototypes -Wno-unused-function -Wno-long-long -Wno-overlength-strings)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    # Bitwise & on booleans is deliberate here: keeps the code branch-free (constant time).
+    list(APPEND DEFAULT_COMPILE_OPTIONS -Wno-bitwise-instead-of-logical)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    # False positives in field_5x52_int128_impl.h under -O3.
+    list(APPEND DEFAULT_COMPILE_OPTIONS -Wno-maybe-uninitialized)
+  endif()
 else()
   set(DEFAULT_COMPILE_OPTIONS -DHAVE_CONFIG_H -DSECP256K1_BUILD)
 endif()

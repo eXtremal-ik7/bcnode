@@ -4,8 +4,6 @@
 #include "common/intrusive_ptr.h"
 #include <asyncio/asyncio.h>
 
-struct BCNodeContext;
-
 namespace BC {
 namespace Network {
 
@@ -30,7 +28,6 @@ public:
   typedef intrusive_ptr<NativeApiConnection, NativeApiConnectionEmptyDeleter> ConnectionPtr;
 
 private:
-  BCNodeContext *Context;
   asyncBase *MainBase_;
   HostAddress LocalAddress;
   aioObject *ServerSocket = nullptr;

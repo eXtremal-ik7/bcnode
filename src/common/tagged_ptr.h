@@ -31,10 +31,9 @@ public:
   tagged_ptr() : _data(nullptr) {}
   tagged_ptr(T *data) : _data(make(data, 0)) {}
   tagged_ptr(T *data, uintptr_t tag) : _data(make(data, tag)) {}
-  tagged_ptr(const tagged_ptr &ptr) : _data(ptr._data) {}
 
   // accessors
-  T *data() const { return _data(); }
+  T *data() const { return _data; }
   T *pointer() const { return extract_ptr(_data); }
   uintptr_t tag() { return extract_tag(_data); }
   void set(T *ptr, uintptr_t data) { _data = make(ptr, data); }

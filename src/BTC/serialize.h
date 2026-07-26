@@ -163,7 +163,7 @@ template<> struct Io<std::string> {
 
 // array
 template<size_t Size> struct Io<std::array<uint8_t, Size>> {
-  static inline size_t getSerializedSize(const std::array<uint8_t, Size> &data) {
+  static inline size_t getSerializedSize(const std::array<uint8_t, Size>&) {
     return Size;
   }
 
@@ -180,7 +180,7 @@ template<size_t Size> struct Io<std::array<uint8_t, Size>> {
     src.read(data.data(), Size);
   }
 
-  static inline void unpack2(xmstream &src, std::array<uint8_t, Size> *data, uint8_t **extraData) {
+  static inline void unpack2(xmstream &src, std::array<uint8_t, Size> *data, uint8_t**) {
     src.read(data->data(), Size);
   }
 };

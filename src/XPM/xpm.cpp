@@ -218,11 +218,6 @@ static uint32_t fractionalPart( XPM::Common::CheckConsensusCtx &ctx)
   return static_cast<uint32_t>(mpz_get_ui(ctx.exp)) & ((1 << nFractionalBits) - 1);
 }
 
-static inline double getPrimeDifficulty(unsigned int nBits)
-{
-    return ((double) nBits / (double) (1 << nFractionalBits));
-}
-
 static bool FermatProbablePrimalityTest(XPM::Common::CheckConsensusCtx &ctx)
 {
   // FermatResult = 2^(bn - 1) mod bn
