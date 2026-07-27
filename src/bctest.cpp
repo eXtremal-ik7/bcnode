@@ -1,13 +1,12 @@
 #include "BC/bc.h"
 #include "common/serializeUtils.h"
 #include "common/smallStream.h"
-#include "crypto/sha256.h"
+#include "BTC/hash.h"
 
 #include <asyncio/asyncio.h>
 #include <asyncio/coroutine.h>
 #include <asyncio/socket.h>
 #include <asyncioextras/btc.h>
-#include <openssl/evp.h>
 #include <p2putils/uriParse.h>
 
 #include "secp256k1.h"
@@ -246,22 +245,7 @@ private:
     result = secp256k1_ec_pubkey_serialize(secp256k1Ctx, address.PublicKeyUncompressed, &pkLen, &pubKey, SECP256K1_EC_UNCOMPRESSED);
     assert(result && pkLen == 65 && "secp256k1_ec_pubkey_serialize failed");
 
-    uint8_t sha256[32];
-    {
-      CCtxSha256 ctx;
-      sha256Init(&ctx);
-      sha256Update(&ctx, address.PublicKeyUncompressed, pkLen);
-      sha256Final(&ctx, sha256);
-    }
-
-    {
-      unsigned outSize = 0;
-      EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-      EVP_DigestInit_ex(ctx, EVP_ripemd160(), nullptr);
-      EVP_DigestUpdate(ctx, sha256, sizeof(sha256));
-      EVP_DigestFinal_ex(ctx, address.Address.begin(), &outSize);
-      EVP_MD_CTX_free(ctx);
-    }
+    address.Address = BTC::sha256FollowRipemd160(address.PublicKeyUncompressed, pkLen);
   }
 
   void sendVersion() {
@@ -280,9 +264,7 @@ private:
     msg.start_height = 1;
     msg.relay = 1;
 
-    char buffer[1024];
-    xmstream localStream(buffer, sizeof(buffer));
-    localStream.reset();
+    SmallStream<1024> localStream;
     BC::serialize(localStream, msg);
     ioBtcSend(Socket_, "version", localStream.data(), localStream.sizeOf(), afNone, 5000000);
   }
@@ -369,20 +351,11 @@ private:
       memcpy(p2pkhOutput + 3, inputs[i].Addr.Address.begin(), sizeof(BC::Proto::AddressTy));
 
       // serialize transaction for sign
-      uint8_t sigHash[32];
       SmallStream<4096> sigData;
       BC::serializeForSignature(sigData, tx, i, p2pkhOutput, sizeof(p2pkhOutput));
       sigData.write<int32_t>(1);
 
-      {
-        CCtxSha256 ctx;
-        sha256Init(&ctx);
-        sha256Update(&ctx, sigData.data(), sigData.sizeOf());
-        sha256Final(&ctx, sigHash);
-        sha256Init(&ctx);
-        sha256Update(&ctx, sigHash, sizeof(sigHash));
-        sha256Final(&ctx, sigHash);
-      }
+      BaseBlob<256> sigHash = BTC::sha256d(sigData.data(), sigData.sizeOf());
 
       {
         secp256k1_ecdsa_signature sig;
@@ -394,7 +367,7 @@ private:
         for (unsigned j = 0; j < 32; j++)
           extraEntropy[j] = rand();
 
-        secp256k1_ecdsa_sign(secp256k1Ctx, &sig, sigHash, inputs[i].Addr.PrivateKey.begin(), secp256k1_nonce_function_rfc6979, extraEntropy);
+        secp256k1_ecdsa_sign(secp256k1Ctx, &sig, sigHash.begin(), inputs[i].Addr.PrivateKey.begin(), secp256k1_nonce_function_rfc6979, extraEntropy);
         secp256k1_ecdsa_signature_serialize_der(secp256k1Ctx, sigData, &sigLen, &sig);
 
         // Build tx input
@@ -478,20 +451,10 @@ private:
         witnessHashes.back().setNull();
         for (size_t i = 1; i < block.vtx.size(); i++)
           witnessHashes.push_back(block.vtx[i].getWTxid());
-        BaseBlob<256> witnessMerkleRoot = calculateMerkleRoot(&witnessHashes[0], witnessHashes.size());
-        BaseBlob<256> commitment;
-        {
-          uint8_t defaultWitnessNonce[32];
-          memset(defaultWitnessNonce, 0, sizeof(defaultWitnessNonce));
-          CCtxSha256 ctx;
-          sha256Init(&ctx);
-          sha256Update(&ctx, witnessMerkleRoot.begin(), witnessMerkleRoot.size());
-          sha256Update(&ctx, defaultWitnessNonce, 32);
-          sha256Final(&ctx, commitment.begin());
-          sha256Init(&ctx);
-          sha256Update(&ctx, commitment.begin(), commitment.size());
-          sha256Final(&ctx, commitment.begin());
-        }
+        BaseBlob<256> witnessMerkleRoot = BTC::calculateMerkleRoot(&witnessHashes[0], witnessHashes.size());
+        uint8_t defaultWitnessNonce[32];
+        memset(defaultWitnessNonce, 0, sizeof(defaultWitnessNonce));
+        BaseBlob<256> commitment = BTC::sha256d(witnessMerkleRoot.begin(), witnessMerkleRoot.size(), defaultWitnessNonce, 32);
 
         uint8_t prefix[6] = {0x6A, 0x24, 0xAA, 0x21, 0xA9, 0xED};
         witnessCommitment.write(prefix, sizeof(prefix));
@@ -510,7 +473,7 @@ private:
     std::vector<BC::Proto::TxHashTy> txHashes;
     for (size_t i = 0; i < block.vtx.size(); i++)
       txHashes.push_back(block.vtx[i].getTxId());
-    block.header.hashMerkleRoot = calculateMerkleRoot(&txHashes[0], txHashes.size());
+    block.header.hashMerkleRoot = BTC::calculateMerkleRoot(&txHashes[0], txHashes.size());
 
     // Nonce
     {

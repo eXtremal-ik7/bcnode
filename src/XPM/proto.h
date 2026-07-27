@@ -27,37 +27,13 @@ public:
     mpz_class bnPrimeChainMultiplier;
 
     BlockHashTy GetHash() const {
-      uint8_t buffer[256];
-      BaseBlob<256> result;
-      xmstream localStream(buffer, sizeof(buffer));
-      localStream.reset();
+      SmallStream<256> localStream;
       BTC::serialize(localStream, bnPrimeChainMultiplier);
-
-      CCtxSha256 sha256;
-      sha256Init(&sha256);
-      sha256Update(&sha256, this, 4+32+32+4+4+4);
-      sha256Update(&sha256, localStream.data(), localStream.sizeOf());
-      sha256Final(&sha256, result.begin());
-
-      sha256Init(&sha256);
-      sha256Update(&sha256, result.begin(), sizeof(result));
-      sha256Final(&sha256, result.begin());
-      return result;
+      return BTC::sha256d(this, 4+32+32+4+4+4, localStream.data(), localStream.sizeOf());
     }
 
     UInt<256> GetOriginalHeaderHash() const {
-      UInt<256>  result;
-      CCtxSha256 sha256;
-      sha256Init(&sha256);
-      sha256Update(&sha256, this, 4+32+32+4+4+4);
-      sha256Final(&sha256, reinterpret_cast<uint8_t*>(result.data()));
-
-      sha256Init(&sha256);
-      sha256Update(&sha256, result.data(), sizeof(result));
-      sha256Final(&sha256, reinterpret_cast<uint8_t*>(result.data()));
-      for (unsigned i = 0; i < 4; i++)
-        result.data()[i] = readle(result.data()[i]);
-      return result;
+      return BTC::sha256dInt(this, 4+32+32+4+4+4);
     }
 
     template<typename Op, typename Self>

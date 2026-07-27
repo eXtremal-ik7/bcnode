@@ -54,7 +54,7 @@ static ZEC::Proto::Block createGenesisBlock(int64_t genesisReward, uint32_t nTim
 
   tx.lockTime = 0;
 
-  block.header.hashMerkleRoot = calculateBlockMerkleRoot(block);
+  block.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(block);
   return block;
 }
 

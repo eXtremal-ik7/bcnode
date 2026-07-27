@@ -119,6 +119,7 @@ add_library(bcnodecommon STATIC
   loguru.cpp
   common/base58.cpp
   common/file.cpp
+  BTC/hash.cpp
   common/serializedDataCache.cpp
   common/utils.cpp
 )
@@ -165,7 +166,7 @@ set(BASE_SOURCES
   common/blockDataBase.cpp
   common/blockSource.cpp
   common/linearDataStorage.cpp
-  common/merkleTree.cpp
+  BTC/merkleTree.cpp
   common/thread.cpp
   db/archive.cpp
   db/addrHistoryDb.cpp
@@ -264,14 +265,14 @@ add_executable(bcterminal-btc
   bcterminal.cpp
   BTC/btc.cpp
   BTC/proto.cpp
-  common/merkleTree.cpp
+  BTC/merkleTree.cpp
 )
 
 add_executable(bctest-btc
   bctest.cpp
   BTC/btc.cpp
   BTC/proto.cpp
-  common/merkleTree.cpp
+  BTC/merkleTree.cpp
 )
 
 target_include_directories(bcnode-btc PUBLIC ${CMAKE_BINARY_DIR}/BTC)
@@ -302,7 +303,7 @@ add_executable(bcterminal-ltc
   BTC/proto.cpp
   LTC/ltc.cpp
   LTC/proto.cpp
-  common/merkleTree.cpp
+  BTC/merkleTree.cpp
 )
 
 target_include_directories(bcnode-ltc PUBLIC ${CMAKE_BINARY_DIR}/LTC)
@@ -328,7 +329,7 @@ add_executable(bcterminal-xpm
   BTC/proto.cpp
   XPM/xpm.cpp
   XPM/proto.cpp
-  common/merkleTree.cpp
+  BTC/merkleTree.cpp
 )
 
 target_include_directories(bcnode-xpm PUBLIC ${CMAKE_BINARY_DIR}/XPM ${MPIR_INCLUDE_DIR})
@@ -359,7 +360,7 @@ if (BCNODE_DOGE)
     DOGE/doge.cpp
     DOGE/validation.cpp
     BTC/proto.cpp
-    common/merkleTree.cpp
+    BTC/merkleTree.cpp
   )
 
   target_include_directories(bcnode-doge PUBLIC ${CMAKE_BINARY_DIR}/DOGE)
@@ -387,7 +388,7 @@ if (BCNODE_ZEC)
     ZEC/zec.cpp
     ZEC/proto.cpp
     BTC/proto.cpp
-    common/merkleTree.cpp
+    BTC/merkleTree.cpp
   )
 
   target_include_directories(bcnode-zec PUBLIC ${CMAKE_BINARY_DIR}/ZEC)

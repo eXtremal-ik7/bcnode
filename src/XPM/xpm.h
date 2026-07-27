@@ -10,7 +10,7 @@
 #include "BTC/blockIndex.h"
 #include "BTC/defaults.h"
 #include "BTC/validation.h"
-#include "common/merkleTree.h"
+#include "BTC/merkleTree.h"
 #include "common/utils.h"
 
 #include <string.h>

@@ -1,4 +1,5 @@
 #include "BC/bc.h"
+#include "common/smallStream.h"
 
 #include <asyncio/asyncio.h>
 #include "asyncio/socket.h"
@@ -44,9 +45,7 @@ public:
   }
 
   void ping() {
-    char buffer[1024];
-    xmstream localStream(buffer, sizeof(buffer));
-    localStream.reset();
+    SmallStream<1024> localStream;
     uint64_t nonce = rand();
     PingMap_[nonce] = std::chrono::steady_clock::now();
 
@@ -168,9 +167,7 @@ private:
     msg.start_height = 1;
     msg.relay = 1;
 
-    char buffer[1024];
-    xmstream localStream(buffer, sizeof(buffer));
-    localStream.reset();
+    SmallStream<1024> localStream;
     BC::serialize(localStream, msg);
     sendMessage(MessageTy::version, localStream.data(), localStream.sizeOf());
     aioBtcRecv(Socket_, Command_, ReceiveStream_, Limit_, afNone, ConnectTimeout_, onMessageCb, this);
@@ -259,9 +256,7 @@ private:
   }
 
   void onPing(BC::Proto::MessagePing &ping) {
-    char buffer[1024];
-    xmstream localStream(buffer, sizeof(buffer));
-    localStream.reset();
+    SmallStream<1024> localStream;
     BC::Proto::MessagePong pong;
     pong.nonce = ping.nonce;
     BC::serialize(localStream, pong);

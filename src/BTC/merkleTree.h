@@ -8,6 +8,8 @@
 #include "common/baseBlob.h"
 #include <memory>
 
+namespace BTC {
+
 BaseBlob<256> calculateMerkleRoot(BaseBlob<256> *hashes, size_t size);
 BaseBlob<256> calculateMerkleRoot(BaseBlob<256> hash, BaseBlob<256> *tree, size_t treeSize, size_t index);
 
@@ -37,4 +39,6 @@ BaseBlob<256> calculateBlockWitnessMerkleRoot(const BlockTy &block)
     hashes[i] = block.vtx[i].getWTxid();
 
   return calculateMerkleRoot(hashes.get(), txNum);
+}
+
 }

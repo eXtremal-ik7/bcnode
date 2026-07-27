@@ -6,8 +6,9 @@
 #include "serialize.h"
 #include "common/baseBlob.h"
 #include "common/endiantools.h"
+#include "hash.h"
+#include "common/smallStream.h"
 #include "common/uint.h"
-#include "crypto/sha256.h"
 #include <vector>
 #include "../loguru.hpp"
 
@@ -99,29 +100,11 @@ struct NetworkAddress {
     uint32_t nNonce;
 
     BlockHashTy GetHash() const {
-      BaseBlob<256> result;
-      CCtxSha256 sha256;
-      sha256Init(&sha256);
-      sha256Update(&sha256, this, sizeof(*this));
-      sha256Final(&sha256, result.begin());
-      sha256Init(&sha256);
-      sha256Update(&sha256, result.begin(), sizeof(result));
-      sha256Final(&sha256, result.begin());
-      return result;
+      return sha256d(this, sizeof(*this));
     }
 
     UInt<256> GetHashAsInteger() const {
-      UInt<256> result;
-      CCtxSha256 sha256;
-      sha256Init(&sha256);
-      sha256Update(&sha256, this, sizeof(*this));
-      sha256Final(&sha256, reinterpret_cast<uint8_t*>(result.data()));
-      sha256Init(&sha256);
-      sha256Update(&sha256, result.data(), sizeof(result));
-      sha256Final(&sha256, reinterpret_cast<uint8_t*>(result.data()));
-      for (unsigned i = 0; i < 4; i++)
-        result.data()[i] = readle(result.data()[i]);
-      return result;
+      return sha256dInt(this, sizeof(*this));
     }
 
     template<typename Op, typename Self>

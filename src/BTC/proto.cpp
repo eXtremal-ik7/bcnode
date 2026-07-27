@@ -11,38 +11,16 @@ namespace BTC {
 
 Proto::BlockHashTy Proto::Transaction::getTxId() const
 {
-  BaseBlob<256> result;
-  uint8_t buffer[4096];
-  xmstream stream(buffer, sizeof(buffer));
-  stream.reset();
+  SmallStream<4096> stream;
   BTC::Io<Proto::Transaction>::serialize(stream, *this, false);
-
-  CCtxSha256 sha256;
-  sha256Init(&sha256);
-  sha256Update(&sha256, stream.data(), stream.sizeOf());
-  sha256Final(&sha256, result.begin());
-  sha256Init(&sha256);
-  sha256Update(&sha256, result.begin(), sizeof(result));
-  sha256Final(&sha256, result.begin());
-  return result;
+  return sha256d(stream.data(), stream.sizeOf());
 }
 
 Proto::BlockHashTy Proto::Transaction::getWTxid() const
 {
-  BaseBlob<256> result;
-  uint8_t buffer[4096];
-  xmstream stream(buffer, sizeof(buffer));
-  stream.reset();
+  SmallStream<4096> stream;
   BTC::Io<Proto::Transaction>::serialize(stream, *this);
-
-  CCtxSha256 sha256;
-  sha256Init(&sha256);
-  sha256Update(&sha256, stream.data(), stream.sizeOf());
-  sha256Final(&sha256, result.begin());
-  sha256Init(&sha256);
-  sha256Update(&sha256, result.begin(), sizeof(result));
-  sha256Final(&sha256, result.begin());
-  return result;
+  return sha256d(stream.data(), stream.sizeOf());
 }
 
 void serializeForSignature(xmstream &dst, const BTC::Proto::TxIn &data, const uint8_t *utxo, size_t utxoSize)
@@ -146,18 +124,8 @@ std::string encodeBase58WithCrc(const uint8_t *prefix, unsigned prefixSize, cons
     data[i] = prefix[i];
   memcpy(data.data() + prefixSize, address, addressSize);
 
-  {
-    uint8_t sha256[32];
-    CCtxSha256 ctx;
-    sha256Init(&ctx);
-    sha256Update(&ctx, data.data(), data.size() - 4);
-    sha256Final(&ctx, sha256);
-
-    sha256Init(&ctx);
-    sha256Update(&ctx, sha256, sizeof(sha256));
-    sha256Final(&ctx, sha256);
-    memcpy(data.data() + prefixSize + addressSize, sha256, 4);
-  }
+  uint32_t checksum = BTC::sha256dChecksum(data.data(), data.size() - 4);
+  memcpy(data.data() + prefixSize + addressSize, &checksum, sizeof(checksum));
 
   return EncodeBase58(data.data(), data.data() + data.size());
 }
@@ -171,23 +139,12 @@ bool decodeBase58WithCrc(const std::string &base58, const uint8_t *prefix, unsig
     return false;
 
   uint32_t addrHash;
-  memcpy(&addrHash, &data[prefixSize + sizeof(BTC::Proto::AddressTy)], 4);
+  memcpy(&addrHash, &data[prefixSize + addressSize], 4);
 
-  // Compute sha256 and take first 4 bytes
-  uint8_t sha256[32];
-  CCtxSha256 ctx;
-  sha256Init(&ctx);
-  sha256Update(&ctx, &data[0], data.size() - 4);
-  sha256Final(&ctx, sha256);
-
-  sha256Init(&ctx);
-  sha256Update(&ctx, sha256, sizeof(sha256));
-  sha256Final(&ctx, sha256);
-
-  if (reinterpret_cast<uint32_t*>(sha256)[0] != addrHash)
+  if (BTC::sha256dChecksum(&data[0], data.size() - 4) != addrHash)
     return false;
 
-  memcpy(address, &data[prefixSize], sizeof(BTC::Proto::AddressTy));
+  memcpy(address, &data[prefixSize], addressSize);
   return true;
 }
 
@@ -197,17 +154,8 @@ std::string makeHumanReadableAddress(uint8_t pubkeyAddressPrefix, const BTC::Pro
   data[0] = pubkeyAddressPrefix;
   memcpy(&data[1], address.begin(), sizeof(BTC::Proto::AddressTy));
 
-  uint8_t sha256[32];
-  CCtxSha256 ctx;
-  sha256Init(&ctx);
-  sha256Update(&ctx, &data[0], sizeof(data) - 4);
-  sha256Final(&ctx, sha256);
-
-  sha256Init(&ctx);
-  sha256Update(&ctx, sha256, sizeof(sha256));
-  sha256Final(&ctx, sha256);
-
-  memcpy(data+1+sizeof(BTC::Proto::AddressTy), sha256, 4);
+  uint32_t checksum = BTC::sha256dChecksum(&data[0], sizeof(data) - 4);
+  memcpy(data+1+sizeof(BTC::Proto::AddressTy), &checksum, sizeof(checksum));
   return EncodeBase58(data, data+sizeof(data));
 }
 
@@ -223,18 +171,7 @@ bool decodeHumanReadableAddress(const std::string &hrAddress, const std::vector<
   uint32_t addrHash;
   memcpy(&addrHash, &data[prefixSize + sizeof(BTC::Proto::AddressTy)], 4);
 
-  // Compute sha256 and take first 4 bytes
-  uint8_t sha256[32];
-  CCtxSha256 ctx;
-  sha256Init(&ctx);
-  sha256Update(&ctx, &data[0], data.size() - 4);
-  sha256Final(&ctx, sha256);
-
-  sha256Init(&ctx);
-  sha256Update(&ctx, sha256, sizeof(sha256));
-  sha256Final(&ctx, sha256);
-
-  if (reinterpret_cast<uint32_t*>(sha256)[0] != addrHash)
+  if (BTC::sha256dChecksum(&data[0], data.size() - 4) != addrHash)
     return false;
 
   memcpy(address.begin(), &data[prefixSize], sizeof(BTC::Proto::AddressTy));

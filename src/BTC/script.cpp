@@ -1,5 +1,5 @@
 #include "script.h"
-#include <openssl/evp.h>
+#include "hash.h"
 
 namespace BTC {
 
@@ -25,44 +25,12 @@ Script::UnspentOutputInfo::EType Script::extractSingleAddress(const BC::Proto::T
   if (scriptSize == 35 && scriptData[0] == OP_PUSH_33 && scriptData[34] == OP_CHECKSIG) {
     // P2PK compressed
     // PUSH_33(PublicKey) OP_CHECKSIG
-    uint8_t sha256[32];
-    {
-      CCtxSha256 ctx;
-      sha256Init(&ctx);
-      sha256Update(&ctx, scriptData + 1, scriptSize - 2);
-      sha256Final(&ctx, sha256);
-    }
-
-    {
-      unsigned outSize = 0;
-      EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-      EVP_DigestInit_ex(ctx, EVP_ripemd160(), nullptr);
-      EVP_DigestUpdate(ctx, sha256, sizeof(sha256));
-      EVP_DigestFinal_ex(ctx, address.begin(), &outSize);
-      EVP_MD_CTX_free(ctx);
-    }
-
+    address = sha256FollowRipemd160(scriptData + 1, scriptSize - 2);
     return Script::UnspentOutputInfo::EPubKey;
   } else if (scriptSize == 67 && scriptData[0] == OP_PUSH_65 && scriptData[66] == OP_CHECKSIG) {
     // P2PK uncompressed
     // PUSH_65(PublicKey) OP_CHECKSIG
-    uint8_t sha256[32];
-    {
-      CCtxSha256 ctx;
-      sha256Init(&ctx);
-      sha256Update(&ctx, scriptData + 1, scriptSize - 2);
-      sha256Final(&ctx, sha256);
-    }
-
-    {
-      unsigned outSize = 0;
-      EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-      EVP_DigestInit_ex(ctx, EVP_ripemd160(), nullptr);
-      EVP_DigestUpdate(ctx, sha256, sizeof(sha256));
-      EVP_DigestFinal_ex(ctx, address.begin(), &outSize);
-      EVP_MD_CTX_free(ctx);
-    }
-
+    address = sha256FollowRipemd160(scriptData + 1, scriptSize - 2);
     return Script::UnspentOutputInfo::EPubKey;
   } else if (scriptSize == 25 &&
              scriptData[0] == OP_DUP &&
@@ -90,41 +58,10 @@ Script::UnspentOutputInfo::EType Script::extractSingleAddress(const BC::Proto::T
 bool Script::extractSingleAddress(const Script::UnspentOutputInfo &info, BC::Proto::AddressTy &address)
 {
   if (info.Type == Script::UnspentOutputInfo::EPubKey) {
-    if (info.IsPubKeyCompressed) {
-      uint8_t sha256[32];
-      {
-        CCtxSha256 ctx;
-        sha256Init(&ctx);
-        sha256Update(&ctx, info.PubKeyCompressed, 33);
-        sha256Final(&ctx, sha256);
-      }
-
-      {
-        unsigned outSize = 0;
-        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-        EVP_DigestInit_ex(ctx, EVP_ripemd160(), nullptr);
-        EVP_DigestUpdate(ctx, sha256, sizeof(sha256));
-        EVP_DigestFinal_ex(ctx, address.begin(), &outSize);
-        EVP_MD_CTX_free(ctx);
-      }
-    } else {
-      uint8_t sha256[32];
-      {
-        CCtxSha256 ctx;
-        sha256Init(&ctx);
-        sha256Update(&ctx, info.CustomData, 67);
-        sha256Final(&ctx, sha256);
-      }
-
-      {
-        unsigned outSize = 0;
-        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-        EVP_DigestInit_ex(ctx, EVP_ripemd160(), nullptr);
-        EVP_DigestUpdate(ctx, sha256, sizeof(sha256));
-        EVP_DigestFinal_ex(ctx, address.begin(), &outSize);
-        EVP_MD_CTX_free(ctx);
-      }
-    }
+    if (info.IsPubKeyCompressed)
+      address = sha256FollowRipemd160(info.PubKeyCompressed, 33);
+    else
+      address = sha256FollowRipemd160(info.CustomData, 67);
     return true;
   } else if (info.Type == Script::UnspentOutputInfo::EPubKeyHash) {
     memcpy(address.begin(), info.PubKeyHash.begin(), sizeof(address));

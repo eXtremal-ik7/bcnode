@@ -1,5 +1,5 @@
 #include "validation.h"
-#include "common/merkleTree.h"
+#include "BTC/merkleTree.h"
 
 static const unsigned char pchMergedMiningHeader[] = { 0xfa, 0xbe, 'm', 'm' };
 
@@ -39,7 +39,7 @@ bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainPa
   // Check parent block merkle tree
   {
     BaseBlob<256> parentBlockCoinbaseTxHash = block.header.ParentBlockCoinbaseTx.getTxId();
-    if (calculateMerkleRoot(parentBlockCoinbaseTxHash, &block.header.MerkleBranch[0], block.header.MerkleBranch.size(), 0) != block.header.ParentBlock.hashMerkleRoot) {
+    if (BTC::calculateMerkleRoot(parentBlockCoinbaseTxHash, &block.header.MerkleBranch[0], block.header.MerkleBranch.size(), 0) != block.header.ParentBlock.hashMerkleRoot) {
       error = "Aux POW merkle root incorrect";
       return false;
     }
@@ -47,7 +47,7 @@ bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainPa
 
   // Check parent block's coinbase txin format
   BaseBlob<256> chainMerkleRoot =
-    calculateMerkleRoot(block.header.GetHash(), &block.header.ChainMerkleBranch[0], block.header.ChainMerkleBranch.size(), block.header.ChainIndex);
+    BTC::calculateMerkleRoot(block.header.GetHash(), &block.header.ChainMerkleBranch[0], block.header.ChainMerkleBranch.size(), block.header.ChainIndex);
   std::reverse(chainMerkleRoot.begin(), chainMerkleRoot.end());
 
   auto &parentCoinbaseScript = block.header.ParentBlockCoinbaseTx.txIn[0].scriptSig;

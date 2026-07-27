@@ -2,7 +2,7 @@
 
 #include "proto.h"
 #include "script.h"
-#include "common/merkleTree.h"
+#include "merkleTree.h"
 #include <limits>
 
 namespace BTC {
@@ -88,17 +88,7 @@ bool validateWitnessCommitment(const BlockTy &block, bool &hasWitness, std::stri
   // Calculate witness merkle root
   BaseBlob<256> witnessMerkleRoot = calculateBlockWitnessMerkleRoot(block);
   // Calculate witness commitment
-  BaseBlob<256> commitment;
-  {
-    CCtxSha256 ctx;
-    sha256Init(&ctx);
-    sha256Update(&ctx, witnessMerkleRoot.begin(), witnessMerkleRoot.size());
-    sha256Update(&ctx, witnessNonce, 32);
-    sha256Final(&ctx, commitment.begin());
-    sha256Init(&ctx);
-    sha256Update(&ctx, commitment.begin(), commitment.size());
-    sha256Final(&ctx, commitment.begin());
-  }
+  BaseBlob<256> commitment = sha256d(witnessMerkleRoot.begin(), witnessMerkleRoot.size(), witnessNonce, 32);
 
   bool result = memcmp(commitment.begin(), commitmentData+6, 32) == 0;
   if (!result)

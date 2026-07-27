@@ -66,7 +66,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
       xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
       tx.txOut[0].value = 88*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
+      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
       genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.header, "1a91e3dace36e2be3bf030a65679fe821aa1d6ef92e7c9902eb318182c355691");
     }
 
@@ -130,7 +130,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
       xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
       tx.txOut[0].value = 88*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
+      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
       genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.header, "bb0a78264637406b6360aad926284d544d7049f45189db5664f3c4d07350559e");
     }
 

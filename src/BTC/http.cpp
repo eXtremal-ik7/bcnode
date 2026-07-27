@@ -8,6 +8,7 @@
 #include "common/blockDataBase.h"
 #include "common/jsonSerializer.h"
 #include "common/rapidJsonHelper.h"
+#include "common/smallStream.h"
 #include "common/utils.h"
 #include "db/archive.h"
 #include "BC/network.h"
@@ -601,8 +602,7 @@ void BC::Network::HttpApiConnection::reply404()
   const char reply404[] = "HTTP/1.1 404 Not Found\r\nServer: bcnode\r\nTransfer-Encoding: chunked\r\n\r\n";
   const char html[] = "<html><head><title>Not Found</title></head><body><h1>404 Not Found</h1></body></html>";
 
-  char buffer[4096];
-  xmstream stream(buffer, sizeof(buffer));
+  SmallStream<4096> stream;
   stream.write(reply404, sizeof(reply404)-1);
 
   size_t offset = startChunk(stream);

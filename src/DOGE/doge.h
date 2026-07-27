@@ -7,7 +7,7 @@
 
 #include "proto.h"
 #include "LTC/ltc.h"
-#include "common/merkleTree.h"
+#include "BTC/merkleTree.h"
 #include <string.h>
 
 namespace DOGE {

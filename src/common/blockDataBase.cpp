@@ -7,6 +7,7 @@
 #include "db/storage.h"
 #include "common/fopen.h"
 #include "common/serializeUtils.h"
+#include "common/smallStream.h"
 #include "common/utils.h"
 #include <asyncio/asyncio.h>
 #include <p2putils/coreTypes.h>
@@ -984,10 +985,7 @@ bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index, bool *needFlush)
 
   // Serialize index for storage
   uint32_t serializedSize;
-  uint8_t buffer[1024];
-  xmstream data(buffer, sizeof(buffer));
-
-  data.reset();
+  SmallStream<1024> data;
   BC::serialize(data, serialized->linkedOutputs());
   serializedSize = static_cast<uint32_t>(data.sizeOf());
   if (!LinkedOutputsStorage_.append2(&serializedSize, sizeof(serializedSize), data.data(), static_cast<uint32_t>(data.sizeOf()), position))

@@ -64,7 +64,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
       tx.txOut[0].value = 50*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
+      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
       genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.header, "12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2");
     }
 
@@ -127,7 +127,7 @@ bool setupChainParams(ChainParams *params, const char *network)
       xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
       tx.txOut[0].value = 50*100000000ULL;
       params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
+      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
       genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.header, "4966625a4b2851d9fdee139e56211a0d88575f59ed816ff5e6a63deb4e3e29a0");
     }
 

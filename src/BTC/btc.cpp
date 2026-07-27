@@ -5,7 +5,7 @@
 
 #include "btc.h"
 #include "validation.h"
-#include "common/merkleTree.h"
+#include "merkleTree.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
 #include <p2putils/xmstream.h>

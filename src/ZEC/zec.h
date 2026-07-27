@@ -8,7 +8,7 @@
 #include "proto.h"
 #include "BTC/btc.h"
 #include "BTC/validation.h"
-#include "common/merkleTree.h"
+#include "BTC/merkleTree.h"
 #include <string.h>
 
 namespace ZEC {

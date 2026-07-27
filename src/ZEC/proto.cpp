@@ -9,20 +9,9 @@
 namespace ZEC {
 Proto::BlockHashTy Proto::Transaction::getTxId() const
 {
-  BaseBlob<256> result;
-  uint8_t buffer[4096];
-  xmstream stream(buffer, sizeof(buffer));
-  stream.reset();
+  SmallStream<4096> stream;
   BTC::Io<Proto::Transaction>::serialize(stream, *this);
-
-  CCtxSha256 sha256;
-  sha256Init(&sha256);
-  sha256Update(&sha256, stream.data(), stream.sizeOf());
-  sha256Final(&sha256, result.begin());
-  sha256Init(&sha256);
-  sha256Update(&sha256, result.begin(), sizeof(result));
-  sha256Final(&sha256, result.begin());
-  return result;
+  return BTC::sha256d(stream.data(), stream.sizeOf());
 }
 }
 

@@ -75,22 +75,9 @@ public:
     xvector<uint8_t> nSolution;
 
     BlockHashTy GetHash() const {
-      uint8_t buffer[2048];
-      BaseBlob<256> result;
-      xmstream localStream(buffer, sizeof(buffer));
-      localStream.reset();
+      SmallStream<2048> localStream;
       BTC::serialize(localStream, nSolution);
-
-      CCtxSha256 sha256;
-      sha256Init(&sha256);
-      sha256Update(&sha256, this, HEADER_SIZE);
-      sha256Update(&sha256, localStream.data(), localStream.sizeOf());
-      sha256Final(&sha256, result.begin());
-
-      sha256Init(&sha256);
-      sha256Update(&sha256, result.begin(), sizeof(result));
-      sha256Final(&sha256, result.begin());
-      return result;
+      return BTC::sha256d(this, HEADER_SIZE, localStream.data(), localStream.sizeOf());
     }
 
     template<typename Op, typename Self>
