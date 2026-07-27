@@ -14,11 +14,11 @@ public:
   using TxHashTy = LTC::Proto::TxHashTy;
   using AddressTy = LTC::Proto::AddressTy;
 
-  // Transaction format same as LTC
+  // Transaction format same as BTC: LTC's grew the MWEB sections, dogecoin has none
   using TxIn = LTC::Proto::TxIn;
   using TxOut = LTC::Proto::TxOut;
   using TxWitness = LTC::Proto::TxWitness;
-  using Transaction = LTC::Proto::Transaction;
+  using Transaction = BTC::Proto::Transaction;
 
   using PureBlockHeader = LTC::Proto::BlockHeader;
 

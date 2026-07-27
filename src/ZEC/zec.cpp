@@ -221,8 +221,8 @@ bool ZEC::Common::checkBlockStandalone(const Proto::Block &block,
   bool isValid = true;
 
   // Block validation
-  isValid |= BTC::validateBlockSize(block, ZEC::Configuration::MaxBlockSize, error);
-  isValid |= BTC::validateMerkleRoot(block, error);
+  isValid &= BTC::validateBlockSize(block, ZEC::Configuration::MaxBlockSize, error);
+  isValid &= BTC::validateMerkleRoot(block, error);
 
   // ZEC has no witness data, HasWitnessData stays false as initialized
 

@@ -101,7 +101,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
       params->GenesisBlock.header.nBits = 0x1e0ffff0;
       params->GenesisBlock.header.nNonce = 997879;
 
-      LTC::Proto::Transaction tx;
+      DOGE::Proto::Transaction tx;
       tx.version = 1;
       tx.lockTime = 0;
 
@@ -173,10 +173,10 @@ bool DOGE::Common::checkBlockStandalone(const Proto::Block &block,
   bool hasWitnessData = false;
 
   // Block validation
-  isValid |= BTC::validateBlockSize(block, DOGE::Configuration::MaxBlockSize, error);
-  isValid |= BTC::validateMerkleRoot(block, error);
-  isValid |= BTC::validateWitnessCommitment(block, hasWitnessData, error);
-  isValid |= validateAuxPow(block, chainParams, error);
+  isValid &= BTC::validateBlockSize(block, DOGE::Configuration::MaxBlockSize, error);
+  isValid &= BTC::validateMerkleRoot(block, error);
+  isValid &= BTC::validateWitnessCommitment(block, hasWitnessData, error);
+  isValid &= validateAuxPow(block, chainParams, error);
 
   validation.HasWitnessData = hasWitnessData;
 
@@ -192,8 +192,8 @@ bool DOGE::Common::checkBlockContextual(const BlockIndex &index,
                                         std::string &error)
 {
   bool isValid = true;
-  isValid |= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
-  isValid |= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);
+  isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
+  isValid &= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);
   return isValid;
 }
 

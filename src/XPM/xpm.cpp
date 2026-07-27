@@ -382,8 +382,8 @@ bool checkBlockStandalone(const XPM::Proto::Block &block,
   bool isValid = true;
 
   // Block validation
-  isValid |= BTC::validateBlockSize(block, XPM::Configuration::MaxBlockSize, error);
-  isValid |= BTC::validateMerkleRoot(block, error);
+  isValid &= BTC::validateBlockSize(block, XPM::Configuration::MaxBlockSize, error);
+  isValid &= BTC::validateMerkleRoot(block, error);
 
   validation.HasWitnessData = false;
 
@@ -399,7 +399,7 @@ bool checkBlockContextual(const BlockIndex &index,
                           std::string &error)
 {
   bool isValid = true;
-  isValid |= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
+  isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
   return isValid;
 }
 

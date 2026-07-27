@@ -465,21 +465,34 @@ struct CTxPosition {
   uint32_t Size;
 };
 
-template<typename T>
-static inline bool enumerateTransactions(const Proto::BlockTy<T> &block,
+// What a coin writes after the transaction list, LTC's MWEB extension block being the only one
+template<typename BlockTy>
+static inline size_t blockExtensionSize(const BlockTy &block)
+{
+  if constexpr (requires { BlockTy::extensionSize(block); })
+    return BlockTy::extensionSize(block);
+  else
+    return 0;
+}
+
+template<typename BlockTy>
+static inline bool enumerateTransactions(const BlockTy &block,
                                         uint32_t storedSize,
                                         std::vector<CTxPosition> &out)
 {
-  size_t offset = Io<typename T::BlockHeader>::getSerializedSize(block.header) +
+  using HeaderTy = std::remove_cvref_t<decltype(block.header)>;
+  using TransactionTy = std::remove_cvref_t<decltype(block.vtx[0])>;
+
+  size_t offset = Io<HeaderTy>::getSerializedSize(block.header) +
                   getSerializedVarSizeSize(block.vtx.size());
   out.resize(block.vtx.size());
   for (size_t i = 0; i < block.vtx.size(); i++) {
-    size_t size = Io<typename T::Transaction>::getSerializedSize(block.vtx[i], true);
+    size_t size = Io<TransactionTy>::getSerializedSize(block.vtx[i], true);
     out[i] = {static_cast<uint32_t>(offset), static_cast<uint32_t>(size)};
     offset += size;
   }
 
-  return offset == storedSize;
+  return offset + blockExtensionSize(block) == storedSize;
 }
 
 }

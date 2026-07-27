@@ -195,8 +195,14 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
   }
 
   std::string error;
-  if (!BC::Common::checkBlockContextual(*index, block, validationData, linkedOutputs, chainParams, error))
+  if (!BC::Common::checkBlockContextual(*index, block, validationData, linkedOutputs, chainParams, error)) {
+    LOG_F(ERROR,
+          "Block %s (%u) contextual check failed, error: %s",
+          index->Header.GetHash().getHexLE().c_str(),
+          index->Height,
+          error.c_str());
     return false;
+  }
 
   if (!silent)
     LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);

@@ -257,9 +257,9 @@ bool checkBlockStandalone(const Proto::Block &block, Proto::CBlockValidationData
   bool hasWitnessData = false;
 
   // Block validation
-  isValid |= BTC::validateBlockSize(block, BTC::Configuration::MaxBlockSize, error);
-  isValid |= BTC::validateMerkleRoot(block, error);
-  isValid |= BTC::validateWitnessCommitment(block, hasWitnessData, error);
+  isValid &= BTC::validateBlockSize(block, BTC::Configuration::MaxBlockSize, error);
+  isValid &= BTC::validateMerkleRoot(block, error);
+  isValid &= BTC::validateWitnessCommitment(block, hasWitnessData, error);
 
   validation.HasWitnessData = hasWitnessData;
 
@@ -275,8 +275,8 @@ bool checkBlockContextual(const BlockIndex &index,
                           std::string &error)
 {
   bool isValid = true;
-  isValid |= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
-  isValid |= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);
+  isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
+  isValid &= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);
   return isValid;
 }
 

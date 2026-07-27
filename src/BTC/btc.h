@@ -47,7 +47,8 @@ namespace Common {
   struct ChainParamsTy {
     int networkId;
     uint32_t magic;
-    BTC::Proto::BlockTy<T> GenesisBlock;
+    // The coin's own block type: LTC's is not the generic BlockTy the others alias
+    typename T::Block GenesisBlock;
 
     // Soft&hard forks
     uint32_t BIP34Height;

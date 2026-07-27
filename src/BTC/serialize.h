@@ -5,6 +5,7 @@
 #include "common/xvector.h"
 #include "p2putils/xmstream.h"
 #include <array>
+#include <limits>
 #include <memory>
 #include <new>
 #include <string>
@@ -107,6 +108,72 @@ static inline void unserializeVarSize(xmstream &stream, uint64_t &out)
   if (out < shortestForm || out > MaxSerializedSize) {
     out = 0;
     stream.seekEnd(0, true);
+  }
+}
+
+// Core's other variable size integer, unrelated to the compact size above: base 128, most
+// significant group first, every group after the first biased by one so that each value has
+// exactly one encoding. MWEB uses it for amounts, heights and MMR sizes.
+template<typename T> static inline size_t getSerializedVarIntSize(T value)
+{
+  size_t size = 0;
+  while (true) {
+    size++;
+    if (value <= 0x7F)
+      break;
+    value = (value >> 7) - 1;
+  }
+
+  return size;
+}
+
+template<typename T> static inline void serializeVarInt(xmstream &stream, T value)
+{
+  uint8_t data[(sizeof(T)*8 + 6) / 7];
+  int len = 0;
+  while (true) {
+    data[len] = static_cast<uint8_t>((value & 0x7F) | (len ? 0x80 : 0x00));
+    if (value <= 0x7F)
+      break;
+    value = (value >> 7) - 1;
+    len++;
+  }
+
+  do {
+    stream.write<uint8_t>(data[len]);
+  } while (len--);
+}
+
+// Non minimal encodings are unrepresentable by construction, so the only failures left are
+// running out of bytes and overflowing the target type; both set eof, as unserializeVarSize
+template<typename T> static inline void unserializeVarInt(xmstream &stream, T &out)
+{
+  T value = 0;
+  while (true) {
+    uint8_t data = stream.read<uint8_t>();
+    if (stream.eof()) {
+      out = 0;
+      return;
+    }
+
+    if (value > (std::numeric_limits<T>::max() >> 7)) {
+      out = 0;
+      stream.seekEnd(0, true);
+      return;
+    }
+
+    value = static_cast<T>((value << 7) | (data & 0x7F));
+    if (data & 0x80) {
+      if (value == std::numeric_limits<T>::max()) {
+        out = 0;
+        stream.seekEnd(0, true);
+        return;
+      }
+      value++;
+    } else {
+      out = value;
+      return;
+    }
   }
 }
 
@@ -369,11 +436,15 @@ template<> struct Io<xvector<uint8_t>> {
     return getSerializedVarSizeSize(data.size()) + data.size();
   }
 
+  static inline size_t getUnpackedExtraSize(xmstream &src, uint64_t *count) {
+    unserializeVarSize(src, *count);
+    src.seek(*count);
+    return aligned(*count, UnpackAlignment);
+  }
+
   static inline size_t getUnpackedExtraSize(xmstream &src) {
     uint64_t size;
-    unserializeVarSize(src, size);
-    src.seek(size);
-    return aligned(size, UnpackAlignment);
+    return getUnpackedExtraSize(src, &size);
   }
 
   static inline void serialize(xmstream &dst, const xvector<uint8_t> &data) {
@@ -431,7 +502,8 @@ static inline bool unserializeAndCheck(xmstream &stream, T &data) {
 // The op interface: io(member [, context]) — a field, another self-described type or a leaf;
 // vec(member [, context]) — a vector field, returns the element count on both directions, so
 // counts read from the stream can drive later gates on every pass; raw(member) — unions and
-// paddingless aggregates written as bytes; check(ok) — a format rule, makes the readers fail;
+// paddingless aggregates written as bytes; varint(member) — an integer in Core's base 128 form
+// rather than fixed width little endian; check(ok) — a format rule, makes the readers fail;
 // put(v)/get(v) — direction-specific scalars for wire words that are not members (packed
 // version bits, prefix bytes, the segwit marker); element(vec, i, fn) — per-element access
 // on the reading passes (the measuring pass has no elements and hands fn a throwaway).
@@ -471,6 +543,7 @@ struct SizeOf {
   }
 
   template<typename U> inline void raw(const U&) { Size += sizeof(U); }
+  template<typename U> inline void varint(const U &v) { Size += getSerializedVarIntSize(v); }
   template<typename U> inline void put(U) { Size += sizeof(U); }
   inline void check(bool) {}
 };
@@ -499,6 +572,7 @@ struct Writer {
   }
 
   template<typename U> inline void raw(const U &v) { Dst.write(&v, sizeof(U)); }
+  template<typename U> inline void varint(const U &v) { serializeVarInt(Dst, v); }
   template<typename U> inline void put(U v) { Dst.writele<U>(v); }
   inline void check(bool) {}
 };
@@ -527,6 +601,7 @@ struct Reader {
   }
 
   template<typename U> inline void raw(U &v) { Src.read(&v, sizeof(U)); }
+  template<typename U> inline void varint(U &v) { unserializeVarInt(Src, v); }
   template<typename U> inline void get(U &v) { v = Src.readle<U>(); }
   inline void check(bool ok) { if (!ok) Src.seekEnd(0, true); }
   template<typename U, typename F> inline void element(xvector<U> &v, size_t i, F body) { body(v[i]); }
@@ -564,6 +639,8 @@ struct Measurer {
   }
 
   template<typename U> inline void raw(U&) { Src.seek(sizeof(U)); }
+  // Read, not skipped: a varint has no fixed width, and a later gate may depend on the value
+  template<typename U> inline void varint(U &v) { unserializeVarInt(Src, v); }
   template<typename U> inline void get(U &v) { v = Src.readle<U>(); }
   inline void check(bool ok) { if (!ok) Src.seekEnd(0, true); }
   template<typename U, typename F> inline void element(xvector<U>&, size_t, F body) {
@@ -607,6 +684,7 @@ struct Unpacker {
   }
 
   template<typename U> inline void raw(U &v) { Src.read(&v, sizeof(U)); }
+  template<typename U> inline void varint(U &v) { unserializeVarInt(Src, v); }
   template<typename U> inline void get(U &v) { v = Src.readle<U>(); }
   inline void check(bool ok) { if (!ok) Src.seekEnd(0, true); }
   template<typename U, typename F> inline void element(xvector<U> &v, size_t i, F body) { body(v[i]); }

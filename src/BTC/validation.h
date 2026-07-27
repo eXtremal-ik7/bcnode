@@ -21,10 +21,13 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
 }
 
 
-template<typename BlockTy>
-bool validateBlockSize(const BlockTy &block, size_t limit, std::string &error)
+// The limit applies to the base size, hence the context dropping the witness data; a coin
+// whose blocks carry more passes its own, as LTC does to keep the extension block out of the
+// count the way Core's SERIALIZE_NO_MWEB does
+template<typename BlockTy, typename CtxTy = bool>
+bool validateBlockSize(const BlockTy &block, size_t limit, std::string &error, CtxTy ctx = false)
 {
-  bool result = BTC::Io<BlockTy>::getSerializedSize(block, false) <= limit;
+  bool result = BTC::Io<BlockTy>::getSerializedSize(block, ctx) <= limit;
   if (!result)
     error = "bad-blocksize";
   return result;
@@ -40,8 +43,10 @@ bool validateMerkleRoot(const BlockTy &block, std::string &error) {
 
 template<typename BlockTy>
 bool validateWitnessCommitment(const BlockTy &block, bool &hasWitness, std::string &error) {
-  if (block.vtx.empty() || block.vtx[0].txIn.empty())
+  if (block.vtx.empty() || block.vtx[0].txIn.empty()) {
+    error = "bad-coinbase-missing";
     return false;
+  }
   const auto &coinbaseTxIn = block.vtx[0].txIn[0];
 
   // Get commitment txout index
@@ -124,7 +129,8 @@ bool validateBIP34(uint32_t height, const BlockTy &block, uint32_t bip34Height, 
 
 static inline bool validateUnexpectedWitness(uint32_t height, bool hasWitnessData, uint32_t segwitHeight, std::string &error) {
   bool result = !(height < segwitHeight && hasWitnessData);
-  error = "unexpected-witness-data";
+  if (!result)
+    error = "unexpected-witness-data";
   return result;
 }
 }
