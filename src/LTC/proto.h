@@ -33,10 +33,6 @@ public:
     xvector<TxOut> txOut;
     uint32_t lockTime;
 
-    // Memory only
-    uint32_t SerializedDataOffset = 0;
-    uint32_t SerializedDataSize = 0;
-
     bool hasWitness() const {
       for (size_t i = 0; i < txIn.size(); i++) {
         if (!txIn[i].witnessStack.empty())
@@ -48,6 +44,58 @@ public:
 
     BlockHashTy getTxId() const;
     BlockHashTy getWTxid() const;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d, bool serializeWitness = true) {
+      op.io(d.version);
+      if constexpr (Op::Writing) {
+        // segwit: marker and flag ahead of the inputs, witness stacks between the outputs
+        // and lockTime
+        bool witness = d.hasWitness() && serializeWitness;
+        if (witness) {
+          op.put(static_cast<uint8_t>(0));
+          op.put(static_cast<uint8_t>(1));
+        }
+        op.io(d.txIn);
+        op.io(d.txOut);
+        if (witness) {
+          for (size_t i = 0; i < d.txIn.size(); i++)
+            op.io(d.txIn[i].witnessStack);
+        }
+      } else {
+        // an empty input list is the segwit marker: the flag byte follows, then the real lists
+        uint8_t flags = 0;
+        size_t txInCount = op.vec(d.txIn);
+        if (txInCount == 0) {
+          op.get(flags);
+          if (flags != 0) {
+            txInCount = op.vec(d.txIn);
+            op.vec(d.txOut);
+          }
+        } else {
+          op.vec(d.txOut);
+        }
+
+        if (flags & 1) {
+          flags ^= 1;
+          // the marker with every witness stack empty must have been serialized without
+          // the marker: reject, as Core does
+          bool anyWitness = false;
+          for (size_t i = 0; i < txInCount; i++)
+            op.element(d.txIn, i, [&](auto &in) { anyWitness |= op.vec(in.witnessStack) != 0; });
+          if (!anyWitness) {
+            op.check(false);
+            return;
+          }
+        }
+
+        if (flags) {
+          op.check(false);
+          return;
+        }
+      }
+      op.io(d.lockTime);
+    }
   };
 
   using CBlockValidationData = BTC::Proto::CBlockValidationData;
@@ -70,19 +118,11 @@ public:
 
 // Serialize
 namespace BTC {
-template<> struct Io<LTC::Proto::Transaction> {
-  static size_t getSerializedSize(const LTC::Proto::Transaction &data, bool serializeWitness=true);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const LTC::Proto::Transaction &data, bool serializeWitness=true);
-  static void unserialize(xmstream &src, LTC::Proto::Transaction &data);
-  static void unpack2(xmstream &src, LTC::Proto::Transaction *data, uint8_t **extraData);
-
-  static void serializeForSignature(xmstream &dst,
-                                    const LTC::Proto::Transaction &data,
-                                    size_t targetInput,
-                                    const uint8_t *utxo,
-                                    size_t utxoSize);
-};
+void serializeForSignature(xmstream &dst,
+                           const LTC::Proto::Transaction &data,
+                           size_t targetInput,
+                           const uint8_t *utxo,
+                           size_t utxoSize);
 }
 
 void serializeJson(xmstream &stream, const char *fieldName, const LTC::Proto::Transaction &data);

@@ -371,7 +371,7 @@ private:
       // serialize transaction for sign
       uint8_t sigHash[32];
       SmallStream<4096> sigData;
-      BC::Io<BC::Proto::Transaction>::serializeForSignature(sigData, tx, i, p2pkhOutput, sizeof(p2pkhOutput));
+      BC::serializeForSignature(sigData, tx, i, p2pkhOutput, sizeof(p2pkhOutput));
       sigData.write<int32_t>(1);
 
       {

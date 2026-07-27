@@ -92,8 +92,24 @@ public:
       sha256Final(&sha256, result.begin());
       return result;
     }
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.nVersion);
+      op.io(d.hashPrevBlock);
+      op.io(d.hashMerkleRoot);
+      op.io(d.hashLightClientRoot);
+      op.io(d.nTime);
+      op.io(d.nBits);
+      op.io(d.nNonce);
+      op.io(d.nSolution);
+    }
   };
 #pragma pack(pop)
+
+  // GetHash hashes the first HEADER_SIZE bytes of the object: layout must stay equal to the
+  // wire prefix
+  static_assert(sizeof(BlockHeader) == BlockHeader::HEADER_SIZE + sizeof(xvector<uint8_t>));
 
   using BlockHeaderNet = BTC::Proto::BlockHeaderNetTy<ZEC::Proto>;
   using Block = BTC::Proto::BlockTy<ZEC::Proto>;
@@ -110,11 +126,44 @@ public:
   struct CompressedG1 {
     bool y_lsb;
     BaseBlob<256> x;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      // the y bit lives in a validated prefix byte
+      if constexpr (Op::Writing) {
+        uint8_t leadingByte = G1_PREFIX_MASK;
+        if (d.y_lsb)
+          leadingByte |= 1;
+        op.put(leadingByte);
+      } else {
+        uint8_t leadingByte = 0;
+        op.get(leadingByte);
+        op.check((leadingByte & ~1) == G1_PREFIX_MASK);
+        d.y_lsb = leadingByte & 1;
+      }
+      op.io(d.x);
+    }
   };
 
   struct CompressedG2 {
     bool y_gt;
     BaseBlob<512> x;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      if constexpr (Op::Writing) {
+        uint8_t leadingByte = G2_PREFIX_MASK;
+        if (d.y_gt)
+          leadingByte |= 1;
+        op.put(leadingByte);
+      } else {
+        uint8_t leadingByte = 0;
+        op.get(leadingByte);
+        op.check((leadingByte & ~1) == G2_PREFIX_MASK);
+        d.y_gt = leadingByte & 1;
+      }
+      op.io(d.x);
+    }
   };
 
   struct PHGRProof {
@@ -126,6 +175,18 @@ public:
     CompressedG1 g_C_prime;
     CompressedG1 g_K;
     CompressedG1 g_H;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.g_A);
+      op.io(d.g_A_prime);
+      op.io(d.g_B);
+      op.io(d.g_B_prime);
+      op.io(d.g_C);
+      op.io(d.g_C_prime);
+      op.io(d.g_K);
+      op.io(d.g_H);
+    }
   };
 
   struct SpendDescription {
@@ -135,6 +196,16 @@ public:
     BaseBlob<256> rk;
     std::array<uint8_t, GROTH_PROOF_SIZE> zkproof;
     std::array<uint8_t, 64> spendAuthSig;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.cv);
+      op.io(d.anchor);
+      op.io(d.nullifer);
+      op.io(d.rk);
+      op.io(d.zkproof);
+      op.io(d.spendAuthSig);
+    }
   };
 
   struct OutputDescription {
@@ -144,6 +215,16 @@ public:
     std::array<uint8_t, ZC_SAPLING_ENCCIPHERTEXT_SIZE> encCiphertext;
     std::array<uint8_t, ZC_SAPLING_OUTCIPHERTEXT_SIZE> outCiphertext;
     std::array<uint8_t, GROTH_PROOF_SIZE> zkproof;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.cv);
+      op.io(d.cmu);
+      op.io(d.ephemeralKey);
+      op.io(d.encCiphertext);
+      op.io(d.outCiphertext);
+      op.io(d.zkproof);
+    }
   };
 
   struct JSDescription {
@@ -163,6 +244,28 @@ public:
 
     PHGRProof phgrProof;
     std::array<uint8_t, GROTH_PROOF_SIZE> zkproof;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d, bool useGroth) {
+      op.io(d.vpub_old);
+      op.io(d.vpub_new);
+      op.io(d.anchor);
+      op.io(d.nullifier1);
+      op.io(d.nullifier2);
+      op.io(d.commitment1);
+      op.io(d.commitment2);
+      op.io(d.ephemeralKey);
+      op.io(d.randomSeed);
+      op.io(d.mac1);
+      op.io(d.mac2);
+      // the proof representation is picked by the transaction the description belongs to
+      if (useGroth)
+        op.io(d.zkproof);
+      else
+        op.io(d.phgrProof);
+      op.io(d.ciphertext1);
+      op.io(d.ciphertext2);
+    }
   };
 
   struct Transaction {
@@ -181,13 +284,70 @@ public:
     std::array<uint8_t, 64> joinSplitSig;
     std::array<uint8_t, 64> bindingSig;
 
-    // Memory only
-    uint32_t SerializedDataOffset = 0;
-    uint32_t SerializedDataSize = 0;
-
     BlockHashTy getTxId() const;
     // ZEC has no witness data, wtxid is always the same as txid
     BlockHashTy getWTxid() const { return getTxId(); }
+
+    // The witness flag of the common block path is accepted and ignored
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d, bool = true) {
+      // fOverwintered is packed into the sign bit of the version word
+      uint32_t header;
+      if constexpr (Op::Writing) {
+        header = (static_cast<uint32_t>(d.fOverwintered) << 31) | static_cast<uint32_t>(d.version);
+        op.put(header);
+      } else {
+        header = 0;
+        op.get(header);
+        d.fOverwintered = header >> 31;
+        d.version = header & 0x7FFFFFFF;
+      }
+
+      if (d.fOverwintered)
+        op.io(d.nVersionGroupId);
+
+      bool isOverwinterV3 = d.fOverwintered &&
+          d.nVersionGroupId == OVERWINTER_VERSION_GROUP_ID &&
+          d.version == OVERWINTER_TX_VERSION;
+      bool isSaplingV4 =
+          d.fOverwintered &&
+          d.nVersionGroupId == SAPLING_VERSION_GROUP_ID &&
+          d.version == SAPLING_TX_VERSION;
+      bool useGroth = d.fOverwintered && d.version >= SAPLING_TX_VERSION;
+
+      if constexpr (!Op::Writing) {
+        // an overwintered transaction of an unknown version group is unparsable
+        if (d.fOverwintered && !(isOverwinterV3 || isSaplingV4)) {
+          op.check(false);
+          return;
+        }
+      }
+
+      op.io(d.txIn);
+      op.io(d.txOut);
+      op.io(d.lockTime);
+
+      if (isOverwinterV3 || isSaplingV4)
+        op.io(d.nExpiryHeight);
+
+      size_t shieldedSpends = 0;
+      size_t shieldedOutputs = 0;
+      if (isSaplingV4) {
+        op.io(d.valueBalance);
+        shieldedSpends = op.vec(d.vShieldedSpend);
+        shieldedOutputs = op.vec(d.vShieldedOutput);
+      }
+
+      if (d.version >= 2) {
+        if (op.vec(d.vJoinSplit, useGroth) != 0) {
+          op.io(d.joinSplitPubKey);
+          op.io(d.joinSplitSig);
+        }
+      }
+
+      if (isSaplingV4 && (shieldedSpends != 0 || shieldedOutputs != 0))
+        op.io(d.bindingSig);
+    }
   };
 
   using MessageVersion = BTC::Proto::MessageVersion;
@@ -202,74 +362,6 @@ public:
   using MessageReject = BTC::Proto::MessageReject;
   using MessageHeaders = BTC::Proto::MessageHeadersTy<ZEC::Proto>;
 };
-}
-
-// Serialize
-namespace BTC {
-template<> struct Io<ZEC::Proto::CompressedG1> {
-  static size_t getSerializedSize(const ZEC::Proto::CompressedG1 &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const ZEC::Proto::CompressedG1 &data);
-  static void unserialize(xmstream &src, ZEC::Proto::CompressedG1 &data);
-  static void unpack2(xmstream &src, ZEC::Proto::CompressedG1 *data, uint8_t **extraData);
-};
-
-template<> struct Io<ZEC::Proto::CompressedG2> {
-  static size_t getSerializedSize(const ZEC::Proto::CompressedG2 &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const ZEC::Proto::CompressedG2 &data);
-  static void unserialize(xmstream &src, ZEC::Proto::CompressedG2 &data);
-  static void unpack2(xmstream &src, ZEC::Proto::CompressedG2 *data, uint8_t **extraData);
-};
-
-template<> struct Io<ZEC::Proto::PHGRProof> {
-  static size_t getSerializedSize(const ZEC::Proto::PHGRProof &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const ZEC::Proto::PHGRProof &data);
-  static void unserialize(xmstream &src, ZEC::Proto::PHGRProof &data);
-  static void unpack2(xmstream &src, ZEC::Proto::PHGRProof *data, uint8_t **extraData);
-};
-
-template<> struct Io<ZEC::Proto::SpendDescription> {
-  static size_t getSerializedSize(const ZEC::Proto::SpendDescription &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const ZEC::Proto::SpendDescription &data);
-  static void unserialize(xmstream &src, ZEC::Proto::SpendDescription &data);
-  static void unpack2(xmstream &src, ZEC::Proto::SpendDescription *data, uint8_t **extraData);
-};
-
-template<> struct Io<ZEC::Proto::OutputDescription> {
-  static size_t getSerializedSize(const ZEC::Proto::OutputDescription &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const ZEC::Proto::OutputDescription &data);
-  static void unserialize(xmstream &src, ZEC::Proto::OutputDescription &data);
-  static void unpack2(xmstream &src, ZEC::Proto::OutputDescription *data, uint8_t **extraData);
-};
-
-template<> struct Io<ZEC::Proto::JSDescription, bool> {
-  static size_t getSerializedSize(const ZEC::Proto::JSDescription &data, bool useGroth);
-  static size_t getUnpackedExtraSize(xmstream &src, bool useGroth);
-  static void serialize(xmstream &dst, const ZEC::Proto::JSDescription &data, bool useGroth);
-  static void unserialize(xmstream &src, ZEC::Proto::JSDescription &data, bool useGroth);
-  static void unpack2(xmstream &src, ZEC::Proto::JSDescription *data, uint8_t **extraData, bool useGroth);
-};
-
-template<> struct Io<ZEC::Proto::BlockHeader> {
-  static size_t getSerializedSize(const ZEC::Proto::BlockHeader &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const ZEC::Proto::BlockHeader &data);
-  static void unserialize(xmstream &src, ZEC::Proto::BlockHeader &data);
-  static void unpack2(xmstream &src, ZEC::Proto::BlockHeader *data, uint8_t **extraData);
-};
-
-template<> struct Io<ZEC::Proto::Transaction> {
-  static size_t getSerializedSize(const ZEC::Proto::Transaction &data, bool);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const ZEC::Proto::Transaction &data);
-  static void unserialize(xmstream &src, ZEC::Proto::Transaction &data);
-  static void unpack2(xmstream &src, ZEC::Proto::Transaction *data, uint8_t **extraData);
-};
-
 }
 
 void serializeJson(xmstream &stream, const char *fieldName, const ZEC::Proto::Transaction &data);

@@ -711,7 +711,7 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   txObject.addString("block_hash", index->Header.GetHash().getHexLE());
   txObject.addInt("block_height", index->Height);
   txObject.addInt("timestamp", index->Header.nTime);
-  txObject.addInt("size_bytes", tx.SerializedDataSize);
+  txObject.addInt("size_bytes", BC::Io<BC::Proto::Transaction>::getSerializedSize(tx, true));
   txObject.addInt("version", tx.version);
   txObject.addInt("locktime", tx.lockTime);
   txObject.addInt("confirmations", confirmations);

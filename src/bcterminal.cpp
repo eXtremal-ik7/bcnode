@@ -88,12 +88,12 @@ public:
   void onAddr(BC::Network::Connection<TextTerminal>*, const BC::Proto::MessageAddr &addr) {
     for (const auto &address: addr.addr_list) {
       uint32_t ipv4;
-      if (address.getIpv4(&ipv4)) {
+      if (address.addr.getIpv4(&ipv4)) {
         struct in_addr inaddr;
         inaddr.s_addr = ipv4;
-        write("address: %s:%hu, services: %" PRIu64 "\n", inet_ntoa(inaddr), xbetoh(address.port), address.services);
+        write("address: %s:%hu, services: %" PRIu64 "\n", inet_ntoa(inaddr), xbetoh(address.addr.port), address.addr.services);
       } else {
-        write("address: ?ipv6:%hu, services: %" PRIu64 "\n", xbetoh(address.port), address.services);
+        write("address: ?ipv6:%hu, services: %" PRIu64 "\n", xbetoh(address.addr.port), address.addr.services);
       }
     }
 

@@ -59,8 +59,22 @@ public:
         result.data()[i] = readle(result.data()[i]);
       return result;
     }
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.nVersion);
+      op.io(d.hashPrevBlock);
+      op.io(d.hashMerkleRoot);
+      op.io(d.nTime);
+      op.io(d.nBits);
+      op.io(d.nNonce);
+      op.io(d.bnPrimeChainMultiplier);
+    }
   };
 #pragma pack(pop)
+
+  // GetHash hashes the first 80 bytes of the object: layout must stay equal to the wire prefix
+  static_assert(sizeof(BlockHeader) == 80 + sizeof(mpz_class));
 
   using TxIn = BTC::Proto::TxIn;
   using TxOut = BTC::Proto::TxOut;
@@ -86,8 +100,22 @@ public:
   using MessageReject = BTC::Proto::MessageReject;
   using MessageHeaders = BTC::Proto::MessageHeadersTy<XPM::Proto>;
 
-  // Using different serialization
-  struct MessageVersion : public BTC::Proto::MessageVersion {};
+  // XPM version message has no relay field
+  struct MessageVersion : public BTC::Proto::MessageVersion {
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.version);
+      op.io(d.services);
+      op.io(d.timestamp);
+      op.io(d.addr_recv);
+      if (d.version >= 106) {
+        op.io(d.addr_from);
+        op.io(d.nonce);
+        op.io(d.user_agent);
+        op.io(d.start_height);
+      }
+    }
+  };
 };
 }
 
@@ -101,19 +129,6 @@ template<> struct Io<mpz_class> {
   static void unpack2(xmstream &src, mpz_class *data, uint8_t **extraData);
 };
 
-template<> struct Io<XPM::Proto::BlockHeader> {
-  static size_t getSerializedSize(const XPM::Proto::BlockHeader &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const XPM::Proto::BlockHeader &data);
-  static void unserialize(xmstream &src, XPM::Proto::BlockHeader &data);
-  static void unpack2(xmstream &src, XPM::Proto::BlockHeader *data, uint8_t **extraData);
-};
-
-// XPM does not have 'relay' field in version message
-template<> struct Io<XPM::Proto::MessageVersion> {
-  static void serialize(xmstream &dst, const XPM::Proto::MessageVersion &data);
-  static void unserialize(xmstream &src, XPM::Proto::MessageVersion &data);
-};
 }
 
 void serializeJsonInside(xmstream &stream, const XPM::Proto::BlockHeader &header);

@@ -349,7 +349,6 @@ if (BCNODE_DOGE)
     LTC/ltc.cpp
     LTC/proto.cpp
     DOGE/doge.cpp
-    DOGE/proto.cpp
     DOGE/validation.cpp
   )
 
@@ -358,7 +357,6 @@ if (BCNODE_DOGE)
     LTC/ltc.cpp
     LTC/proto.cpp
     DOGE/doge.cpp
-    DOGE/proto.cpp
     DOGE/validation.cpp
     BTC/proto.cpp
     common/merkleTree.cpp

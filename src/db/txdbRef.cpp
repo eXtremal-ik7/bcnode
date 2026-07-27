@@ -46,8 +46,6 @@ bool TxDbRef::queryTransaction(const BC::Proto::TxHashTy &txid,
         result.DataCorrupted = true;
         return;
       }
-
-      result.Tx.SerializedDataSize = logData->SerializedDataSize;
     }
 
     // Load linked outputs
@@ -84,15 +82,21 @@ void TxDbRef::connectImpl(const BC::Common::BlockIndex *index,
                           BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
+  std::vector<BTC::CTxPosition> positions;
+  if (!BTC::enumerateTransactions(block, index->SerializedBlockSize, positions)) {
+    LOG_F(ERROR,
+          "TxDbRef: transaction layout of block %s does not add up to its stored size",
+          blockId.getHexLE().c_str());
+    return;
+  }
+
   for (size_t i = 0, ie = block.vtx.size(); i != ie; i++) {
-    auto tx = block.vtx[i];
-    BC::Proto::BlockHashTy hash = tx.getTxId();
     CLogData data;
     data.Hash = blockId;
     data.Index = i;
-    data.SerializedDataOffset = tx.SerializedDataOffset;
-    data.SerializedDataSize = tx.SerializedDataSize;
-    this->add(blockId, hash, &data, sizeof(data));
+    data.SerializedDataOffset = positions[i].Offset;
+    data.SerializedDataSize = positions[i].Size;
+    this->add(blockId, block.vtx[i].getTxId(), &data, sizeof(data));
   }
 }
 

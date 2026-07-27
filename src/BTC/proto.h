@@ -27,8 +27,7 @@ public:
     NetworkLimited = 1024
   };
 
-struct NetworkAddress {
-  uint32_t time;
+struct NetworkAddressWithoutTime {
   uint64_t services;
   union {
     uint8_t u8[16];
@@ -57,9 +56,25 @@ struct NetworkAddress {
     memcpy(ipv6.u8, ipv4mask, sizeof(ipv4mask));
     ipv6.u32[3] = ipv4;
   }
+
+  template<typename Op, typename Self>
+  static void io(Op &op, Self &d) {
+    op.io(d.services);
+    op.raw(d.ipv6);
+    op.io(d.port);
+  }
 };
 
-struct NetworkAddressWithoutTime : public NetworkAddress {};
+struct NetworkAddress {
+  uint32_t time;
+  NetworkAddressWithoutTime addr;
+
+  template<typename Op, typename Self>
+  static void io(Op &op, Self &d) {
+    op.io(d.time);
+    op.io(d.addr);
+  }
+};
 
   // struct CTxInInfoLink {};
 
@@ -108,8 +123,23 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
         result.data()[i] = readle(result.data()[i]);
       return result;
     }
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      static_assert(std::is_same_v<std::remove_cv_t<Self>, BlockHeader>);
+      op.io(d.nVersion);
+      op.io(d.hashPrevBlock);
+      op.io(d.hashMerkleRoot);
+      op.io(d.nTime);
+      op.io(d.nBits);
+      op.io(d.nNonce);
+    }
   };
 #pragma pack(pop)
+
+  // GetHash hashes the object as raw bytes: layout must stay equal to the wire format
+  static_assert(sizeof(BlockHeader) == 80);
+  static_assert(std::is_standard_layout_v<BlockHeader>);
 
   struct TxIn {
     TxHashTy previousOutputHash;
@@ -117,11 +147,26 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     xvector<uint8_t> scriptSig;
     xvector<xvector<uint8_t>> witnessStack;
     uint32_t sequence;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.previousOutputHash);
+      op.io(d.previousOutputIndex);
+      op.io(d.scriptSig);
+      // witnessStack: written by the transaction
+      op.io(d.sequence);
+    }
   };
 
   struct TxOut {
     int64_t value;
     xvector<uint8_t> pkScript;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.value);
+      op.io(d.pkScript);
+    }
   };
 
   struct TxWitness {
@@ -131,6 +176,14 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
   template<typename T>
   struct BlockHeaderNetTy {
     typename T::BlockHeader header;
+    // Transaction count of the wire form, a headers entry always carries 0
+    VarSize txNum;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.header);
+      op.io(d.txNum);
+    }
   };
 
   struct Transaction {
@@ -138,10 +191,6 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     xvector<TxIn> txIn;
     xvector<TxOut> txOut;
     uint32_t lockTime;
-
-    // Memory only
-    uint32_t SerializedDataOffset = 0;
-    uint32_t SerializedDataSize = 0;
 
     bool hasWitness() const {
       for (size_t i = 0; i < txIn.size(); i++) {
@@ -154,6 +203,58 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
 
     BlockHashTy getTxId() const;
     BlockHashTy getWTxid() const;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d, bool serializeWitness = true) {
+      op.io(d.version);
+      if constexpr (Op::Writing) {
+        // segwit: marker and flag ahead of the inputs, witness stacks between the outputs
+        // and lockTime
+        bool witness = d.hasWitness() && serializeWitness;
+        if (witness) {
+          op.put(static_cast<uint8_t>(0));
+          op.put(static_cast<uint8_t>(1));
+        }
+        op.io(d.txIn);
+        op.io(d.txOut);
+        if (witness) {
+          for (size_t i = 0; i < d.txIn.size(); i++)
+            op.io(d.txIn[i].witnessStack);
+        }
+      } else {
+        // an empty input list is the segwit marker: the flag byte follows, then the real lists
+        uint8_t flags = 0;
+        size_t txInCount = op.vec(d.txIn);
+        if (txInCount == 0) {
+          op.get(flags);
+          if (flags != 0) {
+            txInCount = op.vec(d.txIn);
+            op.vec(d.txOut);
+          }
+        } else {
+          op.vec(d.txOut);
+        }
+
+        if (flags & 1) {
+          flags ^= 1;
+          // the marker with every witness stack empty must have been serialized without
+          // the marker: reject, as Core does
+          bool anyWitness = false;
+          for (size_t i = 0; i < txInCount; i++)
+            op.element(d.txIn, i, [&](auto &in) { anyWitness |= op.vec(in.witnessStack) != 0; });
+          if (!anyWitness) {
+            op.check(false);
+            return;
+          }
+        }
+
+        if (flags) {
+          op.check(false);
+          return;
+        }
+      }
+      op.io(d.lockTime);
+    }
   };
 
   template<typename T>
@@ -162,15 +263,32 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     xvector<typename T::Transaction> vtx;
     // Memory only
     // mutable ValidationData validationData;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d, bool serializeWitness = true) {
+      op.io(d.header, serializeWitness);
+      op.vec(d.vtx, serializeWitness);
+    }
   };
 
   struct CTxLinkedOutputs {
     xvector<xvector<uint8_t>> TxIn;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.TxIn);
+    }
   };
 
   struct CBlockLinkedOutputs {
     bool AllOutputsFound = false;
     xvector<CTxLinkedOutputs> Tx;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      // AllOutputsFound is memory only
+      op.io(d.Tx);
+    }
   };
 
   struct CTxInValidationData {
@@ -196,6 +314,23 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     std::string user_agent;
     uint32_t start_height;
     bool relay;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      static_assert(std::is_same_v<std::remove_cv_t<Self>, MessageVersion>);
+      op.io(d.version);
+      op.io(d.services);
+      op.io(d.timestamp);
+      op.io(d.addr_recv);
+      if (d.version >= 106) {
+        op.io(d.addr_from);
+        op.io(d.nonce);
+        op.io(d.user_agent);
+        op.io(d.start_height);
+        if (d.version >= 70001)
+          op.io(d.relay);
+      }
+    }
   };
 
   struct InventoryVector {
@@ -214,45 +349,95 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
 
     uint32_t type;
     BaseBlob<256> hash;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.type);
+      op.io(d.hash);
+    }
   };
 
   // Template messages
   template<typename T>
   struct MessageHeadersTy {
     xvector<BlockHeaderNetTy<T>> headers;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.headers);
+    }
   };
 
   // BTC messages
   struct MessagePing {
     uint64_t nonce;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.nonce);
+    }
   };
 
   struct MessagePong {
     uint64_t nonce;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.nonce);
+    }
   };
 
   struct MessageAddr {
     xvector<NetworkAddress> addr_list;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.addr_list);
+    }
   };
 
   struct MessageGetHeaders {
     uint32_t version;
     xvector<BaseBlob<256>> BlockLocatorHashes;
     BaseBlob<256> HashStop;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.version);
+      op.io(d.BlockLocatorHashes);
+      op.io(d.HashStop);
+    }
   };
 
   struct MessageGetBlocks {
     uint32_t version;
     xvector<BaseBlob<256>> BlockLocatorHashes;
     BaseBlob<256> HashStop;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.version);
+      op.io(d.BlockLocatorHashes);
+      op.io(d.HashStop);
+    }
   };
 
   struct MessageInv {
     xvector<InventoryVector> Inventory;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.Inventory);
+    }
   };
 
   struct MessageGetData {
     xvector<InventoryVector> inventory;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.inventory);
+    }
   };
 
   struct MessageReject {
@@ -260,6 +445,14 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
     int8_t ccode;
     std::string reason;
     uint8_t data[32];
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.message);
+      op.io(d.ccode);
+      op.io(d.reason);
+      // TODO: serialize data
+    }
   };
 
   using BlockHeaderNet = BlockHeaderNetTy<BTC::Proto>;
@@ -271,245 +464,40 @@ struct NetworkAddressWithoutTime : public NetworkAddress {};
 
 namespace BTC {
 
-// Header
-template<> struct Io<Proto::BlockHeader> {
-  static inline size_t getSerializedSize(const BTC::Proto::BlockHeader&) { return 80; }
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    src.seek(80);
-    return 0;
-  }
-  static void serialize(xmstream &dst, const BTC::Proto::BlockHeader &data);
-  static void unserialize(xmstream &src, BTC::Proto::BlockHeader &data);
-  static inline void unpack2(xmstream &src, Proto::BlockHeader *dst, uint8_t **) { unserialize(src, *dst); }
+// Not part of the Io contract: the input being signed is replaced by the utxo it spends
+void serializeForSignature(xmstream &dst, const BTC::Proto::TxIn &data, const uint8_t *utxo, size_t utxoSize);
+void serializeForSignature(xmstream &dst,
+                           const BTC::Proto::Transaction &data,
+                           size_t targetInput,
+                           const uint8_t *utxo,
+                           size_t utxoSize);
+
+// Where each transaction lies inside the serialized block, derived from the block itself: the
+// header size and the transaction count give the offset of the first one, every next offset is
+// the previous plus that transaction's size. Exact because unserializeVarSize rejects non
+// minimal encodings, so no stored block can be non canonical; the sum is checked against the
+// stored size to make sure of it.
+struct CTxPosition {
+  uint32_t Offset;
+  uint32_t Size;
 };
 
-// TxIn
-template<> struct Io<Proto::TxIn> {
-  static size_t getSerializedSize(const BTC::Proto::TxIn &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const BTC::Proto::TxIn &data);
-  static void unserialize(xmstream &src, BTC::Proto::TxIn &data);
-  static void unpack2(xmstream &src, Proto::TxIn *data, uint8_t **extraData);
-  static void serializeForSignature(xmstream &dst, const BTC::Proto::TxIn &data, const uint8_t *utxo, size_t utxoSize);
-};
-
-// TxOut
-template<> struct Io<Proto::TxOut> {
-  static size_t getSerializedSize(const BTC::Proto::TxOut &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const BTC::Proto::TxOut &data);
-  static void unserialize(xmstream &src, BTC::Proto::TxOut &data);
-  static void unpack2(xmstream &src, Proto::TxOut *data, uint8_t **extraData);
-};
-
-// Transaction
-template<> struct Io<Proto::Transaction> {
-  static size_t getSerializedSize(const BTC::Proto::Transaction &data, bool serializeWitness=true);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const BTC::Proto::Transaction &data, bool serializeWitness=true);
-  static void unserialize(xmstream &src, BTC::Proto::Transaction &data);
-  static void unpack2(xmstream &src, Proto::Transaction *data, uint8_t **extraData);
-
-  static void serializeForSignature(xmstream &dst,
-                                    const BTC::Proto::Transaction &data,
-                                    size_t targetInput,
-                                    const uint8_t *utxo,
-                                    size_t utxoSize);
-};
-
-// Block
-template<typename T> struct Io<Proto::BlockTy<T>> {
-  static inline size_t getSerializedSize(const BTC::Proto::BlockTy<T> &data, bool serializeWitness=true) {
-    size_t size = Io<decltype(data.header)>::getSerializedSize(data.header) + getSerializedVarSizeSize(data.vtx.size());
-    for (const auto &tx: data.vtx)
-      size += Io<typename T::Transaction>::getSerializedSize(tx, serializeWitness);
-    return size;
+template<typename T>
+static inline bool enumerateTransactions(const Proto::BlockTy<T> &block,
+                                        uint32_t storedSize,
+                                        std::vector<CTxPosition> &out)
+{
+  size_t offset = Io<typename T::BlockHeader>::getSerializedSize(block.header) +
+                  getSerializedVarSizeSize(block.vtx.size());
+  out.resize(block.vtx.size());
+  for (size_t i = 0; i < block.vtx.size(); i++) {
+    size_t size = Io<typename T::Transaction>::getSerializedSize(block.vtx[i], true);
+    out[i] = {static_cast<uint32_t>(offset), static_cast<uint32_t>(size)};
+    offset += size;
   }
 
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    // Both calls advance src, and operands of + are not sequenced: the measuring
-    // pass has to walk the stream in the same order unpack2 does, header first.
-    size_t headerExtraSize = Io<decltype(Proto::BlockTy<T>::header)>::getUnpackedExtraSize(src);
-    size_t vtxExtraSize = Io<decltype(Proto::BlockTy<T>::vtx)>::getUnpackedExtraSize(src);
-    return headerExtraSize + vtxExtraSize;
-  }
-
-  static inline void serialize(xmstream &dst, const BTC::Proto::BlockTy<T> &data) {
-    BTC::serialize(dst, data.header);
-    BTC::serialize(dst, data.vtx);
-  }
-
-  static inline void unserialize(xmstream &src, BTC::Proto::BlockTy<T> &data) {
-    size_t blockDataOffset = src.offsetOf();
-
-    BTC::unserialize(src, data.header);
-
-    uint64_t txNum = 0;
-    unserializeVarSize(src, txNum);
-    if (txNum > src.remaining()) {
-      src.seekEnd(0, true);
-      return;
-    }
-
-    data.vtx.resize(txNum);
-    for (uint64_t i = 0; i < txNum; i++) {
-      data.vtx[i].SerializedDataOffset = static_cast<uint32_t>(src.offsetOf() - blockDataOffset);
-      BTC::unserialize(src, data.vtx[i]);
-      data.vtx[i].SerializedDataSize = static_cast<uint32_t>(src.offsetOf() - data.vtx[i].SerializedDataOffset);
-    }
-  }
-
-  static inline void unpack2(xmstream &src, Proto::BlockTy<T> *data, uint8_t **extraData) {
-    size_t blockDataOffset = src.offsetOf();
-
-    BTC::Io<decltype(data->header)>::unpack2(src, &data->header, extraData);
-
-    uint64_t size = 0;
-    unserializeVarSize(src, size);
-    if (size > src.remaining()) {
-      src.seekEnd(0, true);
-      return;
-    }
-
-    using TransactionTy = typename T::Transaction;
-    TransactionTy *elementsData = reinterpret_cast<TransactionTy*>(*extraData);
-    new (&data->vtx) xvector<TransactionTy>(elementsData, size);
-    (*extraData) += sizeof(TransactionTy)*size;
-    for (size_t i = 0; i < size; i++) {
-      data->vtx[i].SerializedDataOffset = static_cast<uint32_t>(src.offsetOf() - blockDataOffset);
-      BTC::Io<TransactionTy>::unpack2(src, &elementsData[i], extraData);
-      data->vtx[i].SerializedDataSize = static_cast<uint32_t>(src.offsetOf() - data->vtx[i].SerializedDataOffset);
-    }
-  }
-};
-
-template<> struct Io<Proto::CTxLinkedOutputs> {
-  static void serialize(xmstream &dst, const BTC::Proto::CTxLinkedOutputs &data);
-  static void unserialize(xmstream &src, BTC::Proto::CTxLinkedOutputs &data);
-};
-
-template<> struct Io<Proto::CBlockLinkedOutputs> {
-  static void serialize(xmstream &dst, const BTC::Proto::CBlockLinkedOutputs &data);
-  static void unserialize(xmstream &src, BTC::Proto::CBlockLinkedOutputs &data);
-};
-
-// Network messages
-// Network address
-template<> struct Io<Proto::NetworkAddress> {
-  static void serialize(xmstream &dst, const BTC::Proto::NetworkAddress &data);
-  static void unserialize(xmstream &src, BTC::Proto::NetworkAddress &data);
-};
-
-template<> struct Io<Proto::NetworkAddressWithoutTime> {
-  static void serialize(xmstream &dst, const BTC::Proto::NetworkAddressWithoutTime &data);
-  static void unserialize(xmstream &src, BTC::Proto::NetworkAddressWithoutTime &data);
-};
-
-// Block header network message
-template<typename T> struct Io<Proto::BlockHeaderNetTy<T>> {
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    uint64_t txNum;
-    size_t result = Io<decltype(Proto::BlockHeaderNetTy<T>::header)>::getUnpackedExtraSize(src);
-    BTC::unserializeVarSize(src, txNum);
-    return result;
-  }
-
-  static inline void serialize(xmstream &dst, const BTC::Proto::BlockHeaderNetTy<T> &data) {
-    BTC::serialize(dst, data.header);
-    BTC::serializeVarSize(dst, 0);
-  }
-
-  static inline void unserialize(xmstream &src, BTC::Proto::BlockHeaderNetTy<T> &data) {
-    uint64_t txNum;
-    BTC::unserialize(src, data.header);
-    BTC::unserializeVarSize(src, txNum);
-  }
-
-  static inline void unpack2(xmstream &src, Proto::BlockHeaderNetTy<T> *data, uint8_t **extraData) {
-    uint64_t txNum;
-    Io<decltype(Proto::BlockHeaderNetTy<T>::header)>::unpack2(src, &data->header, extraData);
-    BTC::unserializeVarSize(src, txNum);
-  }
-};
-
-// Inventory vector
-template<> struct Io<Proto::InventoryVector> {
-  static void serialize(xmstream &dst, const BTC::Proto::InventoryVector &data);
-  static void unserialize(xmstream &src, BTC::Proto::InventoryVector &data);
-};
-
-  // Version
-template<> struct Io<Proto::MessageVersion> {
-  static void serialize(xmstream &dst, const BTC::Proto::MessageVersion &data);
-  static void unserialize(xmstream &src, BTC::Proto::MessageVersion &data);
-};
-
-// Headers
-template<typename T> struct Io<Proto::MessageHeadersTy<T>> {
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    return Io<decltype(Proto::MessageHeadersTy<T>::headers)>::getUnpackedExtraSize(src);
-  }
-
-  static inline void serialize(xmstream &dst, const BTC::Proto::MessageHeadersTy<T> &data) {
-    BTC::serialize(dst, data.headers);
-  }
-
-  static inline void unserialize(xmstream &src, BTC::Proto::MessageHeadersTy<T> &data) {
-    BTC::unserialize(src, data.headers);
-  }
-
-  static inline void unpack2(xmstream &src, Proto::MessageHeadersTy<T> *data, uint8_t **extraData) {
-    Io<decltype(Proto::MessageHeadersTy<T>::headers)>::unpack2(src, &data->headers, extraData);
-  }
-};
-
-  // Ping
-template<> struct Io<Proto::MessagePing> {
-  static void serialize(xmstream &dst, const BTC::Proto::MessagePing &data);
-  static void unserialize(xmstream &src, BTC::Proto::MessagePing &data);
-};
-
-// Pong
-template<> struct Io<Proto::MessagePong> {
-  static void serialize(xmstream &dst, const BTC::Proto::MessagePong &data);
-  static void unserialize(xmstream &src, BTC::Proto::MessagePong &data);
-};
-
-// Addr
-template<> struct Io<Proto::MessageAddr> {
-  static void serialize(xmstream &dst, const BTC::Proto::MessageAddr &data);
-  static void unserialize(xmstream &src, BTC::Proto::MessageAddr &data);
-};
-
-// GetHeaders
-template<> struct Io<Proto::MessageGetHeaders> {
-  static void serialize(xmstream &dst, const BTC::Proto::MessageGetHeaders &data);
-  static void unserialize(xmstream &src, BTC::Proto::MessageGetHeaders &data);
-};
-
-// GetBlocks
-template<> struct Io<Proto::MessageGetBlocks> {
-  static void serialize(xmstream &dst, const BTC::Proto::MessageGetBlocks &data);
-  static void unserialize(xmstream &src, BTC::Proto::MessageGetBlocks &data);
-};
-
-// Inv
-template<> struct Io<Proto::MessageInv> {
-  static void serialize(xmstream &dst, const BTC::Proto::MessageInv &data);
-  static void unserialize(xmstream &src, BTC::Proto::MessageInv &data);
-};
-
-  // GetData
-template<> struct Io<Proto::MessageGetData> {
-  static void serialize(xmstream &dst, const BTC::Proto::MessageGetData &data);
-  static void unserialize(xmstream &src, BTC::Proto::MessageGetData &data);
-};
-
-  // Reject
-template<> struct Io<Proto::MessageReject> {
-  static void serialize(xmstream &dst, const BTC::Proto::MessageReject &data);
-  static void unserialize(xmstream &src, BTC::Proto::MessageReject &data);
-};
+  return offset == storedSize;
+}
 
 }
 

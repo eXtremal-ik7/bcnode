@@ -19,6 +19,7 @@ class UTXODb;
   // Using BTC serialization protocol
   using BTC::Io;
   using BTC::serialize;
+  using BTC::serializeForSignature;
   using BTC::unserialize;
   using BTC::unserializeAndCheck;
   using BTC::unpack2;

@@ -848,9 +848,9 @@ void Node::OnGetAddr(Peer *peer)
 
   enumeratePeers([&addr](Peer *connectedPeer) {
     BC::Proto::NetworkAddress networkAddress;
-    networkAddress.setIpv4(connectedPeer->Address.ipv4);
-    networkAddress.port = htons(connectedPeer->Address.port);
-    networkAddress.services = connectedPeer->Services;
+    networkAddress.addr.setIpv4(connectedPeer->Address.ipv4);
+    networkAddress.addr.port = htons(connectedPeer->Address.port);
+    networkAddress.addr.services = connectedPeer->Services;
     networkAddress.time = static_cast<uint32_t>(time(nullptr));
     addr.addr_list.emplace_back(networkAddress);
   });

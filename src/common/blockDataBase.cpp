@@ -1247,7 +1247,10 @@ void BlockBulkReader::fetchPending()
       return;
     }
 
+    // The handler connects synchronously and the databases copy what they keep into their
+    // shard logs, so the arena can go right after
     Handler_(Indexes_[i++], *block, linkedOutputs);
+    operator delete(block);
   }
 
   if (i != Indexes_.size() ||

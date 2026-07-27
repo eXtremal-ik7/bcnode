@@ -33,6 +33,25 @@ public:
     xvector<BaseBlob<256>> ChainMerkleBranch;
     int ChainIndex;
     PureBlockHeader ParentBlock;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d, bool serializeWitness = true) {
+      op.io(d.nVersion);
+      op.io(d.hashPrevBlock);
+      op.io(d.hashMerkleRoot);
+      op.io(d.nTime);
+      op.io(d.nBits);
+      op.io(d.nNonce);
+      if (d.nVersion & VERSION_AUXPOW) {
+        op.io(d.ParentBlockCoinbaseTx, serializeWitness);
+        op.io(d.HashBlock);
+        op.io(d.MerkleBranch);
+        op.io(d.Index);
+        op.io(d.ChainMerkleBranch);
+        op.io(d.ChainIndex);
+        op.io(d.ParentBlock);
+      }
+    }
   };
 
   using CTxValidationData = BTC::Proto::CTxValidationData;
@@ -57,17 +76,6 @@ public:
   using MessageGetData = LTC::Proto::MessageGetData;
   using MessageReject = LTC::Proto::MessageReject;
   using MessageHeaders = BTC::Proto::MessageHeadersTy<DOGE::Proto>;
-};
-}
-
-namespace BTC {
-// Header
-template<> struct Io<DOGE::Proto::BlockHeader> {
-  static size_t getSerializedSize(const DOGE::Proto::BlockHeader&);
-  static size_t getUnpackedExtraSize(xmstream &src);
-  static void serialize(xmstream &dst, const DOGE::Proto::BlockHeader &data);
-  static void unserialize(xmstream &src, DOGE::Proto::BlockHeader &data);
-  static void unpack2(xmstream &src, DOGE::Proto::BlockHeader *dst, uint8_t **);
 };
 }
 
