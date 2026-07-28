@@ -165,6 +165,8 @@ public:
       rocksdb::DB *db;
       rocksdb::Options options;
       options.create_if_missing = true;
+      options.compression = rocksdb::kZSTD;
+      options.keep_log_file_num = 4;
       options.merge_operator.reset(mergeOperator());
       std::string shardPathUtf8 = pathToUtf8(shardPath);
       rocksdb::Status status = rocksdb::DB::Open(options, shardPathUtf8, &db);
@@ -728,6 +730,379 @@ public:
   size_t ChunkSize_ = 0;
 };
 
+// Fixed-size element array with a running aggregate: besides the fact itself,
+// every element carries in its Aggregate field the fold of all elements up to
+// and including it, so a range read returns ready prefix sums (address history
+// with the balance after each tx, balance chart).
+// The write path stays as blind as CBaseArrayFixed: add() receives elements
+// whose Aggregate holds the element DELTA and folds them into window-relative
+// running sums (uint64 wrap-around, a negative delta is two's complement);
+// flushImpl() rebases the window by the durable aggregate kept in the per-key
+// metadata it reads anyway, so chunk data still leaves as offset-patch merge
+// operands with no extra reads on the hot path. Truncation (disconnect) keeps
+// every surviving prefix sum valid by construction; only the reorg-only
+// truncate path reads one chunk back to restore the metadata aggregate.
+// CItem requirements: trivially copyable, fixed size, public uint64_t
+// Aggregate field with the semantics above.
+template<typename CKey, typename CItem>
+class CBaseArrayAggregated : public Base<CKey> {
+private:
+#pragma pack(push, 1)
+  struct CHeader {
+    CKey Key;
+    size_t Size;
+    int64_t Count;
+    int64_t ChunkOffset;
+  };
+
+  struct CChunkKey {
+    CKey Key;
+    uint64_t Index;
+  };
+
+  // Per-key metadata row: element count plus the aggregate of the last durable
+  // element - the rebase point for the unflushed window
+  struct CMetadata {
+    int64_t Count;
+    uint64_t Aggregate;
+  };
+#pragma pack(pop)
+
+private:
+  class MergeOperator : public rocksdb::MergeOperator {
+    virtual bool FullMerge(const rocksdb::Slice&,
+                           const rocksdb::Slice *existing_value,
+                           const std::deque<std::string> &operand_list,
+                           std::string *new_value,
+                           rocksdb::Logger*) const override {
+      if (existing_value)
+        new_value->assign(existing_value->data(), existing_value->data() + existing_value->size());
+      else
+        new_value->clear();
+      for (const auto &operand: operand_list) {
+        assert(operand.size() >= 8);
+
+        uint64_t offset = *reinterpret_cast<const uint64_t*>(operand.data());
+        uint64_t requiredSize = offset + operand.size() - sizeof(uint64_t);
+        if (new_value->size() < requiredSize)
+          new_value->resize(requiredSize);
+
+        memcpy(new_value->data() + offset, operand.data() + sizeof(uint64_t), operand.size() - sizeof(uint64_t));
+      }
+      return true;
+    }
+
+    virtual bool PartialMerge(const rocksdb::Slice&,
+                              const rocksdb::Slice &left,
+                              const rocksdb::Slice &right,
+                              std::string *out,
+                              rocksdb::Logger*) const override {
+      assert(left.size() >= 8);
+      assert(right.size() >= 8);
+      [[maybe_unused]] uint64_t leftChunkOffset = *reinterpret_cast<const uint64_t*>(left.data());
+      [[maybe_unused]] uint64_t rightChunkOffset = *reinterpret_cast<const uint64_t*>(right.data());
+      assert(leftChunkOffset + left.size() - sizeof(uint64_t) == rightChunkOffset);
+
+      out->assign(left.data(), left.data() + left.size());
+      out->append(right.data() + sizeof(uint64_t), right.data() + right.size());
+      return true;
+    }
+
+    virtual const char* Name() const override {
+      return "CBaseArrayAggregated";
+    }
+  };
+
+public:
+  CBaseArrayAggregated(const std::string &name, size_t chunkSize) :
+    Base<CKey>(name), ChunkSize_(chunkSize) {}
+  virtual ~CBaseArrayAggregated() {}
+
+  rocksdb::MergeOperator *mergeOperator() final { return new MergeOperator(); }
+
+  // items carry the element delta in Aggregate; the call folds them into
+  // window-relative running sums, rebased to absolute values at flush
+  void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CItem *items, size_t count) {
+    std::hash<CKey> hasher;
+    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+
+    const void *prevData = nullptr;
+    size_t prevSize = 0;
+    int64_t prevCount = 0;
+    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key));
+    if (oldHeader) {
+      prevData = oldHeader + 1;
+      prevSize = oldHeader->Size;
+      prevCount = oldHeader->Count;
+    }
+
+    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader) + prevSize + count*sizeof(CItem)));
+    uint8_t *dst = reinterpret_cast<uint8_t*>(header + 1);
+    header->Key = key;
+    header->Size = prevSize + count*sizeof(CItem);
+    header->Count = prevCount + count;
+    if (prevData)
+      memcpy(dst, prevData, prevSize);
+
+    CItem *newItems = reinterpret_cast<CItem*>(dst + prevSize);
+    memcpy(static_cast<void*>(newItems), items, count*sizeof(CItem));
+    uint64_t running = prevSize ? reinterpret_cast<const CItem*>(dst + prevSize - sizeof(CItem))->Aggregate : 0;
+    for (size_t i = 0; i < count; i++) {
+      running += newItems[i].Aggregate;
+      newItems[i].Aggregate = running;
+    }
+
+    shard.update(blockId, key, header);
+  }
+
+  void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t count) {
+    std::hash<CKey> hasher;
+    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+
+    int64_t prevCount = 0;
+    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key));
+    if (oldHeader)
+      prevCount = oldHeader->Count;
+
+    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader)));
+    header->Key = key;
+    header->Size = 0;
+    header->Count = prevCount - count;
+
+    shard.update(blockId, key, header);
+  }
+
+  bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalCount) {
+    std::hash<CKey> hasher;
+    size_t shardIdx = hasher(key) % this->BaseCfg_.ShardsNum;
+    CLog<CKey> &mlog = this->Shards_[shardIdx];
+    rocksdb::DB *storage = this->OnDiskStorage_[shardIdx].get();
+
+    if (count == 0)
+      return false;
+    size_t firstChunk = from / ChunkSize_;
+    size_t lastChunk = (from + count - 1) / ChunkSize_;
+
+    std::vector<std::string> readResult;
+
+    {
+      std::vector<CChunkKey> chunkKeys;
+      std::vector<rocksdb::Slice> allKeySlices;
+
+      // add metadata key
+      allKeySlices.push_back(rocksdb::Slice(reinterpret_cast<const char*>(&key), sizeof(CKey)));
+      // add keys for all chunks
+      for (size_t chunkId = firstChunk; chunkId <= lastChunk; chunkId++) {
+        CChunkKey &k = chunkKeys.emplace_back();
+        k.Key = key;
+        k.Index = xhtobe<uint64_t>(chunkId);
+      }
+      for (const auto &k: chunkKeys)
+        allKeySlices.push_back(rocksdb::Slice(reinterpret_cast<const char*>(&k), sizeof(CChunkKey)));
+
+      auto metadataReadResult = storage->MultiGet(rocksdb::ReadOptions(), allKeySlices, &readResult);
+      // Missing metadata is not an error: the key may live only in the memtable tail
+      if (!metadataReadResult[0].ok())
+        readResult[0].clear();
+    }
+
+    int64_t onDiskArraySize = 0;
+    uint64_t onDiskAggregate = 0;
+    if (readResult[0].size() == sizeof(CMetadata)) {
+      const CMetadata *meta = reinterpret_cast<const CMetadata*>(readResult[0].data());
+      onDiskArraySize = meta->Count;
+      onDiskAggregate = meta->Aggregate;
+    }
+
+    int64_t onDiskAvailable = std::min((int64_t)(from + count), onDiskArraySize) - from;
+    int64_t inMemoryOffset = std::max((int64_t)from - onDiskArraySize, (int64_t)0);
+    int64_t remaining = count;
+    *totalCount = onDiskArraySize;
+
+    // Read disk data
+    if (onDiskAvailable > 0) {
+      int64_t chunkOffset = from % ChunkSize_;
+      // Bounded by the durable count, not the chunk payload: after a truncation
+      // the last chunk keeps stale bytes past the array end
+      int64_t diskRemaining = onDiskAvailable;
+      for (size_t chunkId = firstChunk, index = 1; chunkId <= lastChunk && diskRemaining > 0; chunkId++, index++) {
+        const char *chunkData = readResult[index].data();
+        int64_t elementsNum = readResult[index].size() / sizeof(CItem);
+        int64_t available = elementsNum - chunkOffset;
+        if (available <= 0)
+          break;
+        int64_t needToRead = std::min(available, diskRemaining);
+
+        memcpy(result.reserve(needToRead * sizeof(CItem)), chunkData + chunkOffset * sizeof(CItem), needToRead * sizeof(CItem));
+        diskRemaining -= needToRead;
+        remaining -= needToRead;
+        chunkOffset = 0;
+      }
+    }
+
+    // Window tail: rebase window-relative running sums by the durable aggregate
+    const CHeader *header = static_cast<const CHeader*>(mlog.find(key));
+    if (header) {
+      const uint8_t *memoryData = reinterpret_cast<const uint8_t*>(header + 1);
+      int64_t windowCount = header->Size / sizeof(CItem);
+      int64_t available = windowCount - inMemoryOffset;
+      int64_t needToRead = std::min(available, remaining);
+      if (needToRead > 0) {
+        CItem *items = static_cast<CItem*>(result.reserve(needToRead * sizeof(CItem)));
+        memcpy(static_cast<void*>(items), memoryData + inMemoryOffset * sizeof(CItem), needToRead * sizeof(CItem));
+        for (int64_t i = 0; i < needToRead; i++)
+          items[i].Aggregate += onDiskAggregate;
+      }
+      *totalCount += header->Count;
+    }
+
+    return true;
+  }
+
+  virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) final {
+    CLog<CKey> &shard = this->Shards_[shardIndex];
+    MLog &mlog = shard.Log;
+    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+
+    // Collect all keys
+    std::vector<CKey> allKeys;
+    std::vector<CHeader*> allData;
+    std::vector<rocksdb::Slice> allKeySlices;
+    std::vector<std::string> metadata;
+
+    for (const auto &v: shard.AllKeysData) {
+      if (v.second.empty())
+        continue;
+      allKeys.emplace_back(v.first);
+      allData.push_back((CHeader*)v.second.back().KeyData);
+    }
+
+    for (size_t i = 0; i < allKeys.size(); i++)
+      allKeySlices.emplace_back((const char*)&allKeys[i], sizeof(CKey));
+
+    auto metadataReadResult = storage->MultiGet(rocksdb::ReadOptions(), allKeySlices, &metadata);
+
+    rocksdb::WriteBatch batch;
+
+    batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(blockId.begin()), sizeof(BC::Proto::BlockHashTy)));
+    for (size_t i = 0; i < allKeys.size(); i++) {
+      CHeader *header = allData[i];
+      int64_t currentArraySize = 0;
+      uint64_t currentAggregate = 0;
+      if (metadataReadResult[i].ok() && metadata[i].size() == sizeof(CMetadata)) {
+        const CMetadata *currentMeta = reinterpret_cast<const CMetadata*>(metadata[i].data());
+        currentArraySize = currentMeta->Count;
+        currentAggregate = currentMeta->Aggregate;
+      }
+
+      int64_t currentChunksNum = currentArraySize / ChunkSize_ + (currentArraySize % ChunkSize_ != 0);
+      int64_t newArraySize = currentArraySize + header->Count;
+      if (newArraySize < 0)
+        newArraySize = 0;
+
+      int64_t newChunksNum = newArraySize / ChunkSize_ + (newArraySize % ChunkSize_ != 0);
+
+      // Rebase window-relative running sums to absolute values
+      CItem *windowItems = reinterpret_cast<CItem*>(header + 1);
+      int64_t windowCount = header->Size / sizeof(CItem);
+      for (int64_t j = 0; j < windowCount; j++)
+        windowItems[j].Aggregate += currentAggregate;
+
+      uint64_t newAggregate = windowCount ? windowItems[windowCount - 1].Aggregate : currentAggregate;
+
+      if (header->Count != windowCount) {
+        // The window contains removes - a reorg deeper than the unflushed window.
+        // Only pure truncation is supported: drop the chunks past the new end and
+        // take the aggregate back from the new last durable element. Elements
+        // appended over a truncated window would land on stale positions and are
+        // not written (same layout limitation as CBaseArrayFixed)
+        if (windowCount)
+          LOG_F(WARNING, "%s: dropping %lld elements appended over a truncated window", this->name().c_str(), (long long)windowCount);
+
+        for (int64_t chunkIdx = newChunksNum; chunkIdx < currentChunksNum; chunkIdx++) {
+          CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
+          chunkKey->Key = allKeys[i];
+          chunkKey->Index = xhtobe<uint64_t>(chunkIdx);
+          batch.Delete(rocksdb::Slice(reinterpret_cast<const char*>(chunkKey), sizeof(CChunkKey)));
+        }
+
+        if (newArraySize > 0) {
+          CChunkKey chunkKey;
+          chunkKey.Key = allKeys[i];
+          chunkKey.Index = xhtobe<uint64_t>((newArraySize - 1) / ChunkSize_);
+          size_t offsetInChunk = (newArraySize - 1) % ChunkSize_;
+          std::string chunkData;
+          if (storage->Get(rocksdb::ReadOptions(), rocksdb::Slice(reinterpret_cast<const char*>(&chunkKey), sizeof(CChunkKey)), &chunkData).ok() &&
+              chunkData.size() >= (offsetInChunk + 1) * sizeof(CItem)) {
+            newAggregate = reinterpret_cast<const CItem*>(chunkData.data())[offsetInChunk].Aggregate;
+          } else {
+            LOG_F(ERROR, "%s: can't read back the aggregate of element %lld on truncation", this->name().c_str(), (long long)(newArraySize - 1));
+          }
+        }
+      } else if (windowCount) {
+        size_t remaining = windowCount;
+        int64_t offset = currentArraySize;
+        const char *dataPtr = reinterpret_cast<const char*>(&header->ChunkOffset);
+
+        if (currentArraySize % ChunkSize_) {
+          // Extend the partial last chunk with an offset-patch merge operand
+          size_t writeSize = std::min(remaining, ChunkSize_ - (size_t)(currentArraySize % ChunkSize_));
+
+          CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
+          chunkKey->Key = allKeys[i];
+          chunkKey->Index = xhtobe<uint64_t>(currentChunksNum - 1);
+          header->ChunkOffset = sizeof(CItem) * (offset % ChunkSize_);
+          auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(chunkKey), sizeof(CChunkKey));
+          auto valueSlice = rocksdb::Slice(dataPtr, writeSize * sizeof(CItem) + sizeof(int64_t));
+          batch.Merge(keySlice, valueSlice);
+
+          dataPtr += writeSize * sizeof(CItem) + sizeof(int64_t);
+          remaining -= writeSize;
+          offset += writeSize;
+        } else {
+          dataPtr += sizeof(uint64_t);
+        }
+
+        for (int64_t chunkIdx = currentChunksNum; chunkIdx < newChunksNum; chunkIdx++) {
+          size_t writeSize = std::min(remaining, ChunkSize_);
+          if (writeSize == 0)
+            break;
+
+          CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
+          chunkKey->Key = allKeys[i];
+          chunkKey->Index = xhtobe<uint64_t>(chunkIdx);
+          auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(chunkKey), sizeof(CChunkKey));
+          auto valueSlice = rocksdb::Slice(dataPtr, writeSize * sizeof(CItem));
+          batch.Put(keySlice, valueSlice);
+
+          dataPtr += writeSize * sizeof(CItem);
+          remaining -= writeSize;
+          offset += writeSize;
+        }
+      }
+
+      // Update metadata
+      {
+        auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(&header->Key), sizeof(CKey));
+        if (newArraySize) {
+          CMetadata *meta = mlog.alloc<CMetadata>();
+          meta->Count = newArraySize;
+          meta->Aggregate = newAggregate;
+          batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(meta), sizeof(CMetadata)));
+        } else {
+          batch.Delete(keySlice);
+        }
+      }
+    }
+
+    storage->Write(rocksdb::WriteOptions(), &batch);
+    shard.reset();
+  }
+
+private:
+  size_t ChunkSize_ = 0;
+};
+
 // Additive aggregation database: memtable holds a folded delta per key.
 // Two flush modes, chosen by the configured rank index set ("indexes" config list):
 //  - no indexes: the folded window delta goes to the backend as a merge operand,
@@ -1239,8 +1614,20 @@ struct CQueryTransactionResult {
   bool DataCorrupted = false;
 };
 
+// History element of addrhistorydb: the fact (txid) plus scalars denormalized
+// for the list UI and the balance chart; Aggregate is the running balance
+// maintained by CBaseArrayAggregated - the address balance right after this tx
+#pragma pack(push, 1)
+struct CAddrHistoryItem {
+  BC::Proto::TxHashTy TxId;
+  uint32_t Height;
+  uint32_t Time;
+  uint64_t Aggregate;
+};
+#pragma pack(pop)
+
 struct CQueryAddrHistory {
-  std::vector<BC::Proto::TxHashTy> Transactions;
+  std::vector<CAddrHistoryItem> Items;
   size_t TotalTxCount;
 };
 
@@ -1254,7 +1641,7 @@ public:
 
 class IAddrHistoryDb {
 public:
-  virtual bool queryAddrTxid(const BC::Proto::AddressTy &address, size_t from, size_t count, CQueryAddrHistory &result) = 0;
+  virtual bool queryAddrHistory(const BC::Proto::AddressTy &address, size_t from, size_t count, CQueryAddrHistory &result) = 0;
 };
 
 // Cumulative per-address counters; also serves as the in-memory delta

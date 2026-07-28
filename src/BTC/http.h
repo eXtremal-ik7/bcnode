@@ -125,7 +125,7 @@ public:
                       const std::string &reason);
 
   void serializeBlock(xmstream &stream, const BC::Common::BlockIndex *index, const BC::Common::CIndexCacheObject *object, const BC::Proto::BlockHashTy &hash);
-  void serializeTx(xmstream &stream, const BC::Proto::Transaction &tx, const BC::Proto::CTxLinkedOutputs &txOutputs, const BC::Common::BlockIndex *index, bool isCoinbase, uint64_t confirmations);
+  void serializeTx(xmstream &stream, const BC::Proto::Transaction &tx, const BC::Proto::CTxLinkedOutputs &txOutputs, const BC::Common::BlockIndex *index, bool isCoinbase, uint64_t confirmations, const uint64_t *balanceAfter = nullptr);
 
   void reply200(xmstream &stream);
   size_t startChunk(xmstream &stream);

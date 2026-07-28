@@ -241,7 +241,7 @@ void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request
   uint64_t total = 0;
   {
     DB::CQueryAddrHistory probe;
-    if (Storage_->AddrHistoryDb_->queryAddrTxid(addressHash, 0, 1, probe))
+    if (Storage_->AddrHistoryDb_->queryAddrHistory(addressHash, 0, 1, probe))
       total = probe.TotalTxCount;
   }
 
@@ -263,7 +263,7 @@ void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request
 
   DB::CQueryAddrHistory history;
   if (count)
-    Storage_->AddrHistoryDb_->queryAddrTxid(addressHash, from, count, history);
+    Storage_->AddrHistoryDb_->queryAddrHistory(addressHash, from, count, history);
 
   const BC::Common::BlockIndex *best = BlockIndex_.best();
 
@@ -277,14 +277,14 @@ void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request
     reply.addField("items");
     {
       JSON::Array itemsArray(stream);
-      for (size_t i = 0; i < history.Transactions.size(); i++) {
+      for (size_t i = 0; i < history.Items.size(); i++) {
         // Descending order shows the newest transaction first
-        const auto &txid = history.Transactions[isAscending ? i : history.Transactions.size() - 1 - i];
+        const auto &item = history.Items[isAscending ? i : history.Items.size() - 1 - i];
 
         DB::CQueryTransactionResult queryResult;
-        if (!Storage_->TransactionDb_->queryTransaction(txid, BlockIndex_, *BlockDb_, queryResult) ||
+        if (!Storage_->TransactionDb_->queryTransaction(item.TxId, BlockIndex_, *BlockDb_, queryResult) ||
             !queryResult.Found || queryResult.DataCorrupted) {
-          replyWithError("DATABASE_CORRUPTED", "", "", txid.getHexLE());
+          replyWithError("DATABASE_CORRUPTED", "", "", item.TxId.getHexLE());
           return;
         }
 
@@ -295,7 +295,7 @@ void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request
         }
 
         itemsArray.addField();
-        serializeTx(stream, queryResult.Tx, queryResult.LinkedOutputs, index, queryResult.TxNum == 0, best->Height - index->Height);
+        serializeTx(stream, queryResult.Tx, queryResult.LinkedOutputs, index, queryResult.TxNum == 0, best->Height - index->Height, &item.Aggregate);
       }
     }
 
@@ -951,7 +951,8 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
                                                  const BC::Proto::CTxLinkedOutputs &txOutputs,
                                                  const BC::Common::BlockIndex *index,
                                                  bool isCoinbase,
-                                                 uint64_t confirmations)
+                                                 uint64_t confirmations,
+                                                 const uint64_t *balanceAfter)
 {
   JSON::Object txObject(stream);
 
@@ -981,6 +982,9 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   txObject.addString("value_in", FormatMoney(valueIn, BC::Configuration::RationalPartSize));
   txObject.addString("value_out", FormatMoney(valueOut, BC::Configuration::RationalPartSize));
   txObject.addString("fee", FormatMoney(fee, BC::Configuration::RationalPartSize));
+  // Set for the addresses/txs context only: the address balance right after this tx
+  if (balanceAfter)
+    txObject.addString("balance_after", FormatMoney(static_cast<int64_t>(*balanceAfter), BC::Configuration::RationalPartSize));
 
   txObject.addField("inputs");
   {
