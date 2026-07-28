@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "archive.h"
+#include "addrdb.h"
 #include "addrHistoryDb.h"
 #include "txdbRef.h"
 #include "txdb.h"
@@ -56,6 +57,8 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
 
     if (strcmp(enabledDatabases[i], "addrhistorydb") == 0) {
       AllDb_.emplace_back(new AddrHistoryDb());
+    } else if (strcmp(enabledDatabases[i], "addrdb") == 0) {
+      AllDb_.emplace_back(new AddrDb());
     } else if (strcmp(enabledDatabases[i], "txdb.ref") == 0) {
       AllDb_.emplace_back(new TxDbRef());
     } else if (strcmp(enabledDatabases[i], "txdb.full") == 0) {
@@ -69,6 +72,7 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   // Route queries
   TransactionDb_ = setupHandler<ITransactionDb>(cfg, "tx", EIQueryTransaction, dbIndexMap, AllDb_);
   AddrHistoryDb_ = setupHandler<IAddrHistoryDb>(cfg, "addrhistory", EIQueryAddrHistory, dbIndexMap, AllDb_);
+  AddrDb_ = setupHandler<IAddrDb>(cfg, "addr", EIQueryAddr, dbIndexMap, AllDb_);
 
   BC::Common::BlockIndex *utxoBestBlock;
   std::vector<BC::Common::BlockIndex*> utxoDisconnect;

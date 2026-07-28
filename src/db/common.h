@@ -13,6 +13,7 @@
 #include <rocksdb/db.h>
 #include <rocksdb/merge_operator.h>
 #include "tbb/concurrent_hash_map.h"
+#include <shared_mutex>
 
 namespace BC {
 namespace DB {
@@ -223,6 +224,10 @@ public:
             return false;
           }
 
+          // flush() stamps every shard with CurrentBlock_, so the position must
+          // be known right after open, before any block is connected
+          CurrentBlock_ = stamp;
+
           // Build connect and disconnect block set if need
           *forConnect = It->second == bestIndex ? nullptr : rebaseChain(bestIndex, It->second, forDisconnect);
         } else if (shardStamp != stamp) {
@@ -286,10 +291,15 @@ public:
   }
 
   void flush() final {
-    for (size_t i = 0; i < BaseCfg_.ShardsNum; i++) {
-      if (!Shards_[i].AllKeysData.empty())
-        flushImpl(CurrentBlock_, i);
-    }
+    // Freshly created database with no position yet: nothing to stamp
+    if (CurrentBlock_.isNull())
+      return;
+
+    // The stamp goes to every shard, including untouched ones: a skipped empty
+    // shard keeps an old stamp after a threshold flush of its neighbors, and
+    // initialize() rejects unequal stamps as corruption
+    for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
+      flushImpl(CurrentBlock_, i);
   }
 
   BC::Proto::BlockHashTy currentBlock() { return CurrentBlock_; }
@@ -561,11 +571,12 @@ public:
         allKeySlices.push_back(rocksdb::Slice(reinterpret_cast<const char*>(&k), sizeof(CChunkKey)));
 
       auto metadataReadResult = storage->MultiGet(rocksdb::ReadOptions(), allKeySlices, &readResult);
+      // Missing metadata is not an error: the key may live only in the memtable tail
       if (!metadataReadResult[0].ok())
-        return false;
+        readResult[0].clear();
     }
 
-    int64_t onDiskArraySize = *reinterpret_cast<const uint64_t*>(readResult[0].data());
+    int64_t onDiskArraySize = readResult[0].size() == sizeof(uint64_t) ? *reinterpret_cast<const int64_t*>(readResult[0].data()) : 0;
     int64_t onDiskAvailable = std::min((int64_t)(from + count), onDiskArraySize) - from;
     int64_t inMemoryOffset = std::max((int64_t)from - onDiskArraySize, (int64_t)0);
     int64_t remaining = count;
@@ -717,10 +728,506 @@ public:
   size_t ChunkSize_ = 0;
 };
 
+// Additive aggregation database: memtable holds a folded delta per key.
+// Two flush modes, chosen by the configured rank index set ("indexes" config list):
+//  - no indexes: the folded window delta goes to the backend as a merge operand,
+//    no reads on the write path at all (IBD/reindex fast path);
+//  - indexes enabled: RMW - batched MultiGet of old values, materialized Put and
+//    replacement of the rank index rows in the same atomic batch.
+// Shard key space is split into disjoint prefix regions:
+//   data rows    'd' ++ key
+//   index rows   'i' ++ indexId ++ be64(~metric) ++ key   (same shard as the data row)
+//   service keys "stamp", "basecfg", "xcfg" - outside both regions.
+// Disjointness is what makes an index droppable by a range tombstone and
+// buildable by a single scan of the data region.
+// CValue requirements: trivially copyable, default-constructed state is the identity,
+// merge() commutative/associative, negate() gives the inverse delta for disconnect.
+template<typename CKey, typename CValue>
+class CBaseMerge : public Base<CKey> {
+protected:
+  struct CIndexDef {
+    std::string Name;
+    uint64_t (*Extract)(const CValue&);
+  };
+
+private:
+  struct CHeader {
+    CKey Key;
+    CValue Value;
+  };
+
+  struct CActiveIndex {
+    uint8_t Id;
+    CIndexDef Def;
+  };
+
+#pragma pack(push, 1)
+  struct CDataRowKey {
+    uint8_t Prefix;
+    CKey Key;
+  };
+
+  struct CIndexRowKey {
+    uint8_t Prefix;
+    uint8_t IndexId;
+    uint64_t InvertedValue;
+    CKey Key;
+  };
+#pragma pack(pop)
+
+  static void makeDataRowKey(CDataRowKey &rowKey, const CKey &key) {
+    rowKey.Prefix = 'd';
+    rowKey.Key = key;
+  }
+
+  static void makeIndexRowKey(CIndexRowKey &rowKey, uint8_t indexId, uint64_t value, const CKey &key) {
+    rowKey.Prefix = 'i';
+    rowKey.IndexId = indexId;
+    rowKey.InvertedValue = xhtobe<uint64_t>(~value);
+    rowKey.Key = key;
+  }
+
+  class MergeOperator : public rocksdb::AssociativeMergeOperator {
+    virtual bool Merge(const rocksdb::Slice&,
+                      const rocksdb::Slice *existing_value,
+                      const rocksdb::Slice &value,
+                      std::string *new_value,
+                      rocksdb::Logger*) const override {
+      if (value.size() != sizeof(CValue))
+        return false;
+      if (existing_value && existing_value->size() != sizeof(CValue))
+        return false;
+
+      // Missing base is legal: the key is being touched for the first time
+      CValue result;
+      if (existing_value)
+        memcpy(&result, existing_value->data(), sizeof(CValue));
+
+      CValue delta;
+      memcpy(&delta, value.data(), sizeof(CValue));
+      result.merge(delta);
+
+      new_value->assign(reinterpret_cast<const char*>(&result), sizeof(CValue));
+      return true;
+    }
+
+    virtual const char* Name() const override {
+      return "CBaseMerge";
+    }
+  };
+
+public:
+  CBaseMerge(const std::string &name) : Base<CKey>(name) {}
+  virtual ~CBaseMerge() {}
+  rocksdb::MergeOperator *mergeOperator() final { return new MergeOperator(); }
+
+  bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&) final {
+    ShardLocks_.reset(new std::shared_mutex[this->BaseCfg_.ShardsNum]);
+
+    // Resolve the configured index list against the set registered by the subclass
+    config4cpp::StringVector names;
+    cfg->lookupList(this->Name_.c_str(), "indexes", names, config4cpp::StringVector());
+    std::vector<bool> enabled(RegisteredIndexes_.size(), false);
+    for (int i = 0; i < names.length(); i++) {
+      bool found = false;
+      for (size_t index = 0; index < RegisteredIndexes_.size(); index++) {
+        if (RegisteredIndexes_[index].Name == names[i]) {
+          found = true;
+          enabled[index] = true;
+          break;
+        }
+      }
+      if (!found) {
+        LOG_F(ERROR, "database '%s' has no index '%s'", this->Name_.c_str(), names[i]);
+        return false;
+      }
+    }
+
+    // Canonical form: registration order, so the config list order does not matter
+    std::string indexCfg;
+    for (size_t i = 0; i < RegisteredIndexes_.size(); i++) {
+      if (!enabled[i])
+        continue;
+      CActiveIndex &index = ActiveIndexes_.emplace_back();
+      index.Id = static_cast<uint8_t>(i);
+      index.Def = RegisteredIndexes_[i];
+      if (!indexCfg.empty())
+        indexCfg.push_back(',');
+      indexCfg.append(index.Def.Name);
+    }
+
+    // Bring the index rows of every shard in sync with the configured set.
+    // The transition is a per-index diff: a dropped index is erased by a range
+    // tombstone over its region, an added one is built by a single scan of the
+    // data region; untouched indexes are not rebuilt and full chain reindex is
+    // never needed. A stored name that is no longer registered has an unknown
+    // id - that degenerates to "drop everything, build the active set"
+    for (size_t shardIndex = 0; shardIndex < this->BaseCfg_.ShardsNum; shardIndex++) {
+      rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+
+      std::string storedCfg;
+      storage->Get(rocksdb::ReadOptions(), rocksdb::Slice("xcfg"), &storedCfg);
+      if (storedCfg == indexCfg)
+        continue;
+
+      std::vector<bool> stored(RegisteredIndexes_.size(), false);
+      bool storedKnown = true;
+      for (size_t pos = 0; pos < storedCfg.size() && storedKnown; ) {
+        size_t comma = storedCfg.find(',', pos);
+        if (comma == std::string::npos)
+          comma = storedCfg.size();
+        std::string name = storedCfg.substr(pos, comma - pos);
+        pos = comma + 1;
+
+        storedKnown = false;
+        for (size_t i = 0; i < RegisteredIndexes_.size(); i++) {
+          if (RegisteredIndexes_[i].Name == name) {
+            stored[i] = true;
+            storedKnown = true;
+            break;
+          }
+        }
+      }
+
+      // No stamp - no data rows, nothing to build: the rows of a fresh shard
+      // are maintained by regular flushes starting from the first block
+      std::string stampData;
+      bool hasData = storage->Get(rocksdb::ReadOptions(), rocksdb::Slice("stamp"), &stampData).ok();
+
+      std::vector<const CActiveIndex*> forBuild;
+      if (!storedKnown) {
+        LOG_F(INFO, "%s: dropping all index rows for shard %zu", this->Name_.c_str(), shardIndex);
+        if (!dropAllIndexRows(shardIndex))
+          return false;
+        for (const auto &index: ActiveIndexes_)
+          forBuild.push_back(&index);
+      } else {
+        for (size_t i = 0; i < RegisteredIndexes_.size(); i++) {
+          if (stored[i] && !enabled[i]) {
+            LOG_F(INFO, "%s: dropping index '%s' for shard %zu", this->Name_.c_str(), RegisteredIndexes_[i].Name.c_str(), shardIndex);
+            if (!dropIndexRows(shardIndex, static_cast<uint8_t>(i)))
+              return false;
+          }
+        }
+        for (const auto &index: ActiveIndexes_) {
+          if (!stored[index.Id])
+            forBuild.push_back(&index);
+        }
+      }
+
+      if (hasData && !forBuild.empty() && !buildIndexes(shardIndex, forBuild))
+        return false;
+
+      if (!storage->Put(rocksdb::WriteOptions(), rocksdb::Slice("xcfg"), rocksdb::Slice(indexCfg)).ok())
+        return false;
+    }
+
+    return true;
+  }
+
+  void merge(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CValue &delta) {
+    std::hash<CKey> hasher;
+    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+
+    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader)));
+    header->Key = key;
+    const CHeader *prev = static_cast<const CHeader*>(shard.find(key));
+    header->Value = prev ? prev->Value : CValue();
+    header->Value.merge(delta);
+
+    shard.update(blockId, key, header);
+  }
+
+  bool find(const CKey &key, CValue &value) const {
+    std::hash<CKey> hasher;
+    size_t shardIndex = hasher(key) % this->BaseCfg_.ShardsNum;
+    CLog<CKey> &shard = this->Shards_[shardIndex];
+    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+
+    // Shared lock pairs the on-disk state with the memtable window: flush publishes
+    // batch and memtable reset under the exclusive lock, so the sum below can't
+    // count the window twice and can't touch the arena while it is being reused.
+    // Temporary measure, see the note at ShardLocks_
+    std::shared_lock lock(ShardLocks_[shardIndex]);
+
+    value = CValue();
+    CDataRowKey rowKey;
+    makeDataRowKey(rowKey, key);
+    rocksdb::Slice keySlice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
+    std::string data;
+    if (storage->Get(rocksdb::ReadOptions(), keySlice, &data).ok() && data.size() == sizeof(CValue))
+      memcpy(&value, data.data(), sizeof(CValue));
+
+    const CHeader *header = static_cast<const CHeader*>(shard.find(key));
+    if (header)
+      value.merge(header->Value);
+
+    return !value.isNull();
+  }
+
+  virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) final {
+    CLog<CKey> &shard = this->Shards_[shardIndex];
+    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+
+    rocksdb::WriteBatch batch;
+    batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(blockId.begin()), sizeof(BC::Proto::BlockHashTy)));
+
+    if (ActiveIndexes_.empty()) {
+      // No indexes: write the folded window delta as a merge operand, no reads at all
+      for (const auto &v: shard.AllKeysData) {
+        if (v.second.empty())
+          continue;
+        const CHeader *header = static_cast<const CHeader*>(v.second.back().KeyData);
+        // Perfectly cancelled window delta is an identity operand, don't write it
+        if (header->Value.isNull())
+          continue;
+        CDataRowKey rowKey;
+        makeDataRowKey(rowKey, header->Key);
+        batch.Merge(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)),
+                    rocksdb::Slice(reinterpret_cast<const char*>(&header->Value), sizeof(CValue)));
+      }
+    } else {
+      // RMW: index row replacement needs the old value anyway, so the base row
+      // is written materialized too (and deleted when it folds to the identity)
+      std::vector<const CHeader*> allData;
+      std::vector<CDataRowKey> rowKeys;
+      for (const auto &v: shard.AllKeysData) {
+        if (v.second.empty())
+          continue;
+        const CHeader *header = static_cast<const CHeader*>(v.second.back().KeyData);
+        if (header->Value.isNull())
+          continue;
+        makeDataRowKey(rowKeys.emplace_back(), header->Key);
+        allData.push_back(header);
+      }
+
+      // Slices are built after the fill: emplace_back may reallocate rowKeys
+      std::vector<rocksdb::Slice> keySlices;
+      keySlices.reserve(rowKeys.size());
+      for (const auto &rowKey: rowKeys)
+        keySlices.emplace_back(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
+
+      std::vector<std::string> oldValues;
+      if (!allData.empty()) {
+        auto readResult = storage->MultiGet(rocksdb::ReadOptions(), keySlices, &oldValues);
+        for (size_t i = 0; i < allData.size(); i++) {
+          CValue oldValue;
+          bool hadValue = readResult[i].ok() && oldValues[i].size() == sizeof(CValue);
+          if (hadValue)
+            memcpy(&oldValue, oldValues[i].data(), sizeof(CValue));
+          // Merge-era operands can fold to a zero row, it has no index rows
+          bool hadRow = hadValue && !oldValue.isNull();
+
+          CValue newValue = oldValue;
+          newValue.merge(allData[i]->Value);
+          bool hasRow = !newValue.isNull();
+
+          if (hasRow)
+            batch.Put(keySlices[i], rocksdb::Slice(reinterpret_cast<const char*>(&newValue), sizeof(CValue)));
+          else
+            batch.Delete(keySlices[i]);
+
+          for (const auto &index: ActiveIndexes_) {
+            uint64_t oldMetric = index.Def.Extract(oldValue);
+            uint64_t newMetric = index.Def.Extract(newValue);
+            if (hadRow && hasRow && oldMetric == newMetric)
+              continue;
+
+            CIndexRowKey rowKey;
+            if (hadRow) {
+              makeIndexRowKey(rowKey, index.Id, oldMetric, allData[i]->Key);
+              batch.Delete(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)));
+            }
+            if (hasRow) {
+              makeIndexRowKey(rowKey, index.Id, newMetric, allData[i]->Key);
+              batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)), rocksdb::Slice());
+            }
+          }
+        }
+      }
+    }
+
+    std::unique_lock lock(ShardLocks_[shardIndex]);
+    storage->Write(rocksdb::WriteOptions(), &batch);
+    shard.reset();
+  }
+
+  // Top of a rank index: per-shard head scans merged by the metric.
+  // The result is as of the last flush, the memtable window is not indexed.
+  bool top(const std::string &indexName, size_t offset, size_t limit, std::vector<std::pair<CKey, CValue>> &result) const {
+    const CActiveIndex *active = nullptr;
+    for (const auto &index: ActiveIndexes_) {
+      if (index.Def.Name == indexName) {
+        active = &index;
+        break;
+      }
+    }
+    if (!active)
+      return false;
+
+    size_t need = offset + limit;
+    if (need == 0)
+      return true;
+
+    std::vector<std::pair<CKey, CValue>> candidates;
+    for (size_t shardIndex = 0; shardIndex < this->BaseCfg_.ShardsNum; shardIndex++) {
+      rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+      const uint8_t seekPrefix[2] = {'i', active->Id};
+
+      std::shared_lock lock(ShardLocks_[shardIndex]);
+
+      // Index rows are ordered by the inverted metric: iteration is metric-descending
+      std::vector<CKey> shardKeys;
+      std::unique_ptr<rocksdb::Iterator> It(storage->NewIterator(rocksdb::ReadOptions()));
+      for (It->Seek(rocksdb::Slice(reinterpret_cast<const char*>(seekPrefix), sizeof(seekPrefix)));
+           It->Valid() && shardKeys.size() < need;
+           It->Next()) {
+        rocksdb::Slice key = It->key();
+        if (key.size() < sizeof(seekPrefix) || memcmp(key.data(), seekPrefix, sizeof(seekPrefix)) != 0)
+          break;
+        // Nothing else lives under the 'i' prefix, the size check is a guard
+        if (key.size() != sizeof(CIndexRowKey))
+          continue;
+        CKey &baseKey = shardKeys.emplace_back();
+        memcpy(static_cast<void*>(&baseKey), key.data() + offsetof(CIndexRowKey, Key), sizeof(CKey));
+      }
+
+      if (shardKeys.empty())
+        continue;
+
+      std::vector<CDataRowKey> rowKeys;
+      rowKeys.reserve(shardKeys.size());
+      for (const auto &key: shardKeys)
+        makeDataRowKey(rowKeys.emplace_back(), key);
+      std::vector<rocksdb::Slice> keySlices;
+      keySlices.reserve(rowKeys.size());
+      for (const auto &rowKey: rowKeys)
+        keySlices.emplace_back(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
+      std::vector<std::string> values;
+      auto readResult = storage->MultiGet(rocksdb::ReadOptions(), keySlices, &values);
+      for (size_t i = 0; i < shardKeys.size(); i++) {
+        if (!readResult[i].ok() || values[i].size() != sizeof(CValue))
+          continue;
+        auto &candidate = candidates.emplace_back();
+        candidate.first = shardKeys[i];
+        memcpy(&candidate.second, values[i].data(), sizeof(CValue));
+      }
+    }
+
+    auto extract = active->Def.Extract;
+    std::sort(candidates.begin(), candidates.end(), [extract](const std::pair<CKey, CValue> &l, const std::pair<CKey, CValue> &r) {
+      uint64_t lv = extract(l.second);
+      uint64_t rv = extract(r.second);
+      if (lv != rv)
+        return lv > rv;
+      return memcmp(&l.first, &r.first, sizeof(CKey)) < 0;
+    });
+
+    for (size_t i = offset; i < candidates.size() && result.size() < limit; i++)
+      result.push_back(candidates[i]);
+    return true;
+  }
+
+protected:
+  void registerIndex(const std::string &name, uint64_t (*extract)(const CValue&)) {
+    RegisteredIndexes_.push_back(CIndexDef{name, extract});
+  }
+
+private:
+  // The regions are disjoint, so one index is exactly the range ['i' id, next)
+  bool dropIndexRows(size_t shardIndex, uint8_t id) {
+    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+    const uint8_t begin[2] = {'i', id};
+    const uint8_t end[2] = {'i', static_cast<uint8_t>(id + 1)};
+    const uint8_t endAll = 'i' + 1;
+    rocksdb::Slice endSlice = id != 0xFF ?
+      rocksdb::Slice(reinterpret_cast<const char*>(end), sizeof(end)) :
+      rocksdb::Slice(reinterpret_cast<const char*>(&endAll), sizeof(endAll));
+    return storage->DeleteRange(rocksdb::WriteOptions(), storage->DefaultColumnFamily(),
+                                rocksdb::Slice(reinterpret_cast<const char*>(begin), sizeof(begin)), endSlice).ok();
+  }
+
+  bool dropAllIndexRows(size_t shardIndex) {
+    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+    const uint8_t begin = 'i';
+    const uint8_t end = 'i' + 1;
+    return storage->DeleteRange(rocksdb::WriteOptions(), storage->DefaultColumnFamily(),
+                                rocksdb::Slice(reinterpret_cast<const char*>(&begin), sizeof(begin)),
+                                rocksdb::Slice(reinterpret_cast<const char*>(&end), sizeof(end))).ok();
+  }
+
+  // Build the rows of the given indexes by a single scan of the data region.
+  // A crash in the middle repeats the build on restart: "xcfg" is written only
+  // after success, and re-putting an existing row is legal (last write wins)
+  bool buildIndexes(size_t shardIndex, const std::vector<const CActiveIndex*> &indexes) {
+    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+    LOG_F(INFO, "%s: building %zu indexes for shard %zu...", this->Name_.c_str(), indexes.size(), shardIndex);
+
+    rocksdb::ReadOptions scanOptions;
+    scanOptions.fill_cache = false;
+    rocksdb::WriteBatch batch;
+    size_t batchSize = 0;
+    auto flushBatch = [&]() {
+      if (!storage->Write(rocksdb::WriteOptions(), &batch).ok())
+        return false;
+      batch.Clear();
+      batchSize = 0;
+      return true;
+    };
+
+    bool writeOk = true;
+    const uint8_t dataPrefix = 'd';
+    std::unique_ptr<rocksdb::Iterator> It(storage->NewIterator(scanOptions));
+    for (It->Seek(rocksdb::Slice(reinterpret_cast<const char*>(&dataPrefix), sizeof(dataPrefix)));
+         It->Valid() && writeOk;
+         It->Next()) {
+      rocksdb::Slice key = It->key();
+      if (key.empty() || static_cast<uint8_t>(key[0]) != dataPrefix)
+        break;
+      if (key.size() != sizeof(CDataRowKey))
+        continue;
+      rocksdb::Slice value = It->value();
+      if (value.size() != sizeof(CValue))
+        continue;
+      CValue baseValue;
+      memcpy(&baseValue, value.data(), sizeof(CValue));
+      if (baseValue.isNull())
+        continue;
+      CKey baseKey;
+      memcpy(static_cast<void*>(&baseKey), key.data() + offsetof(CDataRowKey, Key), sizeof(CKey));
+      for (const CActiveIndex *index: indexes) {
+        CIndexRowKey rowKey;
+        makeIndexRowKey(rowKey, index->Id, index->Def.Extract(baseValue), baseKey);
+        batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)), rocksdb::Slice());
+        batchSize++;
+      }
+      if (batchSize >= 65536)
+        writeOk = flushBatch();
+    }
+
+    if (!writeOk || !It->status().ok() || !flushBatch()) {
+      LOG_F(ERROR, "%s: index build failed for shard %zu", this->Name_.c_str(), shardIndex);
+      return false;
+    }
+
+    return true;
+  }
+
+private:
+  // Temporary reader/flush synchronization: pairs the two-level read (disk + memtable)
+  // against the two-step flush (batch write + memtable reset). To be replaced with
+  // a lock-free scheme - versioned View {memtable generation, disk snapshot} with
+  // epoch-based reclamation of retired arenas (see db-engine-fable.md, 4.2)
+  std::unique_ptr<std::shared_mutex[]> ShardLocks_;
+  std::vector<CIndexDef> RegisteredIndexes_;
+  std::vector<CActiveIndex> ActiveIndexes_;
+};
+
 // Interfaces
 enum EInterfaceTy {
   EIQueryTransaction = 0,
-  EIQueryAddrHistory
+  EIQueryAddrHistory,
+  EIQueryAddr
 };
 
 struct CQueryTransactionResult {
@@ -748,6 +1255,58 @@ public:
 class IAddrHistoryDb {
 public:
   virtual bool queryAddrTxid(const BC::Proto::AddressTy &address, size_t from, size_t count, CQueryAddrHistory &result) = 0;
+};
+
+// Cumulative per-address counters; also serves as the in-memory delta
+// (all fields are additive, negative deltas use two's complement wrap)
+#pragma pack(push, 1)
+struct CAddrValue {
+  uint64_t Received = 0;
+  uint64_t Sent = 0;
+  uint64_t Mined = 0;
+  uint32_t TxCount = 0;
+  uint32_t TxInCount = 0;
+  uint32_t TxOutCount = 0;
+  uint32_t MinedTxCount = 0;
+  // Script::UnspentOutputInfo::EType; the key is a bare hash160, so rendering
+  // a base58 address back (rich list) needs the script kind. Constant for a real
+  // address, merged as last-non-zero (associative), excluded from isNull()
+  uint32_t AddressType = 0;
+
+  void merge(const CAddrValue &delta) {
+    Received += delta.Received;
+    Sent += delta.Sent;
+    Mined += delta.Mined;
+    TxCount += delta.TxCount;
+    TxInCount += delta.TxInCount;
+    TxOutCount += delta.TxOutCount;
+    MinedTxCount += delta.MinedTxCount;
+    if (delta.AddressType)
+      AddressType = delta.AddressType;
+  }
+
+  void negate() {
+    Received = 0 - Received;
+    Sent = 0 - Sent;
+    Mined = 0 - Mined;
+    TxCount = 0 - TxCount;
+    TxInCount = 0 - TxInCount;
+    TxOutCount = 0 - TxOutCount;
+    MinedTxCount = 0 - MinedTxCount;
+  }
+
+  bool isNull() const {
+    return Received == 0 && Sent == 0 && Mined == 0 &&
+           TxCount == 0 && TxInCount == 0 && TxOutCount == 0 && MinedTxCount == 0;
+  }
+};
+#pragma pack(pop)
+
+class IAddrDb {
+public:
+  virtual bool queryAddr(const BC::Proto::AddressTy &address, CAddrValue &result) = 0;
+  virtual bool queryTop(const std::string &index, size_t offset, size_t limit,
+                        std::vector<std::pair<BC::Proto::AddressTy, CAddrValue>> &result) = 0;
 };
 
 }

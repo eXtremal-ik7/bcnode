@@ -144,14 +144,172 @@ int BC::Network::HttpApiConnection::onParse(HttpRequestComponent *component)
   return 1;
 }
 
-void BC::Network::HttpApiConnection::onAddressesInfo(rapidjson::Document&)
+void BC::Network::HttpApiConnection::onAddressesInfo(rapidjson::Document &request)
 {
-  replyNotImplemented();
+  bool isValid = true;
+  std::string errorField;
+  std::string address;
+  jsonParseString(request, "address", address, &isValid, errorField);
+  if (!isValid) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  BC::Proto::AddressTy addressHash;
+  if (!decodeHumanReadableAddress(address, ChainParams_.PublicKeyPrefix, addressHash) &&
+      !decodeHumanReadableAddress(address, ChainParams_.ScriptPrefix, addressHash)) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", "address", address);
+    return;
+  }
+
+  if (!Storage_->AddrDb_) {
+    replyWithError("DATABASE_NOT_ENABLED", "", "", "");
+    return;
+  }
+
+  // Unknown address is not an error: all counters are zero
+  DB::CAddrValue info;
+  Storage_->AddrDb_->queryAddr(addressHash, info);
+
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+
+  {
+    JSON::Object reply(stream);
+    reply.addField("address");
+    {
+      JSON::Object object(stream);
+      object.addString("address", address);
+      object.addString("balance", FormatMoney(static_cast<int64_t>(info.Received - info.Sent), BC::Configuration::RationalPartSize));
+      object.addString("total_received", FormatMoney(static_cast<int64_t>(info.Received), BC::Configuration::RationalPartSize));
+      object.addString("total_sent", FormatMoney(static_cast<int64_t>(info.Sent), BC::Configuration::RationalPartSize));
+      object.addString("total_mined", FormatMoney(static_cast<int64_t>(info.Mined), BC::Configuration::RationalPartSize));
+      object.addInt("tx_count", info.TxCount);
+      object.addInt("txin_count", info.TxInCount);
+      object.addInt("txout_count", info.TxOutCount);
+      object.addInt("utxo_count", info.TxOutCount - info.TxInCount);
+      object.addInt("mined_tx_count", info.MinedTxCount);
+    }
+  }
+
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
-void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document&)
+void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request)
 {
-  replyNotImplemented();
+  bool isValid = true;
+  std::string errorField;
+  std::string address;
+  struct {
+    uint64_t offset;
+    uint64_t limit;
+    std::string sort;
+  } pagination;
+
+  jsonParseString(request, "address", address, &isValid, errorField);
+  jsonParseUInt64(request, "offset", &pagination.offset, 0, &isValid, errorField);
+  jsonParseUInt64(request, "limit", &pagination.limit, 50, &isValid, errorField);
+  jsonParseString(request, "sort", pagination.sort, "desc", &isValid, errorField);
+  if (!isValid) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  if (pagination.sort != "asc" && pagination.sort != "desc") {
+    replyWithError("REQUEST_FORMAT_ERROR", "", "sort", "must be asc or desc");
+    return;
+  }
+  if (pagination.limit > 500)
+    pagination.limit = 500;
+
+  BC::Proto::AddressTy addressHash;
+  if (!decodeHumanReadableAddress(address, ChainParams_.PublicKeyPrefix, addressHash) &&
+      !decodeHumanReadableAddress(address, ChainParams_.ScriptPrefix, addressHash)) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", "address", address);
+    return;
+  }
+
+  if (!Storage_->AddrHistoryDb_ || !Storage_->TransactionDb_) {
+    replyWithError("DATABASE_NOT_ENABLED", "", "", "");
+    return;
+  }
+
+  // The address tx count arrives with any range read; a probe read of the first
+  // element gets it before the page position can be computed
+  uint64_t total = 0;
+  {
+    DB::CQueryAddrHistory probe;
+    if (Storage_->AddrHistoryDb_->queryAddrTxid(addressHash, 0, 1, probe))
+      total = probe.TotalTxCount;
+  }
+
+  bool isAscending = pagination.sort == "asc";
+  uint64_t from = 0;
+  uint64_t count = 0;
+  if (pagination.offset < total) {
+    if (isAscending) {
+      from = pagination.offset;
+      count = total - pagination.offset;
+    } else {
+      uint64_t end = total - pagination.offset;
+      from = end > pagination.limit ? end - pagination.limit : 0;
+      count = end - from;
+    }
+    if (count > pagination.limit)
+      count = pagination.limit;
+  }
+
+  DB::CQueryAddrHistory history;
+  if (count)
+    Storage_->AddrHistoryDb_->queryAddrTxid(addressHash, from, count, history);
+
+  const BC::Common::BlockIndex *best = BlockIndex_.best();
+
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+
+  {
+    JSON::Object reply(stream);
+    reply.addString("address", address);
+    reply.addField("items");
+    {
+      JSON::Array itemsArray(stream);
+      for (size_t i = 0; i < history.Transactions.size(); i++) {
+        // Descending order shows the newest transaction first
+        const auto &txid = history.Transactions[isAscending ? i : history.Transactions.size() - 1 - i];
+
+        DB::CQueryTransactionResult queryResult;
+        if (!Storage_->TransactionDb_->queryTransaction(txid, BlockIndex_, *BlockDb_, queryResult) ||
+            !queryResult.Found || queryResult.DataCorrupted) {
+          replyWithError("DATABASE_CORRUPTED", "", "", txid.getHexLE());
+          return;
+        }
+
+        BC::Common::BlockIndex *index = BlockIndex_.indexByHash(queryResult.Block);
+        if (!index) {
+          replyWithError("BLOCK_NOT_FOUND", "", "", queryResult.Block.getHexLE());
+          return;
+        }
+
+        itemsArray.addField();
+        serializeTx(stream, queryResult.Tx, queryResult.LinkedOutputs, index, queryResult.TxNum == 0, best->Height - index->Height);
+      }
+    }
+
+    reply.addField("pagination");
+    {
+      JSON::Object paginationObject(stream);
+      paginationObject.addInt("total", total);
+      paginationObject.addInt("limit", pagination.limit);
+      paginationObject.addInt("offset", pagination.offset);
+    }
+  }
+
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::onAddressesUtxo(rapidjson::Document&)
@@ -187,7 +345,11 @@ void BC::Network::HttpApiConnection::onBlocksByHash(rapidjson::Document &request
   xmstream stream;
   reply200(stream);
   size_t offset = startChunk(stream);
-  serializeBlock(stream, index, object.get(), hash);
+  {
+    JSON::Object reply(stream);
+    reply.addField("block");
+    serializeBlock(stream, index, object.get(), hash);
+  }
   finishChunk(stream, offset);
   aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
@@ -220,7 +382,11 @@ void BC::Network::HttpApiConnection::onBlocksByHeight(rapidjson::Document &reque
   xmstream stream;
   reply200(stream);
   size_t offset = startChunk(stream);
-  serializeBlock(stream, index, object.get(), index->Header.GetHash());
+  {
+    JSON::Object reply(stream);
+    reply.addField("block");
+    serializeBlock(stream, index, object.get(), index->Header.GetHash());
+  }
   finishChunk(stream, offset);
   aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
@@ -243,7 +409,11 @@ void BC::Network::HttpApiConnection::onBlocksLatest(rapidjson::Document&)
   xmstream stream;
   reply200(stream);
   size_t offset = startChunk(stream);
-  serializeBlock(stream, index, object.get(), index->Header.GetHash());
+  {
+    JSON::Object reply(stream);
+    reply.addField("block");
+    serializeBlock(stream, index, object.get(), index->Header.GetHash());
+  }
   finishChunk(stream, offset);
   aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
@@ -360,6 +530,12 @@ void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document &request)
     index = BlockIndex_.indexByHash(hash.value());
   } else {
     replyWithError("REQUEST_FORMAT_ERROR", "", "", "both block_hash and block_height missing");
+    return;
+  }
+
+  if (!index) {
+    replyWithError("BLOCK_NOT_FOUND", "", "" ,"");
+    return;
   }
 
   auto object = objectByIndex(index, *BlockDb_);
@@ -378,6 +554,14 @@ void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document &request)
 
   {
     JSON::Object reply(stream);
+    reply.addField("block");
+    {
+      JSON::Object blockObject(stream);
+      blockObject.addString("hash", index->Header.GetHash().getHexLE());
+      blockObject.addInt("height", index->Height);
+      blockObject.addInt("timestamp", index->Header.nTime);
+      blockObject.addInt("tx_count", block.vtx.size());
+    }
     reply.addField("items");
 
     {
@@ -422,9 +606,88 @@ void BC::Network::HttpApiConnection::onSearch(rapidjson::Document&)
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onStatsRichList(rapidjson::Document&)
+void BC::Network::HttpApiConnection::onStatsRichList(rapidjson::Document &request)
 {
-  replyNotImplemented();
+  bool isValid = true;
+  std::string errorField;
+  std::string sortBy;
+  struct {
+    uint64_t offset;
+    uint64_t limit;
+  } pagination;
+
+  jsonParseUInt64(request, "offset", &pagination.offset, 0, &isValid, errorField);
+  jsonParseUInt64(request, "limit", &pagination.limit, 100, &isValid, errorField);
+  jsonParseString(request, "sort_by", sortBy, "balance", &isValid, errorField);
+  if (!isValid) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  if (pagination.limit > 500)
+    pagination.limit = 500;
+  if (pagination.offset + pagination.limit > 1000) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", "offset", "rich list depth is limited to 1000");
+    return;
+  }
+
+  if (!Storage_->AddrDb_) {
+    replyWithError("DATABASE_NOT_ENABLED", "", "", "");
+    return;
+  }
+
+  std::vector<std::pair<BC::Proto::AddressTy, DB::CAddrValue>> top;
+  if (!Storage_->AddrDb_->queryTop(sortBy, pagination.offset, pagination.limit, top)) {
+    replyWithError("INDEX_NOT_ENABLED", "", "sort_by", sortBy);
+    return;
+  }
+
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+
+  {
+    JSON::Object reply(stream);
+    reply.addField("items");
+    {
+      JSON::Array itemsArray(stream);
+      for (size_t i = 0; i < top.size(); i++) {
+        DB::CAddrValue &value = top[i].second;
+
+        auto type = static_cast<BC::Script::UnspentOutputInfo::EType>(value.AddressType);
+        std::string address58;
+        if (type == BC::Script::UnspentOutputInfo::EPubKey ||
+            type == BC::Script::UnspentOutputInfo::EPubKeyHash ||
+            type == BC::Script::UnspentOutputInfo::EScriptHash)
+          address58 = BC::Script::addressToBase58(type, top[i].first, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix);
+        if (address58.empty())
+          address58 = top[i].first.getHexLE();
+
+        itemsArray.addField();
+        {
+          JSON::Object itemObject(stream);
+          itemObject.addInt("rank", pagination.offset + i + 1);
+          itemObject.addString("address", address58);
+          itemObject.addString("balance", FormatMoney(static_cast<int64_t>(value.Received - value.Sent), BC::Configuration::RationalPartSize));
+          itemObject.addString("total_received", FormatMoney(static_cast<int64_t>(value.Received), BC::Configuration::RationalPartSize));
+          itemObject.addString("total_sent", FormatMoney(static_cast<int64_t>(value.Sent), BC::Configuration::RationalPartSize));
+          itemObject.addInt("tx_count", value.TxCount);
+          itemObject.addNull("percentage_of_supply");
+        }
+      }
+    }
+
+    reply.addField("pagination");
+    {
+      JSON::Object paginationObject(stream);
+      paginationObject.addNull("total");
+      paginationObject.addInt("limit", pagination.limit);
+      paginationObject.addInt("offset", pagination.offset);
+    }
+  }
+
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::onSystemHealth(rapidjson::Document&)
@@ -680,7 +943,7 @@ void BC::Network::HttpApiConnection::serializeBlock(xmstream &stream,
 
   blockObject.addString("reward", FormatMoney(reward, BC::Configuration::RationalPartSize));
   blockObject.addNull("fees_total");
-  blockObject.addBoolean("is_orphan", index->OnChain);
+  blockObject.addBoolean("is_orphan", !index->OnChain);
 }
 
 void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,

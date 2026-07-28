@@ -53,6 +53,7 @@ public:
   // Handlers
   ITransactionDb *TransactionDb_ = nullptr;
   IAddrHistoryDb *AddrHistoryDb_ = nullptr;
+  IAddrDb *AddrDb_ = nullptr;
 };
 
 }

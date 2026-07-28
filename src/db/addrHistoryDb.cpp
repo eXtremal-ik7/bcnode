@@ -45,10 +45,13 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
     // TODO: check kind on txid (segwit or normal)
     BC::Proto::TxHashTy hash = coinbaseTx.getTxId();
 
+    std::unordered_set<BC::Proto::AddressTy> affectedAddresses;
     BC::Proto::AddressTy address;
     for (const auto &txout: coinbaseTx.txOut) {
-      if (BC::Script::extractSingleAddress(txout, address) != BC::Script::UnspentOutputInfo::EInvalid)
-        txMap[address].push_back(hash);
+      if (BC::Script::extractSingleAddress(txout, address) != BC::Script::UnspentOutputInfo::EInvalid) {
+        if (affectedAddresses.insert(address).second)
+          txMap[address].push_back(hash);
+      }
     }
   }
 
@@ -100,10 +103,13 @@ void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index,
   // Coinbase
   {
     const auto &coinbaseTx = block.vtx[0];
+    std::unordered_set<BC::Proto::AddressTy> affectedAddresses;
     BC::Proto::AddressTy address;
     for (const auto &txout: coinbaseTx.txOut) {
-      if (BC::Script::extractSingleAddress(txout, address) != BC::Script::UnspentOutputInfo::EInvalid)
-        txMap[address]++;
+      if (BC::Script::extractSingleAddress(txout, address) != BC::Script::UnspentOutputInfo::EInvalid) {
+        if (affectedAddresses.insert(address).second)
+          txMap[address]++;
+      }
     }
   }
 

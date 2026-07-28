@@ -171,6 +171,7 @@ set(BASE_SOURCES
   BTC/merkleTree.cpp
   common/thread.cpp
   db/archive.cpp
+  db/addrdb.cpp
   db/addrHistoryDb.cpp
   db/storage.cpp
   db/txdb.cpp
