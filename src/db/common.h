@@ -9,10 +9,10 @@
 #include "common/mlog.h"
 #include "common/utils.h"
 
+#include "swmrhashmap.h"
 #include "config4cpp/Configuration.h"
 #include <rocksdb/db.h>
 #include <rocksdb/merge_operator.h>
-#include "tbb/concurrent_hash_map.h"
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -21,12 +21,6 @@
 
 namespace BC {
 namespace DB {
-
-struct CShardEntry {
-  CShardEntry(const BC::Proto::BlockHashTy &blockId, void *keyData) : BlockId(blockId), KeyData(keyData) {}
-  BC::Proto::BlockHashTy BlockId;
-  void *KeyData;
-};
 
 struct CEntry {
   BC::Proto::BlockHashTy BlockId;
@@ -38,62 +32,65 @@ struct CEntry {
 template<typename CKey>
 struct CLog {
   MLog Log;
-  std::unordered_map<CKey, std::vector<CShardEntry>> AllKeysData;
-  tbb::concurrent_hash_map<CKey, void*> CurrentKeysData;
 
-  const void *find(const CKey &key) {
-    typename decltype (CurrentKeysData)::const_accessor accessor;
-    if (CurrentKeysData.find(accessor, key))
-      return accessor->second;
-    return nullptr;
-  }
+  // One flat SWMR map replaces the per-key version vectors and the tbb map
+  // for concurrent point reads (see swmrhashmap.h). Starts small, grows to
+  // the working-set size once and keeps its capacity across window resets
+  CSwmrHashMap<CKey> Map{4096};
+
+  // Undo log: (key, previous value) recorded on the first touch of a key in
+  // a revision, with revision boundaries on top; pop() replays the tail of
+  // the last revision in reverse. Revision numbers are monotonic within the
+  // window and never reused, so a slot's LastRev surviving from a popped
+  // revision cannot alias the next block and swallow its undo record
+  struct SUndo {
+    CKey Key;
+    void *Prev;
+  };
+  struct SRevision {
+    BC::Proto::BlockHashTy BlockId;
+    size_t UndoStart;
+    uint32_t Rev;
+  };
+  std::vector<SUndo> Undo;
+  std::vector<SRevision> Revisions;
+  uint32_t NextRev = 0;
+
+  const void *find(const CKey &key) { return Map.find(key); }
 
   void update(const BC::Proto::BlockHashTy &blockId, const CKey &key, void *newData) {
-    std::vector<CShardEntry> &blocks = AllKeysData[key];
-    if (blocks.empty() || blocks.back().BlockId != blockId) {
-      blocks.emplace_back(blockId, newData);
-    } else {
-      blocks.back().KeyData = newData;
-    }
-
-    {
-      typename decltype (CurrentKeysData)::accessor accessor;
-      CurrentKeysData.insert(accessor, key);
-      accessor->second = newData;
-    }
+    if (Revisions.empty() || Revisions.back().BlockId != blockId)
+      Revisions.push_back({blockId, Undo.size(), ++NextRev});
+    auto result = Map.update(key, newData, Revisions.back().Rev);
+    if (result.FirstInRev)
+      Undo.push_back({key, result.Prev});
   }
 
+  // Reverts the last revision if it belongs to blockId (the only case the
+  // callers produce); a null previous value is restored as a tombstone, so
+  // the map answers "absent in this window" without breaking probe chains
   void pop(const BC::Proto::BlockHashTy &blockId) {
-    for (auto &keyData: AllKeysData) {
-      if (keyData.second.back().BlockId == blockId) {
-        keyData.second.pop_back();
-        if (keyData.second.empty()) {
-          CurrentKeysData.erase(keyData.first);
-        } else {
-          typename decltype (CurrentKeysData)::accessor accessor;
-          CurrentKeysData.insert(accessor, keyData.first);
-          accessor->second = keyData.second.back().KeyData;
-        }
-      }
+    if (Revisions.empty() || Revisions.back().BlockId != blockId)
+      return;
+    size_t start = Revisions.back().UndoStart;
+    for (size_t i = Undo.size(); i > start; ) {
+      i--;
+      Map.restore(Undo[i].Key, Undo[i].Prev);
     }
+    Undo.resize(start);
+    Revisions.pop_back();
   }
 
-  // Clears both key maps but keeps the arena: concurrent readers may chase
-  // pointers into it after the per-key erase, so the arena is rewound later,
-  // by the writer, right before it reuses this log as the active one
-  void drainMaps() {
-    AllKeysData.clear();
-
-    // Can't use .clear() here, not thread-safe
-    std::vector<CKey> allKeys;
-    for (const auto &v: CurrentKeysData)
-      allKeys.push_back(v.first);
-    for (const auto &v: allKeys)
-      CurrentKeysData.erase(v);
-  }
-
+  // O(1) window reset: the generation bump invalidates every map entry at
+  // once and the arena is rewound. Runs in the writer right before the log
+  // is reused, as late as possible for concurrent readers chasing arena
+  // pointers (the residual race is the pre-existing bug A class, closed
+  // for real by EBR in the aggkv design)
   void reset() {
-    drainMaps();
+    Map.reset();
+    Undo.clear();
+    Revisions.clear();
+    NextRev = 0;
     Log.reset();
   }
 };
@@ -440,12 +437,13 @@ private:
       FlushDone_.wait(lock, [&]{ return !slot.FlushBusy.load(std::memory_order_acquire); });
     }
 
-    // The spare's maps were drained by the flusher; the arena rewind happens
-    // here, in the writer, as late as possible - a reader that fetched a
-    // pointer before the drain has had a whole fill cycle to finish with it.
-    // (The residual race is the pre-existing bug A class, closed for real by
-    // EBR in the aggkv design.)
-    spare->Log.reset();
+    // The spare was fully written out by the flusher and stayed readable
+    // since (a generation-based map needs no drain); the whole reset - map
+    // generation bump plus arena rewind - happens here, in the writer, as
+    // late as possible: a reader that fetched a pointer before the flush has
+    // had a whole fill cycle to finish with it. (The residual race is the
+    // pre-existing bug A class, closed for real by EBR in the aggkv design.)
+    spare->reset();
 
     slot.Frozen.store(active, std::memory_order_release);
     slot.Active.store(spare, std::memory_order_release);
@@ -466,12 +464,12 @@ private:
         return;
 
       // The job stays in the queue while it runs: drainAsyncFlushes() waits
-      // for an empty queue, so completion means both the write and the map
-      // drain are done
+      // for an empty queue, so completion means the write is durable. The
+      // frozen log needs no cleanup here - it stays readable as-is until the
+      // writer recycles it with an O(1) generation reset
       SFlushJob job = FlushQueue_.front();
       lock.unlock();
       flushFrozenImpl(job.Stamp, job.ShardIndex, *job.Log);
-      job.Log->drainMaps();
       lock.lock();
       FlushQueue_.pop_front();
       Shards_[job.ShardIndex].FlushBusy.store(false, std::memory_order_release);
@@ -599,11 +597,8 @@ private:
 
     batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(blockId.begin()), sizeof(BC::Proto::BlockHashTy)));
 
-    for (const auto &v: shard.AllKeysData) {
-      if (v.second.empty())
-        continue;
-
-      const CHeader *header = static_cast<CHeader*>(v.second.back().KeyData);
+    shard.Map.forEachCurrent([&batch](const CKey&, void *keyData) {
+      const CHeader *header = static_cast<const CHeader*>(keyData);
       const void *data = header + 1;
 
       auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(&header->Key), sizeof(CKey));
@@ -613,7 +608,7 @@ private:
       } else {
         batch.Delete(keySlice);
       }
-    }
+    });
 
     storage->Write(rocksdb::WriteOptions(), &batch);
   }
@@ -817,12 +812,10 @@ public:
     std::vector<rocksdb::Slice> allKeySlices;
     std::vector<std::string> metadata;
 
-    for (const auto &v: shard.AllKeysData) {
-      if (v.second.empty())
-        continue;
-      allKeys.emplace_back(v.first);
-      allData.push_back((CHeader*)v.second.back().KeyData);
-    }
+    shard.Map.forEachCurrent([&](const CKey &key, void *keyData) {
+      allKeys.emplace_back(key);
+      allData.push_back(static_cast<CHeader*>(keyData));
+    });
 
     // Make slices for metadata reading
     for (size_t i = 0; i < allKeys.size(); i++)
@@ -1160,12 +1153,10 @@ public:
     std::vector<rocksdb::Slice> allKeySlices;
     std::vector<std::string> metadata;
 
-    for (const auto &v: shard.AllKeysData) {
-      if (v.second.empty())
-        continue;
-      allKeys.emplace_back(v.first);
-      allData.push_back((CHeader*)v.second.back().KeyData);
-    }
+    shard.Map.forEachCurrent([&](const CKey &key, void *keyData) {
+      allKeys.emplace_back(key);
+      allData.push_back(static_cast<CHeader*>(keyData));
+    });
 
     for (size_t i = 0; i < allKeys.size(); i++)
       allKeySlices.emplace_back((const char*)&allKeys[i], sizeof(CKey));
@@ -1540,32 +1531,28 @@ public:
 
     if (ActiveIndexes_.empty()) {
       // No indexes: write the folded window delta as a merge operand, no reads at all
-      for (const auto &v: shard.AllKeysData) {
-        if (v.second.empty())
-          continue;
-        const CHeader *header = static_cast<const CHeader*>(v.second.back().KeyData);
+      shard.Map.forEachCurrent([&batch](const CKey&, void *keyData) {
+        const CHeader *header = static_cast<const CHeader*>(keyData);
         // Perfectly cancelled window delta is an identity operand, don't write it
         if (header->Value.isNull())
-          continue;
+          return;
         CDataRowKey rowKey;
         makeDataRowKey(rowKey, header->Key);
         batch.Merge(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)),
                     rocksdb::Slice(reinterpret_cast<const char*>(&header->Value), sizeof(CValue)));
-      }
+      });
     } else {
       // RMW: index row replacement needs the old value anyway, so the base row
       // is written materialized too (and deleted when it folds to the identity)
       std::vector<const CHeader*> allData;
       std::vector<CDataRowKey> rowKeys;
-      for (const auto &v: shard.AllKeysData) {
-        if (v.second.empty())
-          continue;
-        const CHeader *header = static_cast<const CHeader*>(v.second.back().KeyData);
+      shard.Map.forEachCurrent([&](const CKey&, void *keyData) {
+        const CHeader *header = static_cast<const CHeader*>(keyData);
         if (header->Value.isNull())
-          continue;
+          return;
         makeDataRowKey(rowKeys.emplace_back(), header->Key);
         allData.push_back(header);
-      }
+      });
 
       // Slices are built after the fill: emplace_back may reallocate rowKeys
       std::vector<rocksdb::Slice> keySlices;

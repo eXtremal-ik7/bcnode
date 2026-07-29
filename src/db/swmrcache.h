@@ -7,10 +7,28 @@
 // the age of an entry is its Height field, condemned entries keep serving
 // hits until the sweep reclaims their slots.
 //
-// Concurrency contract: exactly one mutator thread (insert/spend/maintain),
-// any number of lookupConcurrent() readers. A reader never spins: a slot
-// caught mid-mutation is reported as a miss, which the cache contract
-// allows ("absence is always legal, a positive must be exact").
+// Concurrency contract: any number of lookupConcurrent() readers, and
+// mutators (insert/spend) may run from several threads concurrently PROVIDED
+// their key sets are disjoint - no two threads ever touch the same key at
+// the same time (shard-partitioned flushers satisfy this by construction) -
+// AND the owner enabled the mode with setConcurrentMutators(true) at a
+// quiescent point. In that mode slot ownership is arbitrated by a CAS claim
+// on the per-slot seqlock, tag bytes are replaced with a CAS loop on the tag
+// word, the found slot is re-verified under the claim (it may have been
+// displaced meanwhile) and accounting uses relaxed atomic adds. With the
+// mode off (default) the mutator path keeps the plain single-writer stores:
+// the locked instructions are full barriers on x86 and cost a DRAM latency
+// each on cold slot lines, which is measurable at reindex rates. A reader
+// never spins either way: a slot caught mid-mutation is reported as a miss,
+// which the cache contract allows ("absence is always legal, a positive
+// must be exact").
+//
+// Owner-side only (quiescent, no concurrent mutators): maintain(), init(),
+// ensureHeightCapacity() and the whole persistence API (exportBucket/
+// importBucket/finalizeImport/clear/debugCheck). Before a concurrent
+// mutator wave the owner must pre-size the height accounting via
+// ensureHeightCapacity(maxInsertHeight): insert() grows it only when it
+// runs as the single mutator.
 //
 // ValueT must be trivially copyable and expose a public uint32_t Height.
 
@@ -74,6 +92,10 @@ private:
   uint64_t DupOverwriteCount_ = 0;
   uint64_t SweptBucketCount_ = 0;
 
+  // false (default) = classic single-writer mutator path with plain stores;
+  // true = disjoint-key concurrent mutators (CAS claims, atomic counters)
+  bool ConcurrentMutators_ = false;
+
   // txid is already a cryptographic hash: its bytes are the hash function
   static SRef refOf(const uint8_t *txid, uint32_t vout) {
     uint64_t a, b;
@@ -110,6 +132,24 @@ private:
 #endif
   }
 
+  // counter add: plain in single-writer mode, relaxed atomic under
+  // concurrent mutators (the owner reads totals only in quiescent phases)
+  template<typename T>
+  void addCounter(T &v, long long delta) {
+    if (!ConcurrentMutators_) {
+      v = static_cast<T>(v + delta);
+      return;
+    }
+#ifdef _MSC_VER
+    if constexpr (sizeof(T) == 8)
+      _InterlockedExchangeAdd64(reinterpret_cast<volatile __int64*>(&v), static_cast<__int64>(delta));
+    else
+      _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(&v), static_cast<long>(delta));
+#else
+    __atomic_fetch_add(&v, static_cast<T>(delta), __ATOMIC_RELAXED);
+#endif
+  }
+
   SSlot &slotAt(size_t bucket, unsigned i) { return Slots_[bucket * SLOTS_PER_BUCKET + i]; }
   const SSlot &slotAt(size_t bucket, unsigned i) const { return Slots_[bucket * SLOTS_PER_BUCKET + i]; }
 
@@ -138,31 +178,67 @@ private:
   }
 
   // seqlock writer protocol; the release fence orders the odd store before
-  // the field stores on ARM/x86 (kernel-style seqlock, not pure-C++ formal)
-  static void writeBegin(SSlot &s) {
-    s.Seq.store(s.Seq.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  // the field stores on ARM/x86 (kernel-style seqlock, not pure-C++ formal).
+  // Under concurrent mutators the claim is a CAS even->odd arbitrating slot
+  // ownership: false = the slot is mid-mutation elsewhere, re-evaluate; the
+  // acquire on success pairs with the loser's writeEnd release, so the
+  // payload re-verified under the claim is the latest committed one. In
+  // single-writer mode the claim is the plain odd store of the original
+  // seqlock: a locked CAS is a full barrier that stalls for the whole DRAM
+  // miss of a cold slot line, the plain store hides behind the store buffer
+  bool tryClaim(SSlot &s) {
+    uint32_t seq = s.Seq.load(std::memory_order_relaxed);
+    if (!ConcurrentMutators_) {
+      s.Seq.store(seq + 1, std::memory_order_relaxed);
+      std::atomic_thread_fence(std::memory_order_release);
+      return true;
+    }
+    if (seq & 1)
+      return false;
+    if (!s.Seq.compare_exchange_strong(seq, seq + 1, std::memory_order_acquire, std::memory_order_relaxed))
+      return false;
     std::atomic_thread_fence(std::memory_order_release);
+    return true;
   }
 
+  // payload was written: advance to the next even value, readers that
+  // sampled the old sequence discard their copy
   static void writeEnd(SSlot &s) {
     s.Seq.store(s.Seq.load(std::memory_order_relaxed) + 1, std::memory_order_release);
   }
 
+  // nothing was written: restore the pre-claim even value
+  static void unclaimClean(SSlot &s) {
+    s.Seq.store(s.Seq.load(std::memory_order_relaxed) - 1, std::memory_order_release);
+  }
+
+  // plain read-modify-write in single-writer mode; a CAS loop under
+  // concurrent mutators, which may be replacing other bytes of the word
   void setTag(size_t bucket, unsigned slot, uint8_t tag) {
+    const uint64_t mask = 0xFFull << (slot * 8);
+    const uint64_t val = static_cast<uint64_t>(tag) << (slot * 8);
     uint64_t w = Tags_[bucket].load(std::memory_order_relaxed);
-    w &= ~(0xFFull << (slot * 8));
-    w |= static_cast<uint64_t>(tag) << (slot * 8);
-    Tags_[bucket].store(w, std::memory_order_release);
+    if (!ConcurrentMutators_) {
+      Tags_[bucket].store((w & ~mask) | val, std::memory_order_release);
+      return;
+    }
+    while (!Tags_[bucket].compare_exchange_weak(w, (w & ~mask) | val, std::memory_order_release, std::memory_order_relaxed))
+      ;
   }
 
   void accountRemoval(uint32_t height) {
-    LiveCount_--;
-    AliveByHeight_[height]--;
+    addCounter(LiveCount_, -1);
+    addCounter(AliveByHeight_[height], -1);
     if (height < Floor_)
-      Condemned_--;
+      addCounter(Condemned_, -1);
   }
 
-  // writer-side exact search: the writer is the only mutator, plain reads
+  // mutator-side search with plain reads. With concurrent mutators a slot
+  // mid-rewrite can be read torn here, so a match is only a candidate:
+  // every mutation path re-verifies the key under the slot claim before
+  // acting on it (a torn mismatch just skips - the own key of this thread
+  // is never mutated elsewhere, its slot is either stable or being
+  // displaced, and displacement is caught by the re-verify)
   SFind findOwn(size_t b1, size_t b2, uint8_t tag, const uint8_t *txid, uint32_t vout) {
     for (int pass = 0; pass < 2; pass++) {
       if (pass && b2 == b1)
@@ -199,7 +275,8 @@ private:
         uint32_t height = s.Value.Height;
         if (height >= Floor_)
           continue;
-        writeBegin(s);
+        if (!tryClaim(s))
+          continue; // impossible under the owner-quiescence contract; skip
         setTag(b, i, 0);
         writeEnd(s);
         accountRemoval(height);
@@ -251,90 +328,131 @@ public:
     const size_t b1 = bucketOf(ref.H1);
     const size_t b2 = bucketOf(ref.H2);
 
+    // growth is single-mutator only: a concurrent wave pre-sizes the height
+    // accounting via ensureHeightCapacity() before it starts
     if (value.Height >= AliveByHeight_.size())
       AliveByHeight_.resize(value.Height + 1, 0);
 
-    if (SFind dup = findOwn(b1, b2, ref.Tag, txid, vout); dup.Slot) {
-      uint32_t oldHeight = dup.Slot->Value.Height;
-      writeBegin(*dup.Slot);
-      dup.Slot->Value = value;
-      writeEnd(*dup.Slot);
-      AliveByHeight_[oldHeight]--;
-      if (oldHeight < Floor_)
-        Condemned_--;
-      AliveByHeight_[value.Height]++;
-      if (value.Height < Floor_)
-        Condemned_++;
-      DupOverwriteCount_++;
-      return false;
-    }
-
-    uint64_t w1 = Tags_[b1].load(std::memory_order_relaxed);
-    uint64_t w2 = b2 == b1 ? w1 : Tags_[b2].load(std::memory_order_relaxed);
-    int free1 = freeCount(w1);
-    int free2 = b2 == b1 ? 0 : freeCount(w2);
-
-    size_t bucket;
-    unsigned slot;
-    if (free1 || free2) {
-      bucket = free1 >= free2 ? b1 : b2;
-      slot = static_cast<unsigned>(findFree(bucket == b1 ? w1 : w2));
-    } else {
-      // both buckets full: displace the weakest entry, condemned first,
-      // then the oldest; losing a live entry costs one future miss, which
-      // the cache contract allows
-      bucket = b1;
-      slot = 0;
-      uint32_t victimHeight = UINT32_MAX;
-      bool victimCondemned = false;
-      auto consider = [&](size_t b) {
-        for (unsigned i = 0; i < SLOTS_PER_BUCKET; i++) {
-          const SSlot &s = slotAt(b, i);
-          uint32_t h = s.Value.Height;
-          bool cond = h < Floor_;
-          if ((cond && !victimCondemned) || (cond == victimCondemned && h < victimHeight)) {
-            bucket = b;
-            slot = i;
-            victimHeight = h;
-            victimCondemned = cond;
-          }
+    for (;;) {
+      if (SFind dup = findOwn(b1, b2, ref.Tag, txid, vout); dup.Slot) {
+        SSlot &s = *dup.Slot;
+        if (!tryClaim(s))
+          continue;
+        // findOwn ran unclaimed: the slot may have been displaced by a
+        // concurrent mutator between the find and the claim, re-verify
+        if (tagAt(Tags_[dup.Bucket].load(std::memory_order_relaxed), dup.Index) != ref.Tag ||
+            s.Vout != vout || memcmp(s.TxId, txid, 32) != 0) {
+          unclaimClean(s);
+          continue;
         }
-      };
-      consider(b1);
-      if (b2 != b1)
-        consider(b2);
-      accountRemoval(victimHeight);
-      DisplacedCount_++;
-    }
+        uint32_t oldHeight = s.Value.Height;
+        s.Value = value;
+        writeEnd(s);
+        addCounter(AliveByHeight_[oldHeight], -1);
+        if (oldHeight < Floor_)
+          addCounter(Condemned_, -1);
+        addCounter(AliveByHeight_[value.Height], 1);
+        if (value.Height < Floor_)
+          addCounter(Condemned_, 1);
+        addCounter(DupOverwriteCount_, 1);
+        return false;
+      }
 
-    SSlot &s = slotAt(bucket, slot);
-    writeBegin(s);
-    s.Vout = vout;
-    memcpy(s.TxId, txid, 32);
-    s.Value = value;
-    writeEnd(s);
-    setTag(bucket, slot, ref.Tag);
-    LiveCount_++;
-    AliveByHeight_[value.Height]++;
-    if (value.Height < Floor_)
-      Condemned_++;
-    return true;
+      uint64_t w1 = Tags_[b1].load(std::memory_order_relaxed);
+      uint64_t w2 = b2 == b1 ? w1 : Tags_[b2].load(std::memory_order_relaxed);
+      int free1 = freeCount(w1);
+      int free2 = b2 == b1 ? 0 : freeCount(w2);
+
+      size_t bucket;
+      unsigned slot;
+      bool displacing = false;
+      if (free1 || free2) {
+        bucket = free1 >= free2 ? b1 : b2;
+        slot = static_cast<unsigned>(findFree(bucket == b1 ? w1 : w2));
+      } else {
+        // both buckets full: displace the weakest entry, condemned first,
+        // then the oldest; losing a live entry costs one future miss, which
+        // the cache contract allows. The heights here are heuristic plain
+        // reads, the victim is re-read under the claim for exact accounting
+        displacing = true;
+        bucket = b1;
+        slot = 0;
+        uint32_t victimHeight = UINT32_MAX;
+        bool victimCondemned = false;
+        auto consider = [&](size_t b) {
+          for (unsigned i = 0; i < SLOTS_PER_BUCKET; i++) {
+            const SSlot &cs = slotAt(b, i);
+            uint32_t h = cs.Value.Height;
+            bool cond = h < Floor_;
+            if ((cond && !victimCondemned) || (cond == victimCondemned && h < victimHeight)) {
+              bucket = b;
+              slot = i;
+              victimHeight = h;
+              victimCondemned = cond;
+            }
+          }
+        };
+        consider(b1);
+        if (b2 != b1)
+          consider(b2);
+      }
+
+      SSlot &s = slotAt(bucket, slot);
+      if (!tryClaim(s))
+        continue;
+      uint8_t claimedTag = tagAt(Tags_[bucket].load(std::memory_order_relaxed), slot);
+      if (!displacing && claimedTag != 0) {
+        // the free slot was taken by a concurrent mutator: re-evaluate
+        unclaimClean(s);
+        continue;
+      }
+      if (claimedTag != 0) {
+        // the victim payload is stable under the claim; a slot picked as a
+        // victim but freed meanwhile falls through as a plain free insert
+        accountRemoval(s.Value.Height);
+        addCounter(DisplacedCount_, 1);
+      }
+      s.Vout = vout;
+      memcpy(s.TxId, txid, 32);
+      s.Value = value;
+      // publish the tag before releasing the seqlock: a claimed slot must
+      // never look free to a concurrent mutator scanning for empty slots
+      setTag(bucket, slot, ref.Tag);
+      writeEnd(s);
+      addCounter(LiveCount_, 1);
+      addCounter(AliveByHeight_[value.Height], 1);
+      if (value.Height < Floor_)
+        addCounter(Condemned_, 1);
+      return true;
+    }
   }
 
-  // writer-side find-and-erase; fn(const ValueT&) is called before removal
+  // mutator-side find-and-erase; fn(const ValueT&) is called before removal
   template<typename F>
   bool spend(const uint8_t *txid, uint32_t vout, F &&fn) {
     const SRef ref = refOf(txid, vout);
-    SFind f = findOwn(bucketOf(ref.H1), bucketOf(ref.H2), ref.Tag, txid, vout);
-    if (!f.Slot)
-      return false;
-    fn(static_cast<const ValueT&>(f.Slot->Value));
-    uint32_t height = f.Slot->Value.Height;
-    writeBegin(*f.Slot);
-    setTag(f.Bucket, f.Index, 0);
-    writeEnd(*f.Slot);
-    accountRemoval(height);
-    return true;
+    const size_t b1 = bucketOf(ref.H1);
+    const size_t b2 = bucketOf(ref.H2);
+    for (;;) {
+      SFind f = findOwn(b1, b2, ref.Tag, txid, vout);
+      if (!f.Slot)
+        return false;
+      SSlot &s = *f.Slot;
+      if (!tryClaim(s))
+        continue;
+      if (tagAt(Tags_[f.Bucket].load(std::memory_order_relaxed), f.Index) != ref.Tag ||
+          s.Vout != vout || memcmp(s.TxId, txid, 32) != 0) {
+        // displaced between the find and the claim: rescan (usually a miss)
+        unclaimClean(s);
+        continue;
+      }
+      fn(static_cast<const ValueT&>(s.Value));
+      uint32_t height = s.Value.Height;
+      setTag(f.Bucket, f.Index, 0);
+      writeEnd(s);
+      accountRemoval(height);
+      return true;
+    }
   }
 
   // reader path: wait-free, no retry loops - any conflict degrades to a miss
@@ -375,9 +493,23 @@ public:
     return false;
   }
 
+  // owner-side, quiescent (no concurrent mutators): pre-size the height
+  // accounting before a wave of concurrent inserts; insert() itself grows
+  // it only when it runs as the single mutator
+  void ensureHeightCapacity(uint32_t maxHeight) {
+    if (maxHeight >= AliveByHeight_.size())
+      AliveByHeight_.resize(maxHeight + 1, 0);
+  }
+
+  // owner-side, quiescent: toggle the disjoint-key concurrent mutator mode
+  // around a wave (see the contract at the top of the file)
+  void setConcurrentMutators(bool on) { ConcurrentMutators_ = on; }
+
   // advance the floor until the live population fits the limit, then reclaim
   // condemned slots under pressure; sweeping is pure memory bandwidth and
-  // self-tunes to the condemn inflow, condemned entries hit until swept
+  // self-tunes to the condemn inflow, condemned entries hit until swept.
+  // Owner-side: requires no concurrent mutators (reads the counters plainly
+  // and moves the floor, which mutators read unsynchronized)
   void maintain() {
     while (LiveCount_ - Condemned_ >= Limit_ && Floor_ < AliveByHeight_.size()) {
       Condemned_ += AliveByHeight_[Floor_];
