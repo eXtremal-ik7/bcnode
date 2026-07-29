@@ -22,6 +22,9 @@ Storage::~Storage()
     assert(Queue_.empty());
 
     UTXODb_.flush();
+    // Quiescent point right after the final flush: the dump stamp matches
+    // the database stamp written above
+    UTXODb_.saveCache();
     Archive_->flush();
     flush();
   }

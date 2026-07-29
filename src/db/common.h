@@ -257,6 +257,7 @@ public:
       if (!last.IsConnected && last.BlockId == hash) {
         for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
           Shards_[i].pop(hash);
+        connectFastImpl(index, block, linkedOutputs);
         return;
       }
     }
@@ -283,6 +284,7 @@ public:
       if (last.IsConnected && last.BlockId == hash) {
         for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
           Shards_[i].pop(hash);
+        disconnectFastImpl(index, block, linkedOutputs);
         return;
       }
     }
@@ -320,6 +322,18 @@ public:
                               const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                               BlockInMemoryIndex &blockIndex,
                               BlockDatabase &blockDb) = 0;
+
+  // Fast-path counterparts: connect/disconnect applied by popping the
+  // unflushed log instead of running the full impl. The pop is the whole
+  // story for the log; a subclass keeping state outside it reverts that
+  // state here
+  virtual void connectFastImpl(const BC::Common::BlockIndex*,
+                               const BC::Proto::Block&,
+                               const BC::Proto::CBlockLinkedOutputs&) {}
+
+  virtual void disconnectFastImpl(const BC::Common::BlockIndex*,
+                                  const BC::Proto::Block&,
+                                  const BC::Proto::CBlockLinkedOutputs&) {}
 
 protected:
   // Configuration

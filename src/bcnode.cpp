@@ -395,6 +395,7 @@ int main(int argc, char **argv)
   if (!context.BlockDb.init(context.BlocksDir, context.IndexDir, context.ChainParams))
     return 1;
   context.Storage.init(context.BlockDb, context.BlockIndex, context.Archive);
+  context.Storage.utxodb().setupCache(context.UtxoDir, context.BlockIndex);
 
   // Loading index
   if (!loadingBlockIndex(context.BlockIndex, context.BlocksDir, context.IndexDir))
