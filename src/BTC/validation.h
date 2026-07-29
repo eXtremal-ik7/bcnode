@@ -85,6 +85,25 @@ bool validateWitnessCommitment(const BlockTy &block, bool &hasWitness, std::stri
 
   // Check witness nonce
   if (coinbaseTxIn.witnessStack.size() != 1 || coinbaseTxIn.witnessStack[0].size() != 32) {
+    // Miners embedded the commitment output before segwit activation, in
+    // blocks with no witness data at all; Core checks it only after activation.
+    // Height-free equivalent: skip the check when nothing carries witness data
+    bool blockHasWitnessData = false;
+    for (size_t i = 0, ie = block.vtx.size(); i != ie && !blockHasWitnessData; ++i) {
+      const auto &tx = block.vtx[i];
+      for (size_t j = 0, je = tx.txIn.size(); j != je; ++j) {
+        if (!tx.txIn[j].witnessStack.empty()) {
+          blockHasWitnessData = true;
+          break;
+        }
+      }
+    }
+
+    if (!blockHasWitnessData) {
+      hasWitness = false;
+      return true;
+    }
+
     error = "bad-witness-nonce";
     return false;
   }

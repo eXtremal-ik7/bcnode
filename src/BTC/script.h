@@ -9,6 +9,7 @@ public:
     OP_0 = 0,
     OP_PUSH_1 = 0x01,
     OP_PUSH20 = 0x14,
+    OP_PUSH32 = 0x20,
     OP_PUSH_33 = 0x21,
     OP_PUSH_65 = 0x41,
     OP_PUSH_75 = 0x4B,
@@ -38,7 +39,8 @@ public:
     OP_EQUAL = 0x87,
     OP_EQUALVERIFY = 0x88,
     OP_HASH160 = 0xA9,
-    OP_CHECKSIG = 0xAC
+    OP_CHECKSIG = 0xAC,
+    OP_CHECKMULTISIG = 0xAE
   };
 
 #pragma pack(push, 1)
@@ -49,6 +51,10 @@ public:
       EPubKey,
       EPubKeyHash,
       EScriptHash,
+      EWitnessPubKeyHash,
+      EWitnessScriptHash,
+      EWitnessTaproot,
+      EMultisig,
       EInvalid
     };
 
@@ -62,23 +68,62 @@ public:
       uint8_t PubKeyCompressed[33];
       BaseBlob<160> PubKeyHash;
       BaseBlob<160> ScriptHash;
+      uint8_t WitnessProgram[32];
       uint8_t CustomData[1];
     };
 
     static size_t customDataOffset() { return offsetof(UnspentOutputInfo, CustomData); }
   };
+
+  // Typed address, the addrdb/addrhistorydb key. Type is part of the key:
+  // P2PKH and P2WPKH share the hash160 but are distinct addresses. P2PK folds
+  // into EPubKeyHash, bare multisig is keyed by hash160 of the whole script.
+  // Data is zero-padded: the struct is compared and hashed as raw bytes.
+  struct CAddress {
+    uint8_t Type = UnspentOutputInfo::ENonStandard;
+    uint8_t Data[32] = {};
+
+    void set(uint8_t type, const void *data, size_t size) {
+      Type = type;
+      memset(Data, 0, sizeof(Data));
+      memcpy(Data, data, size);
+    }
+
+    // 32 for witness script hash / taproot programs, 20 for the hash160 kinds
+    size_t payloadSize() const {
+      return Type == UnspentOutputInfo::EWitnessScriptHash ||
+             Type == UnspentOutputInfo::EWitnessTaproot ? 32 : 20;
+    }
+
+    bool operator==(const CAddress &r) const { return memcmp(this, &r, sizeof(CAddress)) == 0; }
+  };
 #pragma pack(pop)
 
-  static std::string addressToBase58(UnspentOutputInfo::EType type,
-                                     BC::Proto::AddressTy &address,
-                                     const std::vector<uint8_t> &pubkeyPrefix,
-                                     const std::vector<uint8_t> &scriptPrefix);
+  static bool extractAddress(const BC::Proto::TxOut &txOut, CAddress &address);
+  static bool extractAddress(const UnspentOutputInfo &info, CAddress &address);
 
-  static UnspentOutputInfo::EType extractSingleAddress(const BC::Proto::TxOut &txOut, BC::Proto::AddressTy &address);
-  static bool extractSingleAddress(const UnspentOutputInfo &info, BC::Proto::AddressTy &address);
+  static std::string addressToString(const CAddress &address,
+                                     const std::vector<uint8_t> &pubkeyPrefix,
+                                     const std::vector<uint8_t> &scriptPrefix,
+                                     const std::string &bech32Prefix);
+
+  static bool addressFromString(const std::string &hrAddress,
+                                const std::vector<uint8_t> &pubkeyPrefix,
+                                const std::vector<uint8_t> &scriptPrefix,
+                                const std::string &bech32Prefix,
+                                CAddress &address);
 
   static void parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspentOutputInfo);
-    
+
 };
 
 }
+
+template<>
+struct std::hash<BTC::Script::CAddress> {
+  size_t operator()(const BTC::Script::CAddress &s) const {
+    uint64_t data;
+    memcpy(&data, s.Data, sizeof(data));
+    return data ^ s.Type;
+  }
+};

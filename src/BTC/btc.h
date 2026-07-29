@@ -58,6 +58,8 @@ namespace Common {
     std::vector<uint8_t> PublicKeyPrefix;
     std::vector<uint8_t> ScriptPrefix;
     std::vector<uint8_t> SecretKeyPrefix;
+    // Segwit address HRP (BIP173); empty on chains without segwit
+    std::string Bech32Prefix;
 
     // Network
     uint16_t DefaultPort;

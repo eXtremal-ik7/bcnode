@@ -25,6 +25,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->PublicKeyPrefix = {0};
     params->ScriptPrefix = {5};
     params->SecretKeyPrefix = {128};
+    params->Bech32Prefix = "bc";
 
     params->powLimit.setHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -95,6 +96,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->PublicKeyPrefix = {111};
     params->ScriptPrefix = {196};
     params->SecretKeyPrefix = {239};
+    params->Bech32Prefix = "tb";
 
     params->powLimit.setHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -163,6 +165,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->PublicKeyPrefix = {111};
     params->ScriptPrefix = {196};
     params->SecretKeyPrefix = {239};
+    params->Bech32Prefix = "bcrt";
 
     params->powLimit.setHex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 

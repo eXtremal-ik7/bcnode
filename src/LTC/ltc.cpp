@@ -21,6 +21,8 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 9332;
 
     params->PublicKeyPrefix = {48};
+    params->ScriptPrefix = {50};
+    params->Bech32Prefix = "ltc";
 
     params->powLimit = UInt<256>::fromHex("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -84,6 +86,8 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 19332;
 
     params->PublicKeyPrefix = {111};
+    params->ScriptPrefix = {58};
+    params->Bech32Prefix = "tltc";
 
     params->powLimit = UInt<256>::fromHex("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -140,6 +144,10 @@ bool setupChainParams(ChainParams *params, const char *network)
   } else if (strcmp(network, "regtest") == 0) {
     params->networkId = NetworkIdRegtest;
     params->magic = 0xDAB5BFFA;
+
+    params->PublicKeyPrefix = {111};
+    params->ScriptPrefix = {58};
+    params->Bech32Prefix = "rltc";
 
     params->powLimit = UInt<256>::fromHex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 

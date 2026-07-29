@@ -11,11 +11,11 @@ namespace BC {
 namespace DB {
 
 class AddrHistoryDb :
-  public CBaseArrayAggregated<BC::Proto::AddressTy, CAddrHistoryItem>,
+  public CBaseArrayAggregated<BC::Script::CAddress, CAddrHistoryItem>,
   public IAddrHistoryDb {
 
 public:
-  AddrHistoryDb() : CBaseArrayAggregated<BC::Proto::AddressTy, CAddrHistoryItem>("addrhistorydb", 64) {}
+  AddrHistoryDb() : CBaseArrayAggregated<BC::Script::CAddress, CAddrHistoryItem>("addrhistorydb", 64) {}
   virtual ~AddrHistoryDb() {}
 
   void *interface(int interface) {
@@ -25,7 +25,7 @@ public:
     }
   }
 
-  bool queryAddrHistory(const BC::Proto::AddressTy &address, size_t from, size_t count, CQueryAddrHistory &result) final;
+  bool queryAddrHistory(const BC::Script::CAddress &address, size_t from, size_t count, CQueryAddrHistory &result) final;
 
   uint32_t version() final { return 1; }
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);

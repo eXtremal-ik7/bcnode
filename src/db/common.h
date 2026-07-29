@@ -1641,7 +1641,7 @@ public:
 
 class IAddrHistoryDb {
 public:
-  virtual bool queryAddrHistory(const BC::Proto::AddressTy &address, size_t from, size_t count, CQueryAddrHistory &result) = 0;
+  virtual bool queryAddrHistory(const BC::Script::CAddress &address, size_t from, size_t count, CQueryAddrHistory &result) = 0;
 };
 
 // Cumulative per-address counters; also serves as the in-memory delta
@@ -1655,10 +1655,6 @@ struct CAddrValue {
   uint32_t TxInCount = 0;
   uint32_t TxOutCount = 0;
   uint32_t MinedTxCount = 0;
-  // Script::UnspentOutputInfo::EType; the key is a bare hash160, so rendering
-  // a base58 address back (rich list) needs the script kind. Constant for a real
-  // address, merged as last-non-zero (associative), excluded from isNull()
-  uint32_t AddressType = 0;
 
   void merge(const CAddrValue &delta) {
     Received += delta.Received;
@@ -1668,8 +1664,6 @@ struct CAddrValue {
     TxInCount += delta.TxInCount;
     TxOutCount += delta.TxOutCount;
     MinedTxCount += delta.MinedTxCount;
-    if (delta.AddressType)
-      AddressType = delta.AddressType;
   }
 
   void negate() {
@@ -1691,9 +1685,9 @@ struct CAddrValue {
 
 class IAddrDb {
 public:
-  virtual bool queryAddr(const BC::Proto::AddressTy &address, CAddrValue &result) = 0;
+  virtual bool queryAddr(const BC::Script::CAddress &address, CAddrValue &result) = 0;
   virtual bool queryTop(const std::string &index, size_t offset, size_t limit,
-                        std::vector<std::pair<BC::Proto::AddressTy, CAddrValue>> &result) = 0;
+                        std::vector<std::pair<BC::Script::CAddress, CAddrValue>> &result) = 0;
 };
 
 }

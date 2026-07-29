@@ -68,6 +68,8 @@ namespace Common {
     // Prefixes
     std::vector<uint8_t> PublicKeyPrefix;
     std::vector<uint8_t> ScriptPrefix;
+    // No segwit on XPM; kept for the shared HTTP code
+    std::string Bech32Prefix;
 
     // Network
     uint16_t DefaultPort;

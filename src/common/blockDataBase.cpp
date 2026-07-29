@@ -852,6 +852,21 @@ bool reindex(BlockInMemoryIndex &blockIndex,
     if (!std::filesystem::exists(path))
       break;
 
+    // Backpressure: not-yet-connected blocks live in the cache, unthrottled
+    // loading eats all memory. Waiting is safe only at a file boundary (the
+    // consumer can always advance); the no-progress escape covers a tail that
+    // links through the next file
+    {
+      size_t lastCacheSize = storage.cache().size();
+      unsigned noProgress = 0;
+      while (storage.cache().overflow() && noProgress < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        size_t cacheSize = storage.cache().size();
+        noProgress = cacheSize < lastCacheSize ? 0 : noProgress + 1;
+        lastCacheSize = cacheSize;
+      }
+    }
+
     // outlives the workers below, which keep the pointer while they run
     std::string pathUtf8 = pathToUtf8(path);
 
@@ -884,12 +899,22 @@ bool reindex(BlockInMemoryIndex &blockIndex,
       blockOffsets.clear();
       xmstream stream(data.get(), blockFileSize);
       while (stream.remaining()) {
+        size_t headerOffset = stream.offsetOf();
+        if (data[headerOffset] == 0) {
+          // Zero padding between records is legal; resync at the first non-zero byte
+          size_t scan = headerOffset;
+          while (scan < blockFileSize && data[scan] == 0)
+            scan++;
+          if (scan == blockFileSize)
+            break;
+          stream.seekSet(scan);
+          continue;
+        }
+
         uint32_t magic;
         uint32_t blockSize;
         BC::unserialize(stream, magic);
         BC::unserialize(stream, blockSize);
-        if (!magic && !blockSize)
-          continue;
 
         if (magic != chainParams.magic) {
           LOG_F(ERROR, "Can't parse block file %s (invalid magic)", pathUtf8.c_str());

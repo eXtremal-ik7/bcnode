@@ -118,6 +118,7 @@ endif()
 add_library(bcnodecommon STATIC
   loguru.cpp
   common/base58.cpp
+  common/bech32.cpp
   common/file.cpp
   BTC/hash.cpp
   common/serializedDataCache.cpp

@@ -11,11 +11,11 @@ namespace BC {
 namespace DB {
 
 class AddrDb :
-  public CBaseMerge<BC::Proto::AddressTy, CAddrValue>,
+  public CBaseMerge<BC::Script::CAddress, CAddrValue>,
   public IAddrDb {
 
 public:
-  AddrDb() : CBaseMerge<BC::Proto::AddressTy, CAddrValue>("addrdb") {
+  AddrDb() : CBaseMerge<BC::Script::CAddress, CAddrValue>("addrdb") {
     registerIndex("balance", [](const CAddrValue &value) -> uint64_t { return value.Received - value.Sent; });
     registerIndex("tx_count", [](const CAddrValue &value) -> uint64_t { return value.TxCount; });
   }
@@ -28,9 +28,9 @@ public:
     }
   }
 
-  bool queryAddr(const BC::Proto::AddressTy &address, CAddrValue &result) final;
+  bool queryAddr(const BC::Script::CAddress &address, CAddrValue &result) final;
   bool queryTop(const std::string &index, size_t offset, size_t limit,
-                std::vector<std::pair<BC::Proto::AddressTy, CAddrValue>> &result) final;
+                std::vector<std::pair<BC::Script::CAddress, CAddrValue>> &result) final;
 
   uint32_t version() final { return 1; }
 

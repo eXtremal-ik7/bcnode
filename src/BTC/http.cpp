@@ -155,9 +155,8 @@ void BC::Network::HttpApiConnection::onAddressesInfo(rapidjson::Document &reques
     return;
   }
 
-  BC::Proto::AddressTy addressHash;
-  if (!decodeHumanReadableAddress(address, ChainParams_.PublicKeyPrefix, addressHash) &&
-      !decodeHumanReadableAddress(address, ChainParams_.ScriptPrefix, addressHash)) {
+  BC::Script::CAddress addressHash;
+  if (!BC::Script::addressFromString(address, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix, ChainParams_.Bech32Prefix, addressHash)) {
     replyWithError("REQUEST_FORMAT_ERROR", "", "address", address);
     return;
   }
@@ -224,9 +223,8 @@ void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request
   if (pagination.limit > 500)
     pagination.limit = 500;
 
-  BC::Proto::AddressTy addressHash;
-  if (!decodeHumanReadableAddress(address, ChainParams_.PublicKeyPrefix, addressHash) &&
-      !decodeHumanReadableAddress(address, ChainParams_.ScriptPrefix, addressHash)) {
+  BC::Script::CAddress addressHash;
+  if (!BC::Script::addressFromString(address, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix, ChainParams_.Bech32Prefix, addressHash)) {
     replyWithError("REQUEST_FORMAT_ERROR", "", "address", address);
     return;
   }
@@ -636,7 +634,7 @@ void BC::Network::HttpApiConnection::onStatsRichList(rapidjson::Document &reques
     return;
   }
 
-  std::vector<std::pair<BC::Proto::AddressTy, DB::CAddrValue>> top;
+  std::vector<std::pair<BC::Script::CAddress, DB::CAddrValue>> top;
   if (!Storage_->AddrDb_->queryTop(sortBy, pagination.offset, pagination.limit, top)) {
     replyWithError("INDEX_NOT_ENABLED", "", "sort_by", sortBy);
     return;
@@ -654,14 +652,9 @@ void BC::Network::HttpApiConnection::onStatsRichList(rapidjson::Document &reques
       for (size_t i = 0; i < top.size(); i++) {
         DB::CAddrValue &value = top[i].second;
 
-        auto type = static_cast<BC::Script::UnspentOutputInfo::EType>(value.AddressType);
-        std::string address58;
-        if (type == BC::Script::UnspentOutputInfo::EPubKey ||
-            type == BC::Script::UnspentOutputInfo::EPubKeyHash ||
-            type == BC::Script::UnspentOutputInfo::EScriptHash)
-          address58 = BC::Script::addressToBase58(type, top[i].first, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix);
+        std::string address58 = BC::Script::addressToString(top[i].first, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix, ChainParams_.Bech32Prefix);
         if (address58.empty())
-          address58 = top[i].first.getHexLE();
+          address58 = bin2hexLowerCase(top[i].first.Data, top[i].first.payloadSize());
 
         itemsArray.addField();
         {
@@ -993,16 +986,13 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
       const BC::Proto::TxIn &txin = tx.txIn[i];
       const auto &linkedTxin = txOutputs.TxIn[i];
       std::string address58;
-      BC::Proto::AddressTy address;
+      BC::Script::CAddress address;
       int64_t value = 0;
 
       if (!isCoinbase) {
         BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
-        if (BC::Script::extractSingleAddress(*outputInfo, address))
-          address58 = BC::Script::addressToBase58(static_cast<BC::Script::UnspentOutputInfo::EType>(outputInfo->Type),
-                                                  address,
-                                                  ChainParams_.PublicKeyPrefix,
-                                                  ChainParams_.ScriptPrefix);
+        if (BC::Script::extractAddress(*outputInfo, address))
+          address58 = BC::Script::addressToString(address, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix, ChainParams_.Bech32Prefix);
         value = outputInfo->Value;
       }
 
@@ -1032,11 +1022,11 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
     JSON::Array outputsArray(stream);
     for (size_t i = 0; i < tx.txOut.size(); i++) {
       std::string address58;
-      BC::Proto::AddressTy address;
+      BC::Script::CAddress address;
       const BC::Proto::TxOut &txOut = tx.txOut[i];
 
-      auto type = BC::Script::extractSingleAddress(txOut, address);
-      address58 = BC::Script::addressToBase58(type, address, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix);
+      if (BC::Script::extractAddress(txOut, address))
+        address58 = BC::Script::addressToString(address, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix, ChainParams_.Bech32Prefix);
 
       outputsArray.addField();
       {

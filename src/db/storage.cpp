@@ -82,9 +82,11 @@ void Storage::wakeUp()
 
 void Storage::onTimer()
 {
-  // Flush all data to disk if no new block within minute
+  // Flush all data to disk if no new block within minute; a full cache is
+  // flushed right away - the reindex loader is throttled on it
   auto now = std::chrono::steady_clock::now();
-  if (std::chrono::duration_cast<std::chrono::seconds>(now - LastFlushTime_).count() >= 60)
+  if (BlockCache.overflow() ||
+      std::chrono::duration_cast<std::chrono::seconds>(now - LastFlushTime_).count() >= 60)
     flush();
   userEventStartTimer(TimerEvent_, 10*1000000, 1);
 }
@@ -120,6 +122,10 @@ void Storage::onQueuePush()
       needFlush = false;
     }
   }
+
+  // A full cache is released only by flush; the throttled loaders wait on it
+  if (BlockCache.overflow())
+    flush();
 }
 
 void Storage::flush()
