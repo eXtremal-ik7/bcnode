@@ -13,7 +13,11 @@
 #include <rocksdb/db.h>
 #include <rocksdb/merge_operator.h>
 #include "tbb/concurrent_hash_map.h"
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <shared_mutex>
+#include <thread>
 
 namespace BC {
 namespace DB {
@@ -74,7 +78,10 @@ struct CLog {
     }
   }
 
-  void reset() {
+  // Clears both key maps but keeps the arena: concurrent readers may chase
+  // pointers into it after the per-key erase, so the arena is rewound later,
+  // by the writer, right before it reuses this log as the active one
+  void drainMaps() {
     AllKeysData.clear();
 
     // Can't use .clear() here, not thread-safe
@@ -83,7 +90,10 @@ struct CLog {
       allKeys.push_back(v.first);
     for (const auto &v: allKeys)
       CurrentKeysData.erase(v);
+  }
 
+  void reset() {
+    drainMaps();
     Log.reset();
   }
 };
@@ -140,7 +150,12 @@ public:
     Name_ = name;
   }
 
-  virtual ~Base() {}
+  // The derived destructor must run shutdownAsyncFlush() itself if async
+  // flush was enabled: the flusher dispatches virtual flushFrozenImpl, which
+  // must not happen while the derived part is already destroyed
+  virtual ~Base() {
+    shutdownAsyncFlush();
+  }
 
   bool initialize(BlockInMemoryIndex &blockIndex,
                   const std::filesystem::path &dbPath,
@@ -152,7 +167,7 @@ public:
     BaseCfg_.Version = version();
 
     BC::Common::BlockIndex *bestIndex = blockIndex.best();
-    Shards_.reset(new CLog<CKey>[BaseCfg_.ShardsNum]);
+    Shards_.reset(new CShardSlot[BaseCfg_.ShardsNum]);
     OnDiskStorage_.resize(BaseCfg_.ShardsNum);
     *forConnect = nullptr;
 
@@ -255,8 +270,11 @@ public:
     if (!PendingBlocks_.empty()) {
       auto last = PendingBlocks_.back();
       if (!last.IsConnected && last.BlockId == hash) {
+        // The pop reverts the active log only; entries that already left it
+        // (frozen or flushed) are beyond cancel - same window as a threshold
+        // flush between the pair (bug F), unchanged by async flush
         for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
-          Shards_[i].pop(hash);
+          shard(i).pop(hash);
         connectFastImpl(index, block, linkedOutputs);
         return;
       }
@@ -267,8 +285,12 @@ public:
     CurrentBlock_ = hash;
 
     for (size_t i = 0; i < BaseCfg_.ShardsNum; i++) {
-      if (Shards_[i].Log.size() >= 1u << 24)
-        flushImpl(CurrentBlock_, i);
+      if (shard(i).Log.size() >= 1u << 24) {
+        if (AsyncFlushEnabled_)
+          freezeAndScheduleFlush(i);
+        else
+          flushImpl(CurrentBlock_, i);
+      }
     }
   }
 
@@ -283,7 +305,7 @@ public:
       auto last = PendingBlocks_.back();
       if (last.IsConnected && last.BlockId == hash) {
         for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
-          Shards_[i].pop(hash);
+          shard(i).pop(hash);
         disconnectFastImpl(index, block, linkedOutputs);
         return;
       }
@@ -295,6 +317,10 @@ public:
   }
 
   void flush() final {
+    // Scheduled background flushes carry older stamps and must land first,
+    // so shard stamps only move forward
+    drainAsyncFlushes();
+
     // Freshly created database with no position yet: nothing to stamp
     if (CurrentBlock_.isNull())
       return;
@@ -335,14 +361,147 @@ public:
                                   const BC::Proto::Block&,
                                   const BC::Proto::CBlockLinkedOutputs&) {}
 
+  // Async-flush counterpart of flushImpl: write the frozen log's content and
+  // touch nothing else - the flusher drains the maps afterwards, the arena is
+  // rewound by the writer when the log is recycled. Implemented only by
+  // databases that call enableAsyncFlush()
+  virtual void flushFrozenImpl(const BC::Proto::BlockHashTy&, size_t, CLog<CKey>&) {
+    abort();
+  }
+
+protected:
+  // Two logs per shard: the active one takes writes; a threshold flush
+  // freezes it and installs the recycled spare in its place, the frozen one
+  // is written out by the background flusher. With async flush disabled only
+  // Logs[0] is ever used and behavior is identical to a single log
+  struct CShardSlot {
+    CLog<CKey> Logs[2];
+    std::atomic<CLog<CKey>*> Active{&Logs[0]};
+    std::atomic<CLog<CKey>*> Frozen{nullptr};
+    std::atomic<bool> FlushBusy{false};
+  };
+
+  // writer-side view of a shard (exactly one writer thread)
+  CLog<CKey> &shard(size_t i) { return *Shards_[i].Active.load(std::memory_order_relaxed); }
+
+  // Reader-side pair. Probe order is active first, frozen second, and the
+  // freeze publishes them in the opposite order: a reader that already sees
+  // the new (empty) active is guaranteed to see the matching frozen, so a
+  // committed key is always visible in some layer (active, frozen or disk)
+  CLog<CKey> *activeLog(size_t i) const { return Shards_[i].Active.load(std::memory_order_acquire); }
+  CLog<CKey> *frozenLog(size_t i) const { return Shards_[i].Frozen.load(std::memory_order_acquire); }
+
+  void enableAsyncFlush() {
+    if (AsyncFlushEnabled_)
+      return;
+    AsyncFlushEnabled_ = true;
+    FlushThread_ = std::thread([this]() {
+      loguru::set_thread_name((Name_ + ".flush").c_str());
+      flushLoop();
+    });
+  }
+
+  // Stops the flusher after draining its queue. The derived destructor must
+  // call this (see ~Base)
+  void shutdownAsyncFlush() {
+    if (!AsyncFlushEnabled_)
+      return;
+    {
+      std::lock_guard lock(FlushMutex_);
+      FlushStop_ = true;
+    }
+    FlushWake_.notify_all();
+    FlushThread_.join();
+    AsyncFlushEnabled_ = false;
+  }
+
+  // Waits until every scheduled background flush has fully completed; the
+  // caller then owns both logs of every shard
+  void drainAsyncFlushes() {
+    if (!AsyncFlushEnabled_)
+      return;
+    std::unique_lock lock(FlushMutex_);
+    FlushDone_.wait(lock, [this]{ return FlushQueue_.empty(); });
+  }
+
+private:
+  // Freezes the active log of a shard and hands it to the flusher. Runs in
+  // the writer thread at a block boundary, so the frozen log always holds a
+  // complete prefix ending at CurrentBlock_ - that block becomes the shard
+  // stamp of the batch. If the spare log is still being flushed, waits for
+  // it: memory stays bounded by two logs per shard
+  void freezeAndScheduleFlush(size_t i) {
+    CShardSlot &slot = Shards_[i];
+    CLog<CKey> *active = slot.Active.load(std::memory_order_relaxed);
+    CLog<CKey> *spare = active == &slot.Logs[0] ? &slot.Logs[1] : &slot.Logs[0];
+
+    {
+      std::unique_lock lock(FlushMutex_);
+      FlushDone_.wait(lock, [&]{ return !slot.FlushBusy.load(std::memory_order_acquire); });
+    }
+
+    // The spare's maps were drained by the flusher; the arena rewind happens
+    // here, in the writer, as late as possible - a reader that fetched a
+    // pointer before the drain has had a whole fill cycle to finish with it.
+    // (The residual race is the pre-existing bug A class, closed for real by
+    // EBR in the aggkv design.)
+    spare->Log.reset();
+
+    slot.Frozen.store(active, std::memory_order_release);
+    slot.Active.store(spare, std::memory_order_release);
+
+    slot.FlushBusy.store(true, std::memory_order_relaxed);
+    {
+      std::lock_guard lock(FlushMutex_);
+      FlushQueue_.push_back(SFlushJob{i, active, CurrentBlock_});
+    }
+    FlushWake_.notify_one();
+  }
+
+  void flushLoop() {
+    std::unique_lock lock(FlushMutex_);
+    for (;;) {
+      FlushWake_.wait(lock, [this]{ return !FlushQueue_.empty() || FlushStop_; });
+      if (FlushQueue_.empty())
+        return;
+
+      // The job stays in the queue while it runs: drainAsyncFlushes() waits
+      // for an empty queue, so completion means both the write and the map
+      // drain are done
+      SFlushJob job = FlushQueue_.front();
+      lock.unlock();
+      flushFrozenImpl(job.Stamp, job.ShardIndex, *job.Log);
+      job.Log->drainMaps();
+      lock.lock();
+      FlushQueue_.pop_front();
+      Shards_[job.ShardIndex].FlushBusy.store(false, std::memory_order_release);
+      FlushDone_.notify_all();
+    }
+  }
+
+  struct SFlushJob {
+    size_t ShardIndex;
+    CLog<CKey> *Log;
+    BC::Proto::BlockHashTy Stamp;
+  };
+
 protected:
   // Configuration
   CBaseCfg BaseCfg_;
 
   // Database structures
   std::vector<CEntry> PendingBlocks_;
-  std::unique_ptr<CLog<CKey>[]> Shards_;
+  std::unique_ptr<CShardSlot[]> Shards_;
   std::vector<std::unique_ptr<rocksdb::DB>> OnDiskStorage_;
+
+  // Background flush machinery
+  bool AsyncFlushEnabled_ = false;
+  std::thread FlushThread_;
+  std::mutex FlushMutex_;
+  std::condition_variable FlushWake_;
+  std::condition_variable FlushDone_;
+  std::deque<SFlushJob> FlushQueue_;
+  bool FlushStop_ = false;
 };
 
 template<typename CKey>
@@ -356,12 +515,15 @@ private:
 
 public:
   CBaseKV(const std::string &name) : Base<CKey>(name) {}
-  virtual ~CBaseKV() {}
+
+  // The flusher dispatches virtual flushFrozenImpl implemented at this
+  // level, so it must stop before this level is destroyed
+  virtual ~CBaseKV() { this->shutdownAsyncFlush(); }
   rocksdb::MergeOperator *mergeOperator() final { return nullptr; }
 
   void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
 
     CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader) + size));
     header->Key = key;
@@ -376,7 +538,7 @@ public:
 
   void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
 
     CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader)));
     header->Key = key;
@@ -389,10 +551,14 @@ public:
   bool find(const CKey &key, std::function<void(const void*, size_t)> callback) const {
     std::hash<CKey> hasher;
     size_t shardIndex = hasher(key) % this->BaseCfg_.ShardsNum;
-    auto &shard = this->Shards_[shardIndex];
 
-    // first find in mlog
-    const CHeader *header = static_cast<const CHeader*>(shard.find(key));
+    // Active first, frozen second: the newest version of a key shadows the
+    // frozen one and a tombstone in the active log must hide a frozen value
+    const CHeader *header = static_cast<const CHeader*>(this->activeLog(shardIndex)->find(key));
+    if (!header) {
+      if (CLog<CKey> *frozen = this->frozenLog(shardIndex))
+        header = static_cast<const CHeader*>(frozen->find(key));
+    }
     if (header) {
       if (header->IsConnected) {
         callback(header + 1, header->Size);
@@ -415,13 +581,24 @@ public:
   }
 
   virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) final {
-    CLog<CKey> &shard = this->Shards_[shardIndex];
+    CLog<CKey> &shard = this->shard(shardIndex);
+    writeLog(blockId, shardIndex, shard);
+    shard.reset();
+  }
+
+  void flushFrozenImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex, CLog<CKey> &log) final {
+    writeLog(blockId, shardIndex, log);
+  }
+
+private:
+  // Builds and writes the batch of one log's final values; shared by the
+  // synchronous flush and the background flusher
+  void writeLog(const BC::Proto::BlockHashTy &blockId, size_t shardIndex, CLog<CKey> &shard) {
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
     rocksdb::WriteBatch batch;
 
     batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(blockId.begin()), sizeof(BC::Proto::BlockHashTy)));
 
-    xmstream serializedKeys;
     for (const auto &v: shard.AllKeysData) {
       if (v.second.empty())
         continue;
@@ -439,7 +616,6 @@ public:
     }
 
     storage->Write(rocksdb::WriteOptions(), &batch);
-    shard.reset();
   }
 };
 
@@ -513,7 +689,7 @@ public:
 
   void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size, size_t count) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
 
     // get current array size
     const void *prevData = nullptr;
@@ -541,7 +717,7 @@ public:
 
   void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t count) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
 
     // get current array size
     int64_t prevCount = 0;
@@ -561,7 +737,7 @@ public:
   bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalTxCount) {
     std::hash<CKey> hasher;
     size_t shardIdx = hasher(key) % this->BaseCfg_.ShardsNum;
-    CLog<CKey> &mlog = this->Shards_[shardIdx];
+    CLog<CKey> &mlog = this->shard(shardIdx);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIdx].get();
 
     if (count == 0)
@@ -631,7 +807,7 @@ public:
   }
 
   virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) final {
-    CLog<CKey> &shard = this->Shards_[shardIndex];
+    CLog<CKey> &shard = this->shard(shardIndex);
     MLog &mlog = shard.Log;
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
 
@@ -838,7 +1014,7 @@ public:
   // window-relative running sums, rebased to absolute values at flush
   void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CItem *items, size_t count) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
 
     const void *prevData = nullptr;
     size_t prevSize = 0;
@@ -871,7 +1047,7 @@ public:
 
   void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t count) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
 
     int64_t prevCount = 0;
     const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key));
@@ -889,7 +1065,7 @@ public:
   bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalCount) {
     std::hash<CKey> hasher;
     size_t shardIdx = hasher(key) % this->BaseCfg_.ShardsNum;
-    CLog<CKey> &mlog = this->Shards_[shardIdx];
+    CLog<CKey> &mlog = this->shard(shardIdx);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIdx].get();
 
     if (count == 0)
@@ -974,7 +1150,7 @@ public:
   }
 
   virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) final {
-    CLog<CKey> &shard = this->Shards_[shardIndex];
+    CLog<CKey> &shard = this->shard(shardIndex);
     MLog &mlog = shard.Log;
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
 
@@ -1316,7 +1492,7 @@ public:
 
   void merge(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CValue &delta) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->Shards_[hasher(key) % this->BaseCfg_.ShardsNum];
+    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
 
     CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader)));
     header->Key = key;
@@ -1330,7 +1506,8 @@ public:
   bool find(const CKey &key, CValue &value) const {
     std::hash<CKey> hasher;
     size_t shardIndex = hasher(key) % this->BaseCfg_.ShardsNum;
-    CLog<CKey> &shard = this->Shards_[shardIndex];
+    // async flush is never enabled for merge tables, the frozen log can't exist
+    CLog<CKey> &shard = *this->activeLog(shardIndex);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
 
     // Shared lock pairs the on-disk state with the memtable window: flush publishes
@@ -1355,7 +1532,7 @@ public:
   }
 
   virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) final {
-    CLog<CKey> &shard = this->Shards_[shardIndex];
+    CLog<CKey> &shard = this->shard(shardIndex);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
 
     rocksdb::WriteBatch batch;

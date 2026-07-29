@@ -73,7 +73,7 @@ bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::
       }
     }
 
-    txIndexMap[tx.getTxId()] = txIdx;
+    txIndexMap[tx.getTxId()] = static_cast<uint32_t>(txIdx);
   }
 
   linkedOutputs.AllOutputsFound = allOutputsFound;

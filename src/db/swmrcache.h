@@ -22,6 +22,9 @@
 #include <cstring>
 #include <type_traits>
 #include <vector>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 template<typename ValueT>
 class CSwmrCache {
@@ -86,8 +89,25 @@ private:
     return ref;
   }
 
+  // fastrange: high 64 bits of h * NumBuckets_
   size_t bucketOf(uint64_t h) const {
+#ifdef _MSC_VER
+    unsigned __int64 hi;
+    _umul128(h, NumBuckets_, &hi);
+    return static_cast<size_t>(hi);
+#else
     return static_cast<size_t>((static_cast<unsigned __int128>(h) * NumBuckets_) >> 64);
+#endif
+  }
+
+  static unsigned ctz64(uint64_t v) {
+#ifdef _MSC_VER
+    unsigned long index;
+    _BitScanForward64(&index, v);
+    return static_cast<unsigned>(index);
+#else
+    return static_cast<unsigned>(__builtin_ctzll(v));
+#endif
   }
 
   SSlot &slotAt(size_t bucket, unsigned i) { return Slots_[bucket * SLOTS_PER_BUCKET + i]; }
@@ -151,7 +171,7 @@ private:
       uint64_t w = Tags_[b].load(std::memory_order_relaxed);
       uint64_t mask = matchMask(w, tag);
       while (mask) {
-        unsigned i = static_cast<unsigned>(__builtin_ctzll(mask)) >> 3;
+        unsigned i = ctz64(mask) >> 3;
         mask &= mask - 1;
         if (tagAt(w, i) != tag)
           continue;
@@ -330,7 +350,7 @@ public:
       uint64_t w = Tags_[b].load(std::memory_order_relaxed);
       uint64_t mask = matchMask(w, ref.Tag);
       while (mask) {
-        unsigned i = static_cast<unsigned>(__builtin_ctzll(mask)) >> 3;
+        unsigned i = ctz64(mask) >> 3;
         mask &= mask - 1;
         if (tagAt(w, i) != ref.Tag)
           continue;

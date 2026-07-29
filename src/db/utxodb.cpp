@@ -15,6 +15,11 @@ namespace DB {
 
 static const char *CacheDumpFileName = "cache.dat";
 
+// the raw on-disk key is Tx immediately followed by Index; the field-wise
+// copy in warmupFromDb() relies on it
+static_assert(sizeof(CUnspentOutputKey) == sizeof(BC::Proto::TxHashTy) + sizeof(uint32_t),
+              "unexpected padding in CUnspentOutputKey");
+
 // (creationHeight << 1) | isCoinbase, appended to every on-disk value
 static inline uint32_t packHeight(uint32_t height, bool isCoinbase)
 {
@@ -64,6 +69,11 @@ bool UTXODb::queryCache(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, x
 
 bool UTXODb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
 {
+  // Threshold flushes leave the connect path to a background thread; the
+  // escape hatch exists for A/B runs on the bench stand
+  if (cfg->lookupBoolean("utxo", "asyncFlush", true))
+    enableAsyncFlush();
+
   int cacheSizeMb = cfg->lookupInt("utxo", "cacheSizeMb", 0);
   if (cacheSizeMb <= 0)
     return true;
@@ -127,8 +137,11 @@ void UTXODb::warmupFromDb()
       if (keySlice.size() != sizeof(CUnspentOutputKey) || valueSlice.size() < sizeof(uint32_t))
         continue;
 
+      // field-wise copy: the key type is not trivially copyable, but the
+      // on-disk layout is exactly Tx followed by Index (no padding)
       CUnspentOutputKey key;
-      memcpy(&key, keySlice.data(), sizeof(key));
+      memcpy(key.Tx.begin(), keySlice.data(), sizeof(BC::Proto::TxHashTy));
+      memcpy(&key.Index, keySlice.data() + sizeof(BC::Proto::TxHashTy), sizeof(uint32_t));
       uint32_t packed;
       memcpy(&packed, valueSlice.data() + valueSlice.size() - sizeof(uint32_t), sizeof(uint32_t));
       cacheAdd(key, valueSlice.data(), valueSlice.size() - sizeof(uint32_t), packed >> 1);
@@ -201,7 +214,7 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
     key.Tx = coinbaseTx.getTxId();
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
       const auto &txOut = coinbaseTx.txOut[i];
-      key.Index = i;
+      key.Index = static_cast<uint32_t>(i);
 
       serialized.reset();
       BTC::Script::parseTransactionOutput(txOut, serialized);
@@ -231,7 +244,7 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
     key.Tx = tx.getTxId();
     for (size_t j = 0; j < tx.txOut.size(); j++) {
       const auto &txOut = tx.txOut[j];
-      key.Index = j;
+      key.Index = static_cast<uint32_t>(j);
 
       serialized.reset();
       BTC::Script::parseTransactionOutput(txOut, serialized);
@@ -275,7 +288,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
       BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
       if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
-        key.Index = i;
+        key.Index = static_cast<uint32_t>(i);
         this->remove(blockId, key);
         cacheRemove(key);
       }
@@ -311,7 +324,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
       BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
       if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
-        key.Index = j;
+        key.Index = static_cast<uint32_t>(j);
         this->remove(blockId, key);
         cacheRemove(key);
       }
@@ -342,7 +355,7 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
       BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
       if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
-        key.Index = i;
+        key.Index = static_cast<uint32_t>(i);
         cacheAdd(key, serialized.data(), serialized.sizeOf(), height);
       }
     }
@@ -363,7 +376,7 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
       BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
       if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
-        key.Index = j;
+        key.Index = static_cast<uint32_t>(j);
         cacheAdd(key, serialized.data(), serialized.sizeOf(), height);
       }
     }
@@ -393,7 +406,7 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
       BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
       if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
-        key.Index = i;
+        key.Index = static_cast<uint32_t>(i);
         cacheRemove(key);
       }
     }
@@ -419,7 +432,7 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
       BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
       if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
-        key.Index = j;
+        key.Index = static_cast<uint32_t>(j);
         cacheRemove(key);
       }
     }
