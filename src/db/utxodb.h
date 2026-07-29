@@ -71,22 +71,26 @@ private:
   void connectImpl(const BC::Common::BlockIndex *index,
                    const BC::Proto::Block &block,
                    const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                   const BC::Proto::CBlockValidationData &validationData,
                    BlockInMemoryIndex &blockIndex,
                    BlockDatabase &blockDb);
 
   void disconnectImpl(const BC::Common::BlockIndex *index,
                       const BC::Proto::Block &block,
                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                      const BC::Proto::CBlockValidationData &validationData,
                       BlockInMemoryIndex &blockIndex,
                       BlockDatabase &blockDb);
 
   void connectFastImpl(const BC::Common::BlockIndex *index,
                        const BC::Proto::Block &block,
-                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs) final;
+                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                       const BC::Proto::CBlockValidationData &validationData) final;
 
   void disconnectFastImpl(const BC::Common::BlockIndex *index,
                           const BC::Proto::Block &block,
-                          const BC::Proto::CBlockLinkedOutputs &linkedOutputs) final;
+                          const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                          const BC::Proto::CBlockValidationData &validationData) final;
 
   // No-dump warmup: one streaming pass over the shards, inserting every
   // record with its true creation height; the floor eviction keeps roughly

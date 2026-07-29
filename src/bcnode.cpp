@@ -237,10 +237,12 @@ int main(int argc, char **argv)
       BC::Common::CIndexCacheObject *genesisObject = new BC::Common::CIndexCacheObject(nullptr, nullptr, stream.sizeOf(), 0, unpacked, unpackedSize);
 
       auto &outputs = genesisObject->linkedOutputs();
-      outputs.AllOutputsFound = true;
       outputs.Tx.resize(context.ChainParams.GenesisBlock.vtx.size());
       for (size_t i = 0; i < context.ChainParams.GenesisBlock.vtx.size(); i++)
         outputs.Tx[i].TxIn.resize(context.ChainParams.GenesisBlock.vtx[i].txIn.size());
+
+      BC::Common::initializeValidationContext(*unpacked, genesisObject->validationData());
+      genesisObject->validationData().AllOutputsFound = true;
 
       genesisIndex->Serialized.reset(genesisObject);
     }

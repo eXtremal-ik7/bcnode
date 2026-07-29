@@ -121,12 +121,14 @@ public:
   virtual void connect(const BC::Common::BlockIndex *index,
                        const BC::Proto::Block &block,
                        const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                       const BC::Proto::CBlockValidationData &validationData,
                        BlockInMemoryIndex &blockIndex,
                        BlockDatabase &blockDb) = 0;
 
   virtual void disconnect(const BC::Common::BlockIndex *index,
                           const BC::Proto::Block &block,
                           const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                          const BC::Proto::CBlockValidationData &validationData,
                           BlockInMemoryIndex &blockIndex,
                           BlockDatabase &blockDb) = 0;
 
@@ -285,6 +287,7 @@ public:
   void connect(const BC::Common::BlockIndex *index,
                const BC::Proto::Block &block,
                const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+               const BC::Proto::CBlockValidationData &validationData,
                BlockInMemoryIndex &blockIndex,
                BlockDatabase &blockDb) final {
     auto hash = index->Header.GetHash();
@@ -297,12 +300,12 @@ public:
         // flush between the pair (bug F), unchanged by async flush
         for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
           shard(i).pop(hash);
-        connectFastImpl(index, block, linkedOutputs);
+        connectFastImpl(index, block, linkedOutputs, validationData);
         return;
       }
     }
 
-    connectImpl(index, block, linkedOutputs, blockIndex, blockDb);
+    connectImpl(index, block, linkedOutputs, validationData, blockIndex, blockDb);
     PendingBlocks_.emplace_back(hash, true);
     CurrentBlock_ = hash;
 
@@ -319,6 +322,7 @@ public:
   void disconnect(const BC::Common::BlockIndex *index,
                   const BC::Proto::Block &block,
                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  const BC::Proto::CBlockValidationData &validationData,
                   BlockInMemoryIndex &blockIndex,
                   BlockDatabase &blockDb) final {
     auto hash = index->Header.GetHash();
@@ -328,12 +332,12 @@ public:
       if (last.IsConnected && last.BlockId == hash) {
         for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
           shard(i).pop(hash);
-        disconnectFastImpl(index, block, linkedOutputs);
+        disconnectFastImpl(index, block, linkedOutputs, validationData);
         return;
       }
     }
 
-    disconnectImpl(index, block, linkedOutputs, blockIndex, blockDb);
+    disconnectImpl(index, block, linkedOutputs, validationData, blockIndex, blockDb);
     PendingBlocks_.emplace_back(hash, false);
     CurrentBlock_ = index->Header.hashPrevBlock;
   }
@@ -362,12 +366,14 @@ public:
   virtual void connectImpl(const BC::Common::BlockIndex *index,
                            const BC::Proto::Block &block,
                            const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                           const BC::Proto::CBlockValidationData &validationData,
                            BlockInMemoryIndex &blockIndex,
                            BlockDatabase &blockDb) = 0;
 
   virtual void disconnectImpl(const BC::Common::BlockIndex *index,
                               const BC::Proto::Block &block,
                               const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                              const BC::Proto::CBlockValidationData &validationData,
                               BlockInMemoryIndex &blockIndex,
                               BlockDatabase &blockDb) = 0;
 
@@ -377,11 +383,13 @@ public:
   // state here
   virtual void connectFastImpl(const BC::Common::BlockIndex*,
                                const BC::Proto::Block&,
-                               const BC::Proto::CBlockLinkedOutputs&) {}
+                               const BC::Proto::CBlockLinkedOutputs&,
+                               const BC::Proto::CBlockValidationData&) {}
 
   virtual void disconnectFastImpl(const BC::Common::BlockIndex*,
                                   const BC::Proto::Block&,
-                                  const BC::Proto::CBlockLinkedOutputs&) {}
+                                  const BC::Proto::CBlockLinkedOutputs&,
+                                  const BC::Proto::CBlockValidationData&) {}
 
   // Async-flush counterpart of flushImpl: write the frozen log's content and
   // touch nothing else - the flusher drains the maps afterwards, the arena is

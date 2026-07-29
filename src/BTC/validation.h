@@ -3,7 +3,9 @@
 #include "proto.h"
 #include "script.h"
 #include "merkleTree.h"
+#include <cassert>
 #include <limits>
+#include <memory>
 
 namespace BTC {
 
@@ -11,6 +13,10 @@ template<typename BlockTy>
 void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidationData &validation)
 {
   validation.HasWitnessData = false;
+  validation.AllOutputsFound = false;
+  validation.TxIds.resize(block.vtx.size());
+  for (size_t i = 0; i < block.vtx.size(); i++)
+    validation.TxIds[i] = block.vtx[i].getTxId();
   validation.TxData.resize(block.vtx.size());
   for (size_t i = 0; i < block.vtx.size(); i++) {
     validation.TxData[i].ScriptSigKnownValid.resize(block.vtx[i].txIn.size());
@@ -36,6 +42,20 @@ bool validateBlockSize(const BlockTy &block, size_t limit, std::string &error, C
 template<typename BlockTy>
 bool validateMerkleRoot(const BlockTy &block, std::string &error) {
   bool result = calculateBlockMerkleRoot(block) == block.header.hashMerkleRoot;
+  if (!result)
+    error = "bad-merkleroot";
+  return result;
+}
+
+// Variant consuming txids precomputed by validationDataInitialize - checking
+// them against the header makes them trustworthy for every later consumer.
+// calculateMerkleRoot folds the array in place, hence the copy
+template<typename BlockTy>
+bool validateMerkleRoot(const BlockTy &block, const xvector<Proto::TxHashTy> &txIds, std::string &error) {
+  assert(txIds.size() == block.vtx.size());
+  std::unique_ptr<BaseBlob<256>[]> hashes(new BaseBlob<256>[txIds.size()]);
+  std::copy(txIds.begin(), txIds.end(), hashes.get());
+  bool result = calculateMerkleRoot(hashes.get(), txIds.size()) == block.header.hashMerkleRoot;
   if (!result)
     error = "bad-merkleroot";
   return result;

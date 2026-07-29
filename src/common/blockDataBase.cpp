@@ -27,15 +27,16 @@ struct BlockPosition {
   uint32_t size;
 };
 
-bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::Block &block, const BC::DB::UTXODb &db)
+bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::Block &block, const BC::DB::UTXODb &db)
 {
   std::unordered_map<BC::Proto::TxHashTy, uint32_t> txIndexMap;
   std::unordered_set<CUnspentOutputKey> removed;
 
+  assert(validationData.TxIds.size() == block.vtx.size());
   linkedOutputs.Tx.resize(block.vtx.size());
 
   if (!block.vtx.empty())
-    txIndexMap[block.vtx[0].getTxId()] = 0;
+    txIndexMap[validationData.TxIds[0]] = 0;
 
   bool allOutputsFound = true;
   for (size_t txIdx = 1; txIdx < block.vtx.size(); txIdx++) {
@@ -73,10 +74,10 @@ bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::
       }
     }
 
-    txIndexMap[tx.getTxId()] = static_cast<uint32_t>(txIdx);
+    txIndexMap[validationData.TxIds[txIdx]] = static_cast<uint32_t>(txIdx);
   }
 
-  linkedOutputs.AllOutputsFound = allOutputsFound;
+  validationData.AllOutputsFound = allOutputsFound;
   return true;
 }
 
@@ -187,7 +188,7 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
                          bool silent = true)
 {
   // Locate linked transaction outputs
-  if (!linkedOutputs.AllOutputsFound && !initializeLinkedOutputsContextual(linkedOutputs, block, storage.utxodb())) {
+  if (!validationData.AllOutputsFound && !initializeLinkedOutputsContextual(linkedOutputs, block, storage.utxodb())) {
     LOG_F(ERROR,
           "Block %s validation failed (non-existent utxo)",
           block.header.GetHash().getHexLE().c_str());
@@ -208,7 +209,7 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
     LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
   index->Prev->Next = index;
   blockIndex.blockHeightIndex()[index->Height] = index;
-  storage.add(BC::DB::Connect, index, block, linkedOutputs, blockIndex);
+  storage.add(BC::DB::Connect, index, block, linkedOutputs, validationData, blockIndex);
   blockIndex.setBest(index);
   return true;
 }
@@ -216,6 +217,7 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
 static void DisconnectBlock(BlockInMemoryIndex &blockIndex,
                             BC::Proto::Block &block,
                             BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                            BC::Proto::CBlockValidationData &validationData,
                             BC::DB::Storage &storage,
                             BC::Common::BlockIndex *index,
     bool silent = true)
@@ -224,7 +226,7 @@ static void DisconnectBlock(BlockInMemoryIndex &blockIndex,
     LOG_F(INFO, "Disconnect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
   index->Prev->Next = nullptr;
   blockIndex.blockHeightIndex()[index->Height] = nullptr;
-  storage.add(BC::DB::Disconnect, index, block, linkedOutputs, blockIndex);
+  storage.add(BC::DB::Disconnect, index, block, linkedOutputs, validationData, blockIndex);
 }
 
 static void BuildHeaderChain(BC::Common::ChainParams &chainParams, BC::Common::BlockIndex *start)
@@ -294,8 +296,12 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockInde
     xmstream stream(linkedOutputsData.get(), index->LinkedOutputsSerializedSize);
     if (!BTC::unserializeAndCheck(stream, object.get()->linkedOutputs()))
       return nullptr;
-    object.get()->linkedOutputs().AllOutputsFound = true;
   }
+
+  // A disk-reloaded object must satisfy the same invariant as a fresh one:
+  // validation data (txids included) is filled before any connect/disconnect
+  BC::Common::initializeValidationContext(*block, object.get()->validationData());
+  object.get()->validationData().AllOutputsFound = true;
 
   return object;
 }
@@ -333,7 +339,7 @@ static bool switchTo(BC::Common::BlockIndex *newBest,
     while (sb != lb) {
       newPath.push_back(lb);
       auto object = objectByIndexChecked(sb, storage.blockDb());
-      DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), storage, sb, false);
+      DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), storage, sb, false);
       sb = sb->Prev;
       lb = lb->Prev;
     }
@@ -345,14 +351,14 @@ static bool switchTo(BC::Common::BlockIndex *newBest,
     while (lb->Height > sbHeight) {
       BC::Proto::Block diskBlock;
       auto object = objectByIndexChecked(lb, storage.blockDb());
-      DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), storage, lb, false);
+      DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), storage, lb, false);
       lb = lb->Prev;
     }
     while (sb != lb) {
       BC::Proto::Block diskBlock;
       newPath.push_back(sb);
       auto object = objectByIndexChecked(lb, storage.blockDb());
-      DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), storage, lb, false);
+      DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), storage, lb, false);
       sb = sb->Prev;
       lb = lb->Prev;
     }
@@ -416,8 +422,8 @@ static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPar
           continue;
         }
       }
-    } else if (linkedOutputs.AllOutputsFound) {
-      storage.add(BC::DB::WriteData, current, *block, linkedOutputs, blockIndex, false);
+    } else if (validationData.AllOutputsFound) {
+      storage.add(BC::DB::WriteData, current, *block, linkedOutputs, validationData, blockIndex, false);
     }
 
     // drop block data cache for connected block
@@ -533,9 +539,10 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
     }
   }
 
-  // Validate block
-  initializeLinkedOutputs(serialized->linkedOutputs(), *block, storage.utxodb());
+  // Validate block; txids are computed once here and consumed by the utxo
+  // linker, the merkle check and the databases
   BC::Common::initializeValidationContext(*block, serialized->validationData());
+  initializeLinkedOutputs(serialized->linkedOutputs(), serialized->validationData(), *block, storage.utxodb());
 
   std::string error;
   unsigned blockGeneration = BC::Common::checkBlockStandalone(*block, serialized->validationData(), chainParams, error);

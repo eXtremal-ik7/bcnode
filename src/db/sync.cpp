@@ -13,7 +13,7 @@ bool dbDisconnectBlocks(BC::DB::BaseInterface &db,
     auto object = objectByIndex(index, storage.blockDb());
     if (!object.get())
       return false;
-    db.disconnect(index, *object.get()->block(), object.get()->linkedOutputs(), blockIndex, storage.blockDb());
+    db.disconnect(index, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationDataConst(), blockIndex, storage.blockDb());
   }
 
   return true;
@@ -50,17 +50,23 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
   LOG_F(INFO, "Update %s: connecting %u blocks", name, count);
 
   auto handler = [&utxoDb, utxoBestHeight, &archiveDatabases, &blockIndex, &storage](BC::Common::BlockIndex *index, const BC::Proto::Block &block, const BC::Proto::CBlockLinkedOutputs &linkedOutputs) {
+    // The bulk reader hands out raw disk data; rebuild the validation context
+    // to keep the connect invariant (txids precomputed on every path)
+    BC::Proto::CBlockValidationData validationData;
+    BC::Common::initializeValidationContext(block, validationData);
+    validationData.AllOutputsFound = true;
+
     // Connect archive
     for (size_t i = 0; i < archiveDatabases.size(); i++) {
       BC::Common::BlockIndex *best = archiveDatabases[i].BestBlock;
       uint32_t connectHeight = best ? best->Height : std::numeric_limits<uint32_t>::max();
       if (index->Height >= connectHeight)
-        archiveDatabases[i].Base->connect(index, block, linkedOutputs, blockIndex, storage.blockDb());
+        archiveDatabases[i].Base->connect(index, block, linkedOutputs, validationData, blockIndex, storage.blockDb());
     }
 
     // Connect utxo
     if (index->Height >= utxoBestHeight)
-      utxoDb.connect(index, block, linkedOutputs, blockIndex, storage.blockDb());
+      utxoDb.connect(index, block, linkedOutputs, validationData, blockIndex, storage.blockDb());
   };
 
   BC::Common::BlockIndex *index = firstCommon;

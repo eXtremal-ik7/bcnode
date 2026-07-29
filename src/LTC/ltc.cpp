@@ -213,7 +213,7 @@ bool checkBlockStandalone(const LTC::Proto::Block &block,
   // The extension block is outside the size limit, as it is outside Core's
   isValid &= BTC::validateBlockSize(block, LTC::Configuration::MaxBlockSize, error,
                                     LTC::Proto::SerializeCtx(false, false));
-  isValid &= BTC::validateMerkleRoot(block, error);
+  isValid &= BTC::validateMerkleRoot(block, validation.TxIds, error);
   isValid &= BTC::validateWitnessCommitment(block, hasWitnessData, error);
 
   validation.HasWitnessData = hasWitnessData;

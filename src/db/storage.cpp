@@ -58,15 +58,16 @@ void Storage::add(ActionTy type,
                   BC::Common::BlockIndex *index,
                   const BC::Proto::Block &block,
                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  const BC::Proto::CBlockValidationData &validationData,
                   BlockInMemoryIndex &blockIndex,
                   bool wakeUp)
 {
   switch (type) {
     case Connect :
-      UTXODb_.connect(index, block, linkedOutputs, blockIndex, *BlockDb_);
+      UTXODb_.connect(index, block, linkedOutputs, validationData, blockIndex, *BlockDb_);
       break;
     case Disconnect:
-      UTXODb_.disconnect(index, block, linkedOutputs, blockIndex, *BlockDb_);
+      UTXODb_.disconnect(index, block, linkedOutputs, validationData, blockIndex, *BlockDb_);
       break;
     default:
       break;
@@ -104,13 +105,13 @@ void Storage::onQueuePush()
     assert(object.get());
     switch (task.Type) {
       case Connect :
-        Archive_->connect(task.Index, *object.get()->block(), object.get()->linkedOutputs(), *BlockIndex_, *BlockDb_);
+        Archive_->connect(task.Index, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationDataConst(), *BlockIndex_, *BlockDb_);
         if (!BlockDb_->writeBlock(task.Index, &needFlush))
           ErrorHandler_();
         CachedBlocks_.push_back(task.Index);
         break;
       case Disconnect :
-        Archive_->disconnect(task.Index, *object.get()->block(), object.get()->linkedOutputs(), *BlockIndex_, *BlockDb_);
+        Archive_->disconnect(task.Index, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationDataConst(), *BlockIndex_, *BlockDb_);
         break;
       case WriteData :
         if (!BlockDb_->writeBlock(task.Index, &needFlush))

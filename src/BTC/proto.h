@@ -264,12 +264,10 @@ struct NetworkAddress {
   };
 
   struct CBlockLinkedOutputs {
-    bool AllOutputsFound = false;
     xvector<CTxLinkedOutputs> Tx;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      // AllOutputsFound is memory only
       op.io(d.Tx);
     }
   };
@@ -282,8 +280,15 @@ struct NetworkAddress {
     xvector<CTxInValidationData> ScriptSigKnownValid;
   };
 
+  // Memory only, never serialized: per-block precomputed context. Every path
+  // that reaches a database connect/disconnect runs validationDataInitialize
+  // first, so consumers assert on it instead of recomputing
   struct CBlockValidationData {
     bool HasWitnessData = false;
+    bool AllOutputsFound = false;
+    // txid of every transaction, parallel to block.vtx ([0] = coinbase);
+    // checkBlockStandalone verifies them against the header merkle root
+    xvector<TxHashTy> TxIds;
     xvector<CTxValidationData> TxData;
   };
 

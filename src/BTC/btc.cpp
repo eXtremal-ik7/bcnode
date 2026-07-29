@@ -261,7 +261,7 @@ bool checkBlockStandalone(const Proto::Block &block, Proto::CBlockValidationData
 
   // Block validation
   isValid &= BTC::validateBlockSize(block, BTC::Configuration::MaxBlockSize, error);
-  isValid &= BTC::validateMerkleRoot(block, error);
+  isValid &= BTC::validateMerkleRoot(block, validation.TxIds, error);
   isValid &= BTC::validateWitnessCommitment(block, hasWitnessData, error);
 
   validation.HasWitnessData = hasWitnessData;

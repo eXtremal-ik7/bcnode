@@ -48,6 +48,7 @@ public:
            BC::Common::BlockIndex *index,
            const BC::Proto::Block &block,
            const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+           const BC::Proto::CBlockValidationData &validationData,
            BlockInMemoryIndex &blockIndex,
            bool wakeUp = false);
 

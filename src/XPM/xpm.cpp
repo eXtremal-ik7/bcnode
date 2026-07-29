@@ -383,7 +383,7 @@ bool checkBlockStandalone(const XPM::Proto::Block &block,
 
   // Block validation
   isValid &= BTC::validateBlockSize(block, XPM::Configuration::MaxBlockSize, error);
-  isValid &= BTC::validateMerkleRoot(block, error);
+  isValid &= BTC::validateMerkleRoot(block, validation.TxIds, error);
 
   validation.HasWitnessData = false;
 

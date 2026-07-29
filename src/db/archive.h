@@ -26,19 +26,21 @@ public:
   void connect(const BC::Common::BlockIndex *index,
                const BC::Proto::Block &block,
                const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+               const BC::Proto::CBlockValidationData &validationData,
                BlockInMemoryIndex &blockIndex,
                BlockDatabase &blockDb) {
     for (auto &db: AllDb_)
-      db->connect(index, block, linkedOutputs, blockIndex, blockDb);
+      db->connect(index, block, linkedOutputs, validationData, blockIndex, blockDb);
   }
 
   void disconnect(const BC::Common::BlockIndex *index,
                   const BC::Proto::Block &block,
                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  const BC::Proto::CBlockValidationData &validationData,
                   BlockInMemoryIndex &blockIndex,
                   BlockDatabase &blockDb) {
     for (auto &db: AllDb_)
-      db->disconnect(index, block, linkedOutputs, blockIndex, blockDb);
+      db->disconnect(index, block, linkedOutputs, validationData, blockIndex, blockDb);
   }
 
   void flush() {

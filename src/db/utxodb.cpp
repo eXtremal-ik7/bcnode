@@ -195,12 +195,14 @@ void UTXODb::saveCache()
 void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
                          const BC::Proto::Block &block,
                          const BC::Proto::CBlockLinkedOutputs&,
+                         const BC::Proto::CBlockValidationData &validationData,
                          BlockInMemoryIndex&,
                          BlockDatabase&)
 {
   SmallStream<1024> serialized;
   const auto blockId = index->Header.GetHash();
   const uint32_t height = index->Height;
+  assert(validationData.TxIds.size() == block.vtx.size());
 
   if (Cache_.enabled())
     Cache_.maintain();
@@ -211,7 +213,7 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
     // txin in coinbase can't spent anything
     const auto &coinbaseTx = block.vtx[0];
     const uint32_t packed = packHeight(height, true);
-    key.Tx = coinbaseTx.getTxId();
+    key.Tx = validationData.TxIds[0];
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
       const auto &txOut = coinbaseTx.txOut[i];
       key.Index = static_cast<uint32_t>(i);
@@ -241,7 +243,7 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
       cacheRemove(key);
     }
 
-    key.Tx = tx.getTxId();
+    key.Tx = validationData.TxIds[i];
     for (size_t j = 0; j < tx.txOut.size(); j++) {
       const auto &txOut = tx.txOut[j];
       key.Index = static_cast<uint32_t>(j);
@@ -262,11 +264,13 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
 void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
                             const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                            const BC::Proto::CBlockValidationData &validationData,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
   SmallStream<1024> serialized;
   const auto blockId = index->Header.GetHash();
+  assert(validationData.TxIds.size() == block.vtx.size());
   // The creation height of a restored output is unknown here; the height of
   // the disconnected block is an upper bound (and its coinbase flag is
   // unknowable, but a coinbase spend sits 100+ blocks below any reorg). It
@@ -282,7 +286,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
   {
     // txin in coinbase can't spent anything
     const auto &coinbaseTx = block.vtx[0];
-    key.Tx = coinbaseTx.getTxId();
+    key.Tx = validationData.TxIds[0];
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
       serialized.reset();
       BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
@@ -318,7 +322,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
       cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height);
     }
 
-    key.Tx = tx.getTxId();
+    key.Tx = validationData.TxIds[i];
     for (size_t j = 0; j < tx.txOut.size(); j++) {
       serialized.reset();
       BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
@@ -334,8 +338,10 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
 
 void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
                              const BC::Proto::Block &block,
-                             const BC::Proto::CBlockLinkedOutputs&)
+                             const BC::Proto::CBlockLinkedOutputs&,
+                             const BC::Proto::CBlockValidationData &validationData)
 {
+  assert(validationData.TxIds.size() == block.vtx.size());
   if (!Cache_.enabled())
     return;
 
@@ -349,7 +355,7 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
   CUnspentOutputKey key;
   {
     const auto &coinbaseTx = block.vtx[0];
-    key.Tx = coinbaseTx.getTxId();
+    key.Tx = validationData.TxIds[0];
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
       serialized.reset();
       BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
@@ -370,7 +376,7 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
       cacheRemove(key);
     }
 
-    key.Tx = tx.getTxId();
+    key.Tx = validationData.TxIds[i];
     for (size_t j = 0; j < tx.txOut.size(); j++) {
       serialized.reset();
       BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
@@ -385,8 +391,10 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
 
 void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
                                 const BC::Proto::Block &block,
-                                const BC::Proto::CBlockLinkedOutputs &linkedOutputs)
+                                const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                                const BC::Proto::CBlockValidationData &validationData)
 {
+  assert(validationData.TxIds.size() == block.vtx.size());
   if (!Cache_.enabled())
     return;
 
@@ -400,7 +408,7 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
   CUnspentOutputKey key;
   {
     const auto &coinbaseTx = block.vtx[0];
-    key.Tx = coinbaseTx.getTxId();
+    key.Tx = validationData.TxIds[0];
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
       serialized.reset();
       BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
@@ -426,7 +434,7 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
       cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height);
     }
 
-    key.Tx = tx.getTxId();
+    key.Tx = validationData.TxIds[i];
     for (size_t j = 0; j < tx.txOut.size(); j++) {
       serialized.reset();
       BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);

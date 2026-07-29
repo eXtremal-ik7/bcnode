@@ -38,6 +38,7 @@ bool TxDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 void TxDb::connectImpl(const BC::Common::BlockIndex *index,
                        const BC::Proto::Block &block,
                        const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                       const BC::Proto::CBlockValidationData&,
                        BlockInMemoryIndex&,
                        BlockDatabase&)
 {
@@ -60,6 +61,7 @@ void TxDb::connectImpl(const BC::Common::BlockIndex *index,
 void TxDb::disconnectImpl(const BC::Common::BlockIndex *index,
                           const BC::Proto::Block &block,
                           const BC::Proto::CBlockLinkedOutputs&,
+                          const BC::Proto::CBlockValidationData&,
                           BlockInMemoryIndex&,
                           BlockDatabase&)
 {

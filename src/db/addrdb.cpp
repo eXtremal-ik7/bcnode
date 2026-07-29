@@ -85,6 +85,7 @@ bool AddrDb::queryTop(const std::string &index, size_t offset, size_t limit,
 void AddrDb::connectImpl(const BC::Common::BlockIndex *index,
                          const BC::Proto::Block &block,
                          const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                         const BC::Proto::CBlockValidationData&,
                          BlockInMemoryIndex&,
                          BlockDatabase&)
 {
@@ -102,6 +103,7 @@ void AddrDb::connectImpl(const BC::Common::BlockIndex *index,
 void AddrDb::disconnectImpl(const BC::Common::BlockIndex *index,
                             const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                            const BC::Proto::CBlockValidationData&,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {

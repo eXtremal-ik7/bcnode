@@ -28,6 +28,7 @@ bool AddrHistoryDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
                                 const BC::Proto::Block &block,
                                 const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                                const BC::Proto::CBlockValidationData&,
                                 BlockInMemoryIndex&,
                                 BlockDatabase&)
 {
@@ -102,6 +103,7 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
 void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index,
                                    const BC::Proto::Block &block,
                                    const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                                   const BC::Proto::CBlockValidationData&,
                                    BlockInMemoryIndex&,
                                    BlockDatabase&)
 {
