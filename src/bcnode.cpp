@@ -40,6 +40,7 @@ __NO_DEPRECATED_END
 #endif
 
 static int gReindex = 0;
+static int gReindexOnly = 0;
 static int gResync = 0;
 static int gWatchLog = 0;
 static const char *gNetwork = "main";
@@ -57,6 +58,7 @@ static option cmdLineOpts[] = {
   {"datadir", required_argument, nullptr, clOptDataDir},
   {"network", required_argument, nullptr, clOptNetwork},
   {"reindex", no_argument, &gReindex, 1},
+  {"reindex-only", no_argument, &gReindexOnly, 1},
   {"resync", no_argument, &gResync, 1},
   {"watchlog", no_argument, &gWatchLog, 1},
   {nullptr, 0, nullptr, 0}
@@ -130,6 +132,7 @@ void printHelpMessage()
   fprintf(stdout, "  --datadir:\t\tpath of data directory (default: %s)\n", pathToUtf8(defaultPath).c_str());
   puts("  --network:\t\tnetwork name (main, testnet, etc)");
   puts("  --reindex:\t\trebuild block index");
+  puts("  --reindex-only:\trebuild block index and exit");
   puts("  --resync:\t\tdelete whole database and re-download it (not supported now)");
   puts("  --watchlog:\t\tview log in current terminal");
   puts("");
@@ -353,12 +356,16 @@ int main(int argc, char **argv)
   constexpr unsigned lookupThreadsNum = 16;
   std::vector<HostAddress> seeds[lookupThreadsNum];
   std::future<bool> workers[lookupThreadsNum];
-  for (unsigned i = 0; i < lookupThreadsNum; i++)
-    workers[i] = std::async(std::launch::async, LookupPeers, std::ref(addressesForLookup), context.ChainParams.DefaultPort, std::ref(seeds[i]), i, lookupThreadsNum);
+  if (!gReindexOnly) {
+    for (unsigned i = 0; i < lookupThreadsNum; i++)
+      workers[i] = std::async(std::launch::async, LookupPeers, std::ref(addressesForLookup), context.ChainParams.DefaultPort, std::ref(seeds[i]), i, lookupThreadsNum);
+  }
 
   // Handling special modes:
   //   - resync
   //   - reindex
+  if (gReindexOnly)
+    gReindex = 1;
   if (gReindex)
     gResync = 1;
 
@@ -425,6 +432,11 @@ int main(int argc, char **argv)
     if (!reindex(context.BlockIndex, context.BlocksDir, context.ChainParams, context.Storage)) {
       postQuitOperation(context.MainBase);
       return 1;
+    }
+
+    if (gReindexOnly) {
+      LOG_F(INFO, "Reindex done, exiting");
+      return 0;
     }
   }
 

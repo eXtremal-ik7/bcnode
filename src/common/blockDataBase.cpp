@@ -842,6 +842,8 @@ bool reindex(BlockInMemoryIndex &blockIndex,
   char blockFileName[64];
   unsigned blkFileIndex = 0;
   size_t totalBlockCount = 0;
+  uint64_t totalBytesRead = 0;
+  auto startTime = std::chrono::steady_clock::now();
 
   std::vector<BlockPosition> blockOffsets;
   unsigned threadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
@@ -955,12 +957,22 @@ bool reindex(BlockInMemoryIndex &blockIndex,
           blockIndex.best()->Header.GetHash().getHexLE().c_str());
 
     totalBlockCount += blockOffsets.size();
+    totalBytesRead += blockFileSize;
     blkFileIndex++;
   }
+
+  // The write queue tail is part of reindex work; without draining it the
+  // speed number would exclude up to a full block cache of pending writes
+  while (!storage.queue().empty())
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
   auto best = blockIndex.best();
   LOG_F(INFO, "%zu blocks loaded from disk", totalBlockCount);
   LOG_F(INFO, "Best block is %s (%u)", best->Header.GetHash().getHexLE().c_str(), best->Height);
+
+  double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count() / 1000.0;
+  double megabytes = totalBytesRead / 1048576.0;
+  LOG_F(INFO, "Reindex speed: %.2lf MB/s (%.1lf MB in %.1lf seconds)", elapsed > 0.0 ? megabytes / elapsed : 0.0, megabytes, elapsed);
   return true;
 }
 
