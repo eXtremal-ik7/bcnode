@@ -32,8 +32,8 @@ static inline uint32_t packHeight(uint32_t height, bool isCoinbase)
 bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result) const
 {
   if (Cache_.enabled() && Cache_.lookupConcurrent(txid.begin(), txoutIdx, [&result](const CUtxoCacheValue &value) {
-        result.resize(value.Size);
-        memcpy(result.begin(), value.Data, value.Size);
+        result.resize(sizeof(value.Data));
+        memcpy(result.begin(), value.Data, sizeof(value.Data));
       }))
     return true;
 
@@ -52,8 +52,8 @@ bool UTXODb::queryCache(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, x
   if (Cache_.enabled()) {
     // cache only: a miss defers the input to the contextual db query
     return Cache_.lookupConcurrent(txid.begin(), txoutIdx, [&result](const CUtxoCacheValue &value) {
-      result.resize(value.Size);
-      memcpy(result.begin(), value.Data, value.Size);
+      result.resize(sizeof(value.Data));
+      memcpy(result.begin(), value.Data, sizeof(value.Data));
     });
   }
 
@@ -134,7 +134,8 @@ void UTXODb::warmupFromDb()
       rocksdb::Slice keySlice = It->key();
       rocksdb::Slice valueSlice = It->value();
       // service records (stamp, base configuration) have short keys
-      if (keySlice.size() != sizeof(CUnspentOutputKey) || valueSlice.size() < sizeof(uint32_t))
+      if (keySlice.size() != sizeof(CUnspentOutputKey) ||
+          valueSlice.size() < sizeof(BC::Script::UnspentOutputInfo) + sizeof(uint32_t))
         continue;
 
       // field-wise copy: the key type is not trivially copyable, but the
@@ -144,7 +145,7 @@ void UTXODb::warmupFromDb()
       memcpy(&key.Index, keySlice.data() + sizeof(BC::Proto::TxHashTy), sizeof(uint32_t));
       uint32_t packed;
       memcpy(&packed, valueSlice.data() + valueSlice.size() - sizeof(uint32_t), sizeof(uint32_t));
-      cacheAdd(key, valueSlice.data(), valueSlice.size() - sizeof(uint32_t), packed >> 1);
+      cacheAdd(key, valueSlice.data(), valueSlice.size() - sizeof(uint32_t), packed >> 1, packed & 1);
       scanned++;
 
       // the floor eviction keeps the newest entries as the scan streams by
@@ -208,13 +209,20 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
     Cache_.maintain();
 
   CUnspentOutputKey key;
+  // An output spent by a later tx of the same block (and that input itself)
+  // is skipped entirely: the pair is invisible outside its block, so neither
+  // the log nor the cache ever sees it
+  size_t outOrdinal = 0;
+  size_t inOrdinal = 0;
   // Coinbase
   {
     // txin in coinbase can't spent anything
     const auto &coinbaseTx = block.vtx[0];
     const uint32_t packed = packHeight(height, true);
     key.Tx = validationData.TxIds[0];
-    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
+    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
+      if (validationData.outputSpentLocally(outOrdinal))
+        continue;
       const auto &txOut = coinbaseTx.txOut[i];
       key.Index = static_cast<uint32_t>(i);
 
@@ -225,7 +233,7 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
         size_t infoSize = serialized.sizeOf();
         serialized.write(&packed, sizeof(packed));
         this->add(blockId, key, serialized.data(), serialized.sizeOf());
-        cacheAdd(key, serialized.data(), infoSize, height);
+        cacheAdd(key, serialized.data(), infoSize, height, true);
       }
     }
   }
@@ -235,7 +243,9 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
   for (size_t i = 1; i < block.vtx.size(); i++) {
     const auto &tx = block.vtx[i];
 
-    for (size_t j = 0; j < tx.txIn.size(); j++) {
+    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
+        continue;
       const auto &txIn = tx.txIn[j];
       key.Tx = txIn.previousOutputHash;
       key.Index = txIn.previousOutputIndex;
@@ -244,7 +254,9 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
     }
 
     key.Tx = validationData.TxIds[i];
-    for (size_t j = 0; j < tx.txOut.size(); j++) {
+    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
+      if (validationData.outputSpentLocally(outOrdinal))
+        continue;
       const auto &txOut = tx.txOut[j];
       key.Index = static_cast<uint32_t>(j);
 
@@ -255,10 +267,12 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
         size_t infoSize = serialized.sizeOf();
         serialized.write(&packed, sizeof(packed));
         this->add(blockId, key, serialized.data(), serialized.sizeOf());
-        cacheAdd(key, serialized.data(), infoSize, height);
+        cacheAdd(key, serialized.data(), infoSize, height, false);
       }
     }
   }
+  assert(inOrdinal == validationData.InputLocalTx.size());
+  assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
 }
 
 void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
@@ -282,12 +296,17 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
     Cache_.maintain();
 
   CUnspentOutputKey key;
+  // Same-block pairs were never connected, so neither side is undone here
+  size_t outOrdinal = 0;
+  size_t inOrdinal = 0;
   // Coinbase
   {
     // txin in coinbase can't spent anything
     const auto &coinbaseTx = block.vtx[0];
     key.Tx = validationData.TxIds[0];
-    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
+    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
+      if (validationData.outputSpentLocally(outOrdinal))
+        continue;
       serialized.reset();
       BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
@@ -307,7 +326,9 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
     const auto &linkedTx = linkedOutputs.Tx[i];
     assert(linkedTx.TxIn.size() == tx.txIn.size());
 
-    for (size_t j = 0; j < tx.txIn.size(); j++) {
+    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
+        continue;
       const auto &txIn = tx.txIn[j];
       const auto &linkedTxin = linkedTx.TxIn[j];
 
@@ -319,11 +340,13 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
       serialized.write(linkedTxin.data(), linkedTxin.size());
       serialized.write(&packed, sizeof(packed));
       this->add(blockId, key, serialized.data(), serialized.sizeOf());
-      cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height);
+      cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height, false);
     }
 
     key.Tx = validationData.TxIds[i];
-    for (size_t j = 0; j < tx.txOut.size(); j++) {
+    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
+      if (validationData.outputSpentLocally(outOrdinal))
+        continue;
       serialized.reset();
       BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
@@ -334,6 +357,8 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
       }
     }
   }
+  assert(inOrdinal == validationData.InputLocalTx.size());
+  assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
 }
 
 void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
@@ -353,16 +378,21 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
   Cache_.maintain();
 
   CUnspentOutputKey key;
+  // Same-block pairs mirror connectImpl: the cache never saw them
+  size_t outOrdinal = 0;
+  size_t inOrdinal = 0;
   {
     const auto &coinbaseTx = block.vtx[0];
     key.Tx = validationData.TxIds[0];
-    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
+    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
+      if (validationData.outputSpentLocally(outOrdinal))
+        continue;
       serialized.reset();
       BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
       if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
         key.Index = static_cast<uint32_t>(i);
-        cacheAdd(key, serialized.data(), serialized.sizeOf(), height);
+        cacheAdd(key, serialized.data(), serialized.sizeOf(), height, true);
       }
     }
   }
@@ -370,23 +400,29 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
   for (size_t i = 1; i < block.vtx.size(); i++) {
     const auto &tx = block.vtx[i];
 
-    for (size_t j = 0; j < tx.txIn.size(); j++) {
+    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
+        continue;
       key.Tx = tx.txIn[j].previousOutputHash;
       key.Index = tx.txIn[j].previousOutputIndex;
       cacheRemove(key);
     }
 
     key.Tx = validationData.TxIds[i];
-    for (size_t j = 0; j < tx.txOut.size(); j++) {
+    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
+      if (validationData.outputSpentLocally(outOrdinal))
+        continue;
       serialized.reset();
       BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
       if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
         key.Index = static_cast<uint32_t>(j);
-        cacheAdd(key, serialized.data(), serialized.sizeOf(), height);
+        cacheAdd(key, serialized.data(), serialized.sizeOf(), height, false);
       }
     }
   }
+  assert(inOrdinal == validationData.InputLocalTx.size());
+  assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
 }
 
 void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
@@ -406,10 +442,15 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
   Cache_.maintain();
 
   CUnspentOutputKey key;
+  // Same-block pairs mirror disconnectImpl: the cache never saw them
+  size_t outOrdinal = 0;
+  size_t inOrdinal = 0;
   {
     const auto &coinbaseTx = block.vtx[0];
     key.Tx = validationData.TxIds[0];
-    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++) {
+    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
+      if (validationData.outputSpentLocally(outOrdinal))
+        continue;
       serialized.reset();
       BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
@@ -427,15 +468,19 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
     const auto &linkedTx = linkedOutputs.Tx[i];
     assert(linkedTx.TxIn.size() == tx.txIn.size());
 
-    for (size_t j = 0; j < tx.txIn.size(); j++) {
+    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
+        continue;
       const auto &linkedTxin = linkedTx.TxIn[j];
       key.Tx = tx.txIn[j].previousOutputHash;
       key.Index = tx.txIn[j].previousOutputIndex;
-      cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height);
+      cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height, false);
     }
 
     key.Tx = validationData.TxIds[i];
-    for (size_t j = 0; j < tx.txOut.size(); j++) {
+    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
+      if (validationData.outputSpentLocally(outOrdinal))
+        continue;
       serialized.reset();
       BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
       const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
@@ -445,6 +490,8 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
       }
     }
   }
+  assert(inOrdinal == validationData.InputLocalTx.size());
+  assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
 }
 
 }

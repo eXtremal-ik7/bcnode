@@ -29,32 +29,29 @@ struct BlockPosition {
 
 bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::Block &block, const BC::DB::UTXODb &db)
 {
-  std::unordered_map<BC::Proto::TxHashTy, uint32_t> txIndexMap;
   std::unordered_set<CUnspentOutputKey> removed;
 
   assert(validationData.TxIds.size() == block.vtx.size());
   linkedOutputs.Tx.resize(block.vtx.size());
 
-  if (!block.vtx.empty())
-    txIndexMap[validationData.TxIds[0]] = 0;
-
   bool allOutputsFound = true;
+  size_t inOrdinal = 0;
   for (size_t txIdx = 1; txIdx < block.vtx.size(); txIdx++) {
     BC::Proto::Transaction &tx = block.vtx[txIdx];
     auto &txLinked = linkedOutputs.Tx[txIdx];
 
     txLinked.TxIn.resize(tx.txIn.size());
-    for (size_t txinIdx = 0; txinIdx < tx.txIn.size(); txinIdx++) {
+    for (size_t txinIdx = 0; txinIdx < tx.txIn.size(); txinIdx++, inOrdinal++) {
       const auto &txin = tx.txIn[txinIdx];
       auto &txinLinked = txLinked.TxIn[txinIdx];
 
       if (db.queryCache(txin.previousOutputHash, txin.previousOutputIndex, txinLinked)) {
         // Unspent output found in cache
       } else {
-        // Try find in local block
-        auto It = txIndexMap.find(txin.previousOutputHash);
-        if (It != txIndexMap.end()) {
-          BC::Proto::Transaction &localReferencedTx = block.vtx[It->second];
+        // Try find in local block (topology precomputed in validation data)
+        uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];
+        if (localTxIdx != BC::Proto::CBlockValidationData::NoLocalTx) {
+          BC::Proto::Transaction &localReferencedTx = block.vtx[localTxIdx];
           if (txin.previousOutputIndex >= localReferencedTx.txOut.size())
             return false;
           CUnspentOutputKey key;
@@ -73,9 +70,8 @@ bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::
         }
       }
     }
-
-    txIndexMap[validationData.TxIds[txIdx]] = static_cast<uint32_t>(txIdx);
   }
+  assert(inOrdinal == validationData.InputLocalTx.size());
 
   validationData.AllOutputsFound = allOutputsFound;
   return true;

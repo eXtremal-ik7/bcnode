@@ -34,6 +34,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -324,14 +325,22 @@ public:
   // returns false if the key was already present (BIP30 duplicate coinbase
   // txid) - the value is overwritten in place
   bool insert(const uint8_t *txid, uint32_t vout, const ValueT &value) {
+    return insertWith(txid, vout, value.Height, [&value](ValueT &slot) { slot = value; });
+  }
+
+  // In-place variant: fill() writes the payload directly into the claimed
+  // slot, sparing the caller's staging copy. height must match the Height
+  // the callback stores - the eviction accounting is driven by it
+  template<typename FillF>
+  bool insertWith(const uint8_t *txid, uint32_t vout, uint32_t height, FillF &&fill) {
     const SRef ref = refOf(txid, vout);
     const size_t b1 = bucketOf(ref.H1);
     const size_t b2 = bucketOf(ref.H2);
 
     // growth is single-mutator only: a concurrent wave pre-sizes the height
     // accounting via ensureHeightCapacity() before it starts
-    if (value.Height >= AliveByHeight_.size())
-      AliveByHeight_.resize(value.Height + 1, 0);
+    if (height >= AliveByHeight_.size())
+      AliveByHeight_.resize(height + 1, 0);
 
     for (;;) {
       if (SFind dup = findOwn(b1, b2, ref.Tag, txid, vout); dup.Slot) {
@@ -346,13 +355,14 @@ public:
           continue;
         }
         uint32_t oldHeight = s.Value.Height;
-        s.Value = value;
+        fill(s.Value);
+        assert(s.Value.Height == height);
         writeEnd(s);
         addCounter(AliveByHeight_[oldHeight], -1);
         if (oldHeight < Floor_)
           addCounter(Condemned_, -1);
-        addCounter(AliveByHeight_[value.Height], 1);
-        if (value.Height < Floor_)
+        addCounter(AliveByHeight_[height], 1);
+        if (height < Floor_)
           addCounter(Condemned_, 1);
         addCounter(DupOverwriteCount_, 1);
         return false;
@@ -414,14 +424,15 @@ public:
       }
       s.Vout = vout;
       memcpy(s.TxId, txid, 32);
-      s.Value = value;
+      fill(s.Value);
+      assert(s.Value.Height == height);
       // publish the tag before releasing the seqlock: a claimed slot must
       // never look free to a concurrent mutator scanning for empty slots
       setTag(bucket, slot, ref.Tag);
       writeEnd(s);
       addCounter(LiveCount_, 1);
-      addCounter(AliveByHeight_[value.Height], 1);
-      if (value.Height < Floor_)
+      addCounter(AliveByHeight_[height], 1);
+      if (height < Floor_)
         addCounter(Condemned_, 1);
       return true;
     }

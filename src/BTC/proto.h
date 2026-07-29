@@ -284,12 +284,24 @@ struct NetworkAddress {
   // that reaches a database connect/disconnect runs validationDataInitialize
   // first, so consumers assert on it instead of recomputing
   struct CBlockValidationData {
+    static constexpr uint32_t NoLocalTx = 0xFFFFFFFFu;
+
     bool HasWitnessData = false;
     bool AllOutputsFound = false;
     // txid of every transaction, parallel to block.vtx ([0] = coinbase);
     // checkBlockStandalone verifies them against the header merkle root
     xvector<TxHashTy> TxIds;
+    // Same-block spend topology, derived from TxIds. InputLocalTx: for every
+    // input of vtx[1..] in block walk order, the index of the earlier tx of
+    // this block whose output it spends (NoLocalTx otherwise).
+    // OutputSpentLocally: bit per output of all txs in walk order, set when a
+    // later tx of the same block spends it - such a pair is invisible outside
+    // its block and never touches the utxo db or cache
+    xvector<uint32_t> InputLocalTx;
+    xvector<uint64_t> OutputSpentLocally;
     xvector<CTxValidationData> TxData;
+
+    bool outputSpentLocally(size_t ordinal) const { return (OutputSpentLocally[ordinal >> 6] >> (ordinal & 63)) & 1u; }
   };
 
   struct MessageVersion {

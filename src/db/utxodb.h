@@ -33,8 +33,8 @@ namespace DB {
 // scripts) are not cached at all - a miss is always legal, a positive must
 // be exact
 struct CUtxoCacheValue {
-  uint32_t Height; // creation height, drives the eviction floor
-  uint8_t Size;
+  uint32_t Height;    // creation height, drives the eviction floor
+  uint8_t IsCoinbase; // maturity metadata, mirrors the on-disk suffix bit; rides in former padding
   uint8_t Data[sizeof(BTC::Script::UnspentOutputInfo)];
 };
 
@@ -97,14 +97,16 @@ private:
   // the newest limit() entries whatever the iteration order is
   void warmupFromDb();
 
-  void cacheAdd(const CUnspentOutputKey &key, const void *data, size_t size, uint32_t height) {
-    if (!Cache_.enabled() || size > sizeof(CUtxoCacheValue::Data))
+  // Only exact-width values are admitted, so both copies (into the claimed
+  // slot here and out of it in query) run at constant size
+  void cacheAdd(const CUnspentOutputKey &key, const void *data, size_t size, uint32_t height, bool isCoinbase) {
+    if (!Cache_.enabled() || size != sizeof(CUtxoCacheValue::Data))
       return;
-    CUtxoCacheValue value{};
-    value.Height = height;
-    value.Size = static_cast<uint8_t>(size);
-    memcpy(value.Data, data, size);
-    Cache_.insert(key.Tx.begin(), key.Index, value);
+    Cache_.insertWith(key.Tx.begin(), key.Index, height, [data, height, isCoinbase](CUtxoCacheValue &value) {
+      value.Height = height;
+      value.IsCoinbase = isCoinbase;
+      memcpy(value.Data, data, sizeof(value.Data));
+    });
   }
 
   void cacheRemove(const CUnspentOutputKey &key) {

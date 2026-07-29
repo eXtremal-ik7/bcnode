@@ -4,8 +4,10 @@
 #include "script.h"
 #include "merkleTree.h"
 #include <cassert>
+#include <cstring>
 #include <limits>
 #include <memory>
+#include <unordered_map>
 
 namespace BTC {
 
@@ -23,6 +25,54 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
     for (auto &v: validation.TxData[i].ScriptSigKnownValid) {
       v.ScriptSigKnownValid = false;
     }
+  }
+
+  // Same-block spend topology. The map mirrors initializeLinkedOutputs: a tx
+  // becomes visible after its own inputs, so only spends of earlier txs
+  // match. An out-of-range vout still marks the input (the block dies in
+  // initializeLinkedOutputs before any connect) but has no output bit to set.
+  // A txid match is trusted to be the spend target (BIP30 uniqueness): an
+  // input spending an older on-disk duplicate would be paired with the local
+  // twin instead, and the utxodb pair skip would leave the older coin alive.
+  // Safe: a duplicate txid can only be a coinbase (an identical non-coinbase
+  // would re-spend its own inputs), unspendable in its own block by maturity
+  size_t inputsNum = 0;
+  uint64_t outputsNum = 0;
+  for (size_t i = 0; i < block.vtx.size(); i++) {
+    outputsNum += block.vtx[i].txOut.size();
+    if (i)
+      inputsNum += block.vtx[i].txIn.size();
+  }
+  validation.InputLocalTx.resize(inputsNum);
+  validation.OutputSpentLocally.resize((outputsNum + 63) / 64);
+  memset(validation.OutputSpentLocally.begin(), 0, validation.OutputSpentLocally.size() * sizeof(uint64_t));
+
+  // Value packs the tx index with the block-wide ordinal of its first output
+  std::unordered_map<Proto::TxHashTy, uint64_t> txIndexMap;
+  size_t inOrdinal = 0;
+  uint64_t outOrdinal = 0;
+  if (!block.vtx.empty()) {
+    txIndexMap[validation.TxIds[0]] = 0;
+    outOrdinal = block.vtx[0].txOut.size();
+  }
+  for (size_t i = 1; i < block.vtx.size(); i++) {
+    const auto &tx = block.vtx[i];
+    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+      const auto &txin = tx.txIn[j];
+      auto It = txIndexMap.find(txin.previousOutputHash);
+      if (It == txIndexMap.end()) {
+        validation.InputLocalTx[inOrdinal] = Proto::CBlockValidationData::NoLocalTx;
+        continue;
+      }
+      uint32_t localTxIdx = static_cast<uint32_t>(It->second);
+      validation.InputLocalTx[inOrdinal] = localTxIdx;
+      if (txin.previousOutputIndex < block.vtx[localTxIdx].txOut.size()) {
+        uint64_t bit = (It->second >> 32) + txin.previousOutputIndex;
+        validation.OutputSpentLocally[bit >> 6] |= 1ull << (bit & 63);
+      }
+    }
+    txIndexMap[validation.TxIds[i]] = static_cast<uint64_t>(i) | (outOrdinal << 32);
+    outOrdinal += tx.txOut.size();
   }
 }
 
