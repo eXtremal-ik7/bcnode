@@ -12,7 +12,10 @@
 #include "swmrhashmap.h"
 #include "config4cpp/Configuration.h"
 #include <rocksdb/db.h>
+#include <rocksdb/filter_policy.h>
 #include <rocksdb/merge_operator.h>
+#include <rocksdb/slice_transform.h>
+#include <rocksdb/table.h>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -162,6 +165,7 @@ public:
                   std::vector<BC::Common::BlockIndex*> &forDisconnect) final {
     BaseCfg_.ShardsNum = static_cast<unsigned>(cfg->lookupInt(Name_.c_str(), "shardsNum", 1));
     BaseCfg_.Version = version();
+    FlushLogThreshold_ = static_cast<size_t>(cfg->lookupInt(Name_.c_str(), "flushLogSizeMb", 16)) << 20;
 
     BC::Common::BlockIndex *bestIndex = blockIndex.best();
     Shards_.reset(new CShardSlot[BaseCfg_.ShardsNum]);
@@ -180,6 +184,27 @@ public:
       options.compression = rocksdb::kZSTD;
       options.keep_log_file_num = 4;
       options.merge_operator.reset(mergeOperator());
+
+      // Flush batches arrive pre-sorted (see the writeLog implementations), a
+      // single insert location hint turns the memtable fill into an append;
+      // the hint is only honored without concurrent memtable writers (each
+      // shard has one writing thread anyway)
+      options.memtable_insert_with_hint_prefix_extractor.reset(rocksdb::NewCappedPrefixTransform(0));
+      options.allow_concurrent_memtable_write = false;
+
+      // Point lookups dominate: bloom filters cut dead probes of SST files
+      // and of the memtable on Get
+      rocksdb::BlockBasedTableOptions tableOptions;
+      tableOptions.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+      options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(tableOptions));
+      options.memtable_prefix_bloom_size_ratio = 0.05;
+      options.memtable_whole_key_filtering = true;
+
+      // L0 files live until the first compaction only: skip compressing them,
+      // keep zstd for the long-lived levels below
+      options.compression_per_level = {rocksdb::kNoCompression, rocksdb::kZSTD};
+      options.max_background_jobs = 8;
+      options.max_write_buffer_number = 4;
       std::string shardPathUtf8 = pathToUtf8(shardPath);
       rocksdb::Status status = rocksdb::DB::Open(options, shardPathUtf8, &db);
       if (!status.ok()) {
@@ -282,7 +307,7 @@ public:
     CurrentBlock_ = hash;
 
     for (size_t i = 0; i < BaseCfg_.ShardsNum; i++) {
-      if (shard(i).Log.size() >= 1u << 24) {
+      if (shard(i).Log.size() >= FlushLogThreshold_) {
         if (AsyncFlushEnabled_)
           freezeAndScheduleFlush(i);
         else
@@ -492,6 +517,11 @@ protected:
   std::unique_ptr<CShardSlot[]> Shards_;
   std::vector<std::unique_ptr<rocksdb::DB>> OnDiskStorage_;
 
+  // Window size: the active log freezes for flush once its arena crosses
+  // this threshold (config key flushLogSizeMb). Bigger windows annihilate
+  // more short-lived keys before they ever reach the disk
+  size_t FlushLogThreshold_ = 1u << 24;
+
   // Background flush machinery
   bool AsyncFlushEnabled_ = false;
   std::thread FlushThread_;
@@ -509,6 +539,9 @@ private:
     CKey Key;
     size_t Size;
     bool IsConnected;
+    // Set on a delete whose live value was born in this same window: the key
+    // never reached the disk and the flush drops the pair entirely
+    bool BornInWindow;
   };
 
 public:
@@ -527,6 +560,7 @@ public:
     header->Key = key;
     header->Size = size;
     header->IsConnected = true;
+    header->BornInWindow = false;
 
     void *buffer = header + 1;
     memcpy(buffer, data, size);
@@ -542,6 +576,13 @@ public:
     header->Key = key;
     header->Size = 0;
     header->IsConnected = false;
+
+    // CBaseKV keys are write-once across the chain (outpoint, txid): a live
+    // predecessor inside the active window means the key was never flushed,
+    // so no on-disk tombstone will be needed. The frozen window does not
+    // count - its flush writes the value
+    const CHeader *prev = static_cast<const CHeader*>(shard.find(key));
+    header->BornInWindow = prev && prev->IsConnected;
 
     shard.update(blockId, key, header);
   }
@@ -593,24 +634,55 @@ private:
   // synchronous flush and the background flusher
   void writeLog(const BC::Proto::BlockHashTy &blockId, size_t shardIndex, CLog<CKey> &shard) {
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
-    rocksdb::WriteBatch batch;
 
-    batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(blockId.begin()), sizeof(BC::Proto::BlockHashTy)));
-
-    shard.Map.forEachCurrent([&batch](const CKey&, void *keyData) {
+    // The batch is fed to rocksdb in memcmp order of keys: paired with the
+    // memtable insert hint this turns the skiplist fill into an append. Sort
+    // by an 8-byte big-endian prefix, full key compare only inside a
+    // same-prefix run
+    struct CSortedRef {
+      uint64_t Prefix;
+      const CHeader *Header;
+    };
+    std::vector<CSortedRef> refs;
+    refs.reserve(shard.Map.used());
+    size_t batchBytes = 64;
+    size_t annihilated = 0;
+    shard.Map.forEachCurrent([&refs, &batchBytes, &annihilated](const CKey&, void *keyData) {
       const CHeader *header = static_cast<const CHeader*>(keyData);
-      const void *data = header + 1;
-
-      auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(&header->Key), sizeof(CKey));
-      if (header->IsConnected) {
-        auto valueSlice = rocksdb::Slice(static_cast<const char*>(data), header->Size);
-        batch.Put(keySlice, valueSlice);
-      } else {
-        batch.Delete(keySlice);
+      if (!header->IsConnected && header->BornInWindow) {
+        annihilated++;
+        return;
       }
+      uint64_t prefix = 0;
+      memcpy(&prefix, &header->Key, std::min(sizeof(prefix), sizeof(CKey)));
+      refs.push_back({xhtobe(prefix), header});
+      batchBytes += sizeof(CKey) + 4 + (header->IsConnected ? header->Size + 8 : 0);
     });
 
-    storage->Write(rocksdb::WriteOptions(), &batch);
+    std::sort(refs.begin(), refs.end(), [](const CSortedRef &l, const CSortedRef &r) {
+      if (l.Prefix != r.Prefix)
+        return l.Prefix < r.Prefix;
+      return memcmp(&l.Header->Key, &r.Header->Key, sizeof(CKey)) < 0;
+    });
+
+    rocksdb::WriteBatch batch(batchBytes);
+    batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(blockId.begin()), sizeof(BC::Proto::BlockHashTy)));
+
+    for (const auto &ref: refs) {
+      const CHeader *header = ref.Header;
+      auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(&header->Key), sizeof(CKey));
+      if (header->IsConnected)
+        batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(header + 1), header->Size));
+      else
+        batch.Delete(keySlice);
+    }
+
+    // Every flush batch carries the stamp, a crash without WAL rolls data and
+    // stamp back together
+    rocksdb::WriteOptions writeOptions;
+    writeOptions.disableWAL = true;
+    storage->Write(writeOptions, &batch);
+    LOG_F(1, "%s: flushed %zu records, %zu window-born pairs annihilated", this->Name_.c_str(), refs.size(), annihilated);
   }
 };
 
@@ -904,7 +976,9 @@ public:
       }
     }
 
-    storage->Write(rocksdb::WriteOptions(), &batch);
+    rocksdb::WriteOptions writeOptions;
+    writeOptions.disableWAL = true;
+    storage->Write(writeOptions, &batch);
     shard.reset();
   }
 
@@ -1276,7 +1350,9 @@ public:
       }
     }
 
-    storage->Write(rocksdb::WriteOptions(), &batch);
+    rocksdb::WriteOptions writeOptions;
+    writeOptions.disableWAL = true;
+    storage->Write(writeOptions, &batch);
     shard.reset();
   }
 
@@ -1601,7 +1677,9 @@ public:
     }
 
     std::unique_lock lock(ShardLocks_[shardIndex]);
-    storage->Write(rocksdb::WriteOptions(), &batch);
+    rocksdb::WriteOptions writeOptions;
+    writeOptions.disableWAL = true;
+    storage->Write(writeOptions, &batch);
     shard.reset();
   }
 
