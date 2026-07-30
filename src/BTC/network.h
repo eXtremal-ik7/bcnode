@@ -142,7 +142,8 @@ private:
   void onPing(BC::Proto::MessagePing &ping);
   void onPong(BC::Proto::MessagePong &pong);
   void onInv(BC::Proto::MessageInv &inv);
-  void onBlock(BC::Common::CIndexCacheObject *block, std::chrono::time_point<std::chrono::steady_clock> receivedTime);
+  // Takes ownership of the serialized block data
+  void onBlockData(void *data, size_t size, size_t memorySize, std::chrono::time_point<std::chrono::steady_clock> receivedTime);
   void onReject(BC::Proto::MessageReject &reject);
 
   // Synchronization
@@ -325,6 +326,7 @@ private:
   BlockInMemoryIndex *BlockIndex_;
   BC::Common::ChainParams *ChainParams_;
   BC::DB::Storage *Storage_;
+  CBlockAssembler *Assembler_;
   asyncBase *Base;
   unsigned ThreadsNum_;
   unsigned WorkerThreadsNum_;
@@ -359,6 +361,7 @@ public:
   void Init(BlockInMemoryIndex &blockIndex,
             BC::Common::ChainParams &chainParams,
             BC::DB::Storage &storage,
+            CBlockAssembler &assembler,
             asyncBase *base,
             unsigned threadsNum,
             unsigned workerThreadsNum,
@@ -367,6 +370,7 @@ public:
     BlockIndex_ = &blockIndex;
     ChainParams_ = &chainParams;
     Storage_ = &storage;
+    Assembler_ = &assembler;
     Base = base;
     ThreadsNum_ = threadsNum;
     WorkerThreadsNum_ = workerThreadsNum;
@@ -391,7 +395,15 @@ public:
   void Sync();
   void Sync(Peer *peer);
   void Sync(Peer *peer, const xvector<BC::Proto::BlockHeaderNet> &headers, unsigned downloadTimeInMilliSeconds);
-  void Sync(Peer *peer, BC::Common::CIndexCacheObject *object, bool scheduledBlock, bool downloadFinished);
+  // Takes ownership of the serialized block data; header and hash are parsed from it
+  void Sync(Peer *peer,
+            const BC::Proto::BlockHeader &header,
+            const BC::Proto::BlockHashTy &hash,
+            void *data,
+            size_t size,
+            size_t memorySize,
+            bool scheduledBlock,
+            bool downloadFinished);
   void Sync(std::vector<BC::Proto::BlockHashTy> &hashes);
 
   // API
@@ -411,8 +423,8 @@ private:
   bool switchBlockSource(Peer *peer, BlockSource *current);
   void disconnectPeerFromBlockSource(Peer *peer, intrusive_ptr<BlockSource> &current);
 
-  /// scheduleBlocksDownload - schedule for download next portion of blocks
-  ///   @param slave: source of blocks
+  // scheduleBlocksDownload - schedule for download next portion of blocks
+  //   @param slave: source of blocks
   bool scheduleBlocksDownload(Peer *slave);
 };
 

@@ -157,6 +157,9 @@ struct Context {
   // Storage manager
   BC::DB::Storage Storage;
 
+  // Batch pipeline (shared by the reindex reader and network catch-up)
+  CBlockAssembler Assembler;
+
   // Network
   BC::Network::Node Node;
   BC::Network::HttpApiNode httpApiNode;
@@ -300,6 +303,8 @@ int main(int argc, char **argv)
   unsigned outgoingConnectionsLimit = 16;
   unsigned incomingConnectionsLimit = std::numeric_limits<unsigned>::max();
   bool archiveEnabled = false;
+  unsigned batchThreadsNum = 0;
+  CBlockAssembler::CParams batchParams;
   if (std::filesystem::exists(configPath)) {
     try {
       cfg->parse(configPath.string().c_str());
@@ -323,6 +328,12 @@ int main(int argc, char **argv)
 
       outgoingConnectionsLimit = cfg->lookupInt("bcnode", "outgoingConnectionsLimit", 16);
       incomingConnectionsLimit = cfg->lookupInt("bcnode", "incomingConnectionsLimit", std::numeric_limits<unsigned>::max());
+
+      // Batch pipeline
+      batchThreadsNum = cfg->lookupInt("bcnode", "batchThreadsNum", 0);
+      batchParams.BatchBlocksLimit = cfg->lookupInt("bcnode", "batchBlocks", static_cast<int>(batchParams.BatchBlocksLimit));
+      batchParams.BatchSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "batchSizeMb", static_cast<int>(batchParams.BatchSizeLimit / 1048576))) * 1048576;
+      batchParams.StagingSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "stagingSizeMb", static_cast<int>(batchParams.StagingSizeLimit / 1048576))) * 1048576;
 
       {
         const char *p = cfg->lookupString("bcnode", "indexPath", nullptr);
@@ -431,20 +442,28 @@ int main(int argc, char **argv)
   if (!context.Storage.run([&context]() { postQuitOperation(context.MainBase); }))
     return 1;
 
+  // Batch pipeline: shared by the reindex reader and network catch-up
+  if (batchThreadsNum == 0)
+    batchThreadsNum = workerThreadsNum;
+  if (!context.Assembler.start(context.BlockIndex, context.ChainParams, context.Storage, batchThreadsNum, batchParams))
+    return 1;
+
   if (gReindex) {
-    if (!reindex(context.BlockIndex, context.BlocksDir, context.ChainParams, context.Storage)) {
+    if (!reindex(context.BlockIndex, context.BlocksDir, context.ChainParams, context.Storage, context.Assembler)) {
+      context.Assembler.stop();
       postQuitOperation(context.MainBase);
       return 1;
     }
 
     if (gReindexOnly) {
+      context.Assembler.stop();
       LOG_F(INFO, "Reindex done, exiting");
       return 0;
     }
   }
 
   // Starting daemon
-  context.Node.Init(context.BlockIndex, context.ChainParams, context.Storage, context.MainBase, totalThreadsNum, workerThreadsNum, outgoingConnectionsLimit, incomingConnectionsLimit);
+  context.Node.Init(context.BlockIndex, context.ChainParams, context.Storage, context.Assembler, context.MainBase, totalThreadsNum, workerThreadsNum, outgoingConnectionsLimit, incomingConnectionsLimit);
 
   for (size_t i = 0; i < lookupThreadsNum; i++) {
     if (!workers[i].get())
@@ -519,6 +538,9 @@ int main(int argc, char **argv)
 
   for (unsigned i = 0; i < totalThreadsNum; i++)
     workerThreads[i].join();
+
+  // Drains the batches already submitted
+  context.Assembler.stop();
 
   LOG_F(INFO, "done");
   return 0;

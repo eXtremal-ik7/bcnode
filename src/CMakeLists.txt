@@ -166,6 +166,7 @@ target_link_libraries(bcnodecrypto
 
 set(BASE_SOURCES
   bcnode.cpp
+  common/blockBatch.cpp
   common/blockDataBase.cpp
   common/blockSource.cpp
   common/linearDataStorage.cpp

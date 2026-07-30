@@ -6,6 +6,7 @@
 #pragma once
 
 #include "BC/bc.h"
+#include "common/blockBatch.h"
 #include "common/blockIndexCombiner.h"
 #include "common/linearDataStorage.h"
 #include <tbb/concurrent_queue.h>
@@ -47,6 +48,25 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
                                  uint32_t fileNo=std::numeric_limits<uint32_t>::max(),
                                  uint32_t fileOffset=std::numeric_limits<uint32_t>::max());
 
+// attachBlockData - reserve an index for a staged block: everything AddBlock does with the index
+// and the header chain, nothing else (the data is not parsed here). *checkWork is set when the
+// header work was never verified. Returns nullptr when the block can't get an index of its own
+// (already have this block); such a block goes the old way
+BC::Common::BlockIndex *attachBlockData(BlockInMemoryIndex &blockIndex,
+                                        BC::Common::ChainParams &chainParams,
+                                        const BC::Proto::BlockHeader &header,
+                                        const BC::Proto::BlockHashTy &hash,
+                                        bool *checkWork);
+
+// processBlockData - unpack a staged block and accept it with the same code the direct path uses:
+// AddBlock for a block without a reserved index, its off-chain tail otherwise
+bool processBlockData(BlockInMemoryIndex &blockIndex,
+                      BC::Common::ChainParams &chainParams,
+                      BC::DB::Storage &storage,
+                      CStagedBlock &staged,
+                      BC::Common::CheckConsensusCtx &ccCtx,
+                      newBestCallback callback);
+
 bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
                        const std::filesystem::path &blockPath,
                        const std::filesystem::path &indexPath);
@@ -54,7 +74,8 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
 bool reindex(BlockInMemoryIndex &blockIndex,
              const std::filesystem::path &blockPath,
              BC::Common::ChainParams &chainParams,
-             BC::DB::Storage &storage);
+             BC::DB::Storage &storage,
+             CBlockAssembler &assembler);
 
 
 class BlockInMemoryIndex {

@@ -262,25 +262,11 @@ void Peer::onMessage(AsyncOpStatus status)
       // (async) Receive next message
       aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
 
-      if (startHeavyOperation(&heavyOperation, &heavyOperationStarted)) {
-        // Unpacking block
-        size_t unpackedSize = 0;
-        xmstream serialized(data, size);
-        BC::Proto::Block *unpacked = BC::unpack2<BC::Proto::Block>(serialized, &unpackedSize);
-        bool hasRemainingData = serialized.remaining();
-        if (unpacked && !hasRemainingData) {
-          intrusive_ptr<BC::Common::CIndexCacheObject> object(new BC::Common::CIndexCacheObject(&Storage_.cache(), data, size, msize, unpacked, unpackedSize));
-          onBlock(object.get(), std::chrono::steady_clock::now());
-
-          // intrusive_ptr<SerializedDataObject> object = Storage_.cache().add(data, size, msize, unpacked, unpackedSize);
-          // onBlock(object.get(), std::chrono::steady_clock::now());
-        } else {
-          LOG_F(ERROR, "Peer %s: can't unserialize block", Name.c_str());
-          operator delete(data);
-        }
-      } else {
+      // Block data is not parsed here: in sync mode it goes to the pipeline as it came
+      if (startHeavyOperation(&heavyOperation, &heavyOperationStarted))
+        onBlockData(data, size, msize, std::chrono::steady_clock::now());
+      else
         MessageQueue_.push(new InternalMessage(this, MessageTy::block, data, size, msize));
-      }
 
       break;
     }
@@ -342,19 +328,9 @@ void Peer::processMessageQueue()
 
       // Special handlers
       case MessageTy::block : {
-        // Unpacking block
-        xmstream serialized(internalMsg->Data, internalMsg->Size);
-        size_t unpackedSize = 0;
-        BC::Proto::Block *unpacked = BC::unpack2<BC::Proto::Block>(serialized, &unpackedSize);
-        if (unpacked && !serialized.remaining()) {
-          intrusive_ptr<BC::Common::CIndexCacheObject> object(new BC::Common::CIndexCacheObject(&peer->Storage_.cache(), internalMsg->Data, internalMsg->Size, internalMsg->MemorySize, unpacked, unpackedSize));
-          internalMsg->Data = nullptr;
-          peer->onBlock(object.get(), internalMsg->Time);
-        } else {
-          LOG_F(ERROR, "Peer %s: can't unserialize block", peer->Name.c_str());
-          peer->ParentNode->RemovePeer(peer);
-        }
-
+        void *data = internalMsg->Data;
+        internalMsg->Data = nullptr;
+        peer->onBlockData(data, internalMsg->Size, internalMsg->MemorySize, internalMsg->Time);
         break;
       }
       case MessageTy::headers :
@@ -554,7 +530,7 @@ void Peer::onInv(BC::Proto::MessageInv &inv)
       case BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : {
         // Check presense of this block
         auto it = BlockIndex_.blockIndex().find(element.hash);
-        if (it == BlockIndex_.blockIndex().end() || it->second->IndexState != BSBlock) {
+        if (it == BlockIndex_.blockIndex().end() || !haveBlockData(it->second->IndexState)) {
           BC::Proto::InventoryVector iv;
           iv.type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
           iv.hash = element.hash;
@@ -574,13 +550,24 @@ void Peer::onInv(BC::Proto::MessageInv &inv)
     getData(getBlocks);
 }
 
-void Peer::onBlock(BC::Common::CIndexCacheObject *object, std::chrono::time_point<std::chrono::steady_clock> receivedTime)
+void Peer::onBlockData(void *data, size_t size, size_t memorySize, std::chrono::time_point<std::chrono::steady_clock> receivedTime)
 {
+  // Header only: it is all the download bookkeeping needs and it names the index
+  BC::Proto::BlockHeader header;
+  {
+    xmstream stream(data, size);
+    if (!unserializeAndCheck(stream, header)) {
+      LOG_F(ERROR, "Peer %s: can't unserialize block", Name.c_str());
+      operator delete(data);
+      return;
+    }
+  }
+
+  BC::Proto::BlockHashTy hash = header.GetHash();
+
   uint32_t sub = 0x10;
   bool scheduledBlock = false;
   if ((blockDownloading.fetch_add(sub) & 0xF) == 2) {
-    BC::Proto::Block *block = object->block();
-    BC::Proto::BlockHashTy hash = block->header.GetHash();
     if (ScheduledToDownload_.count(hash)) {
       scheduledBlock = true;
       if (++receivedBlocks == ScheduledToDownload_.size())
@@ -597,7 +584,7 @@ void Peer::onBlock(BC::Common::CIndexCacheObject *object, std::chrono::time_poin
       DownloadTimes_[DownloadTimesIdx_++ % AvgWindowSize] = static_cast<unsigned>(interval);
   }
 
-  ParentNode->Sync(this, object, scheduledBlock, downloadFinished);
+  ParentNode->Sync(this, header, hash, data, size, memorySize, scheduledBlock, downloadFinished);
 }
 
 void Peer::onReject(BC::Proto::MessageReject &reject)
@@ -660,7 +647,7 @@ bool Peer::fetchQueuedBlocks(xvector<BC::Proto::BlockHashTy> &hashes)
   if ((blockDownloading.fetch_add(sub) & 0xF) == 2) {
     for (auto &hash: ScheduledToDownload_) {
       auto index = BlockIndex_.blockIndex().find(hash);
-      if (index == BlockIndex_.blockIndex().end() || index->second->IndexState != BSBlock)
+      if (index == BlockIndex_.blockIndex().end() || !haveBlockData(index->second->IndexState))
         hashes.emplace_back(hash);
     }
   }
@@ -885,6 +872,9 @@ void Node::Sync()
 {
   unsigned interval = 4*1000000;
 
+  // A batch left under-filled by a stuttering peer must not wait for the next one
+  Assembler_->flushOnTimeout();
+
   BC::Common::BlockIndex *best = BlockIndex_->best();
   bool hasConnectedPeers = false;
   std::vector<PeerPtr> candidatesForSync;
@@ -1027,8 +1017,54 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
   }
 }
 
-void Node::Sync(Peer *peer, BC::Common::CIndexCacheObject *object, bool scheduledBlock, bool downloadFinished)
+void Node::Sync(Peer *peer,
+                const BC::Proto::BlockHeader &header,
+                const BC::Proto::BlockHashTy &hash,
+                void *data,
+                size_t size,
+                size_t memorySize,
+                bool scheduledBlock,
+                bool downloadFinished)
 {
+  // Sync mode: a block asked for as part of catch-up goes to the assembler unparsed. Anything
+  // else (a block relayed at the tip) keeps the direct path with its latency, relay and orphans
+  BC::Common::BlockIndex *staged = nullptr;
+  if (scheduledBlock && Assembler_->started() &&
+      Assembler_->attachFromNetwork(data, static_cast<uint32_t>(size), static_cast<uint32_t>(memorySize), header, hash, &staged) == CBlockAssembler::Staged) {
+    if (downloadFinished) {
+      // Peer batch complete: don't leave an under-filled batch waiting for the next one
+      Assembler_->flush();
+
+      // Best chain lags the received block here: blocks are still in the pipeline
+      auto best = BlockIndex_->best();
+      LOG_F(INFO, "Best chain: %s(%u); Last received: %s(%u); cache: %.3lfM",
+            best->Header.GetHash().getHexLE().c_str(), best->Height,
+            hash.getHexLE().c_str(), staged->Height,
+            Storage_->cache().size() / 1048576.0f);
+
+      if (peer->startDownloadBlocks())
+        scheduleBlocksDownload(peer);
+    }
+
+    return;
+  }
+
+  // Unpacking block
+  size_t unpackedSize = 0;
+  intrusive_ptr<BC::Common::CIndexCacheObject> objectPtr;
+  {
+    xmstream serialized(data, size);
+    BC::Proto::Block *unpacked = BC::unpack2<BC::Proto::Block>(serialized, &unpackedSize);
+    if (!unpacked || serialized.remaining()) {
+      LOG_F(ERROR, "Peer %s: can't unserialize block", peer->Name.c_str());
+      operator delete(data);
+      return;
+    }
+
+    objectPtr = intrusive_ptr<BC::Common::CIndexCacheObject>(new BC::Common::CIndexCacheObject(&Storage_->cache(), data, size, memorySize, unpacked, unpackedSize));
+  }
+
+  BC::Common::CIndexCacheObject *object = objectPtr.get();
   BC::Common::CheckConsensusCtx ccCtx;
   BC::Common::checkConsensusInitialize(ccCtx);
   auto oldBest = BlockIndex_->best();

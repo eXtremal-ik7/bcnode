@@ -492,6 +492,57 @@ BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex, BC::Common::Ch
   return index;
 }
 
+// Off-chain checks; txids are computed once here and consumed by the utxo linker, the merkle
+// check and the databases
+static bool validateBlockData(BC::Common::ChainParams &chainParams,
+                              BC::DB::Storage &storage,
+                              BC::Common::CIndexCacheObject *serialized)
+{
+  BC::Proto::Block *block = serialized->block();
+
+  BC::Common::initializeValidationContext(*block, serialized->validationData());
+  initializeLinkedOutputs(serialized->linkedOutputs(), serialized->validationData(), *block, storage.utxodb());
+
+  std::string error;
+  unsigned blockGeneration = BC::Common::checkBlockStandalone(*block, serialized->validationData(), chainParams, error);
+  if (blockGeneration == 0) {
+    LOG_F(WARNING, "block %s check failed, error: %s", block->header.GetHash().getHexLE().c_str(), error.c_str());
+    return false;
+  }
+
+  return true;
+}
+
+// Attach validated block data to its index and try to continue the chain
+static void publishBlockData(BlockInMemoryIndex &blockIndex,
+                             BC::Common::ChainParams &chainParams,
+                             BC::DB::Storage &storage,
+                             BC::Common::BlockIndex *index,
+                             BC::Common::CIndexCacheObject *serialized,
+                             newBestCallback callback,
+                             uint32_t fileNo,
+                             uint32_t fileOffset)
+{
+  index->Serialized.reset(serialized);
+  index->FileNo = fileNo;
+  index->FileOffset = fileOffset;
+  index->SerializedBlockSize = static_cast<uint32_t>(serialized->blockData().size());
+  index->ConcurrentBlockNext = WaitPtr<BC::Common::BlockIndex>();
+  index->ConcurrentBlockNext = index->Prev->SuccessorBlocks.exchange(index, 0);
+  if (index->ConcurrentBlockNext.tag() == 1) {
+    std::vector<BC::Common::BlockIndex*> acceptedBlocks;
+    blockIndex.combiner().call(static_cast<BlockProcessingTask*>(index->Prev), [&blockIndex, &chainParams, &storage, &acceptedBlocks](BC::Common::BlockIndex *start) {
+      buildBlockChain(blockIndex, chainParams, storage, start, acceptedBlocks);
+    });
+
+    if (!acceptedBlocks.empty()) {
+      storage.wakeUp();
+      if (callback)
+        callback(acceptedBlocks);
+    }
+  }
+}
+
 BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
                                  BC::Common::ChainParams &chainParams,
                                  BC::DB::Storage &storage,
@@ -535,17 +586,9 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
     }
   }
 
-  // Validate block; txids are computed once here and consumed by the utxo
-  // linker, the merkle check and the databases
-  BC::Common::initializeValidationContext(*block, serialized->validationData());
-  initializeLinkedOutputs(serialized->linkedOutputs(), serialized->validationData(), *block, storage.utxodb());
-
-  std::string error;
-  unsigned blockGeneration = BC::Common::checkBlockStandalone(*block, serialized->validationData(), chainParams, error);
-  if (blockGeneration == 0) {
-    LOG_F(WARNING, "block %s check failed, error: %s", block->header.GetHash().getHexLE().c_str(), error.c_str());
+  // Validate block
+  if (!validateBlockData(chainParams, storage, serialized))
     return nullptr;
-  }
 
   // Prepare block index structure for predecessor block
   auto prevIndex = BC::Common::BlockIndex::create(BSEmpty, nullptr);
@@ -598,51 +641,170 @@ BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
   }
 
   // Try to continue chain
-  index->Serialized.reset(serialized);
-  index->FileNo = fileNo;
-  index->FileOffset = fileOffset;
-  index->SerializedBlockSize = static_cast<uint32_t>(serialized->blockData().size());
-  index->ConcurrentBlockNext = WaitPtr<BC::Common::BlockIndex>();
-  index->ConcurrentBlockNext = prevIndex->SuccessorBlocks.exchange(index, 0);
-  if (index->ConcurrentBlockNext.tag() == 1) {
-    std::vector<BC::Common::BlockIndex*> acceptedBlocks;
-    blockIndex.combiner().call(static_cast<BlockProcessingTask*>(prevIndex), [&blockIndex, &chainParams, &storage, &acceptedBlocks](BC::Common::BlockIndex *index) {
-      buildBlockChain(blockIndex, chainParams, storage, index, acceptedBlocks);
-    });
-
-    if (!acceptedBlocks.empty()) {
-      storage.wakeUp();
-      if (callback)
-        callback(acceptedBlocks);
-    }
-  }
-
+  publishBlockData(blockIndex, chainParams, storage, index, serialized, callback, fileNo, fileOffset);
   return index;
 }
 
-bool loadBlocks(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage, const char *path, uint8_t *data, BlockPosition *position, size_t blocksNum, uint32_t fileNo)
+// BSEmpty (stub) and BSHeader are the states block data may take over
+static bool reserveIndexForData(BC::Common::BlockIndex *index, bool *alreadyHaveHeader)
 {
-  BC::Common::CheckConsensusCtx ccCtx;
-  BC::Common::checkConsensusInitialize(ccCtx);
-
-  for (size_t i = 0; i < blocksNum; i++) {
-    size_t unpackedSize = 0;
-    xmstream stream(data + position[i].offset + 8, position[i].size);
-    BC::Proto::Block *block = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
-    if (!block || stream.remaining() != 0) {
-      LOG_F(ERROR, "Can't parse block file %s (invalid block structure)", path);
+  BlockStatus state = index->IndexState.load(std::memory_order_relaxed);
+  for (;;) {
+    if (state != BSEmpty && state != BSHeader)
       return false;
-    }
+    if (index->IndexState.compare_exchange_weak(state, BSData))
+      break;
+  }
 
-    intrusive_ptr<BC::Common::CIndexCacheObject> object(new BC::Common::CIndexCacheObject(&storage.cache(), nullptr, stream.sizeOf(), 0, block, unpackedSize));
+  *alreadyHaveHeader = (state == BSHeader);
+  return true;
+}
 
-    if (!AddBlock(blockIndex, chainParams, storage, object.get(), ccCtx, nullptr, fileNo, position[i].offset)) {
-      LOG_F(ERROR, "Can't parse block file %s (invalid block structure)", path);
-      return false;
+BC::Common::BlockIndex *attachBlockData(BlockInMemoryIndex &blockIndex,
+                                        BC::Common::ChainParams &chainParams,
+                                        const BC::Proto::BlockHeader &header,
+                                        const BC::Proto::BlockHashTy &hash,
+                                        bool *checkWork)
+{
+  BC::Common::BlockIndex *index = nullptr;
+  bool alreadyHaveHeader = false;
+
+  {
+    auto It = blockIndex.blockIndex().find(hash);
+    if (It != blockIndex.blockIndex().end()) {
+      // Header (headers-first path) or a stub for predecessor of a known block
+      index = It->second;
+      if (!reserveIndexForData(index, &alreadyHaveHeader))
+        return nullptr;
     }
   }
 
-  return true;
+  // Predecessor index; unlike AddBlock don't allocate a stub for a predecessor we know
+  BC::Common::BlockIndex *prevIndex = nullptr;
+  {
+    auto It = blockIndex.blockIndex().find(header.hashPrevBlock);
+    if (It != blockIndex.blockIndex().end()) {
+      prevIndex = It->second;
+    } else {
+      prevIndex = BC::Common::BlockIndex::create(BSEmpty, nullptr);
+      auto prevIt = blockIndex.blockIndex().insert(std::pair(header.hashPrevBlock, prevIndex));
+      if (!prevIt.second) {
+        delete prevIndex;
+        prevIndex = prevIt.first->second;
+      }
+    }
+  }
+
+  // Try insert incoming block to index
+  if (!index) {
+    index = BC::Common::BlockIndex::create(BSData, prevIndex);
+    auto It = blockIndex.blockIndex().insert(std::pair(hash, index));
+    if (!It.second) {
+      // Already have index for current block
+      delete index;
+      index = It.first->second;
+      if (!reserveIndexForData(index, &alreadyHaveHeader))
+        return nullptr;
+      if (!alreadyHaveHeader) {
+        index->Prev = prevIndex;
+        index->Header = header;
+      }
+    } else {
+      // New index created for current block; prev index already initialized
+      index->Header = header;
+    }
+  } else if (!alreadyHaveHeader) {
+    index->Prev = prevIndex;
+    index->Header = header;
+  }
+
+  // Continue header chain if we see header first time
+  if (!alreadyHaveHeader) {
+    index->ConcurrentHeaderNext = WaitPtr<BC::Common::BlockIndex>();
+    index->ConcurrentHeaderNext = prevIndex->SuccessorHeaders.exchange(index, 0);
+    if (index->ConcurrentHeaderNext.tag() == 1)
+      BuildHeaderChain(chainParams, prevIndex);
+  }
+
+  // A header that came through AddHeader has its consensus check done; one seen first time here
+  // still owes it, and a worker pays it
+  *checkWork = !alreadyHaveHeader;
+  return index;
+}
+
+// Accept a block with an attached index: everything AddBlock does after the index is in place
+static BC::Common::BlockIndex *acceptStagedBlock(BlockInMemoryIndex &blockIndex,
+                                                 BC::Common::ChainParams &chainParams,
+                                                 BC::DB::Storage &storage,
+                                                 BC::Common::BlockIndex *index,
+                                                 BC::Common::CIndexCacheObject *serialized,
+                                                 BC::Common::CheckConsensusCtx &ccCtx,
+                                                 newBestCallback callback,
+                                                 bool checkWork,
+                                                 uint32_t fileNo,
+                                                 uint32_t fileOffset)
+{
+  BC::Proto::Block *block = serialized->block();
+
+  // Failed checks leave the index as AddBlock leaves it: not asked for again
+  index->IndexState.store(BSBlock);
+
+  if (checkWork && !BC::Common::checkConsensus(block->header, ccCtx, chainParams)) {
+    LOG_F(ERROR, "Check Proof-Of-Work failed for block %s", index->Header.GetHash().getHexLE().c_str());
+    return nullptr;
+  }
+
+  if (!validateBlockData(chainParams, storage, serialized))
+    return nullptr;
+
+  publishBlockData(blockIndex, chainParams, storage, index, serialized, callback, fileNo, fileOffset);
+  return index;
+}
+
+bool processBlockData(BlockInMemoryIndex &blockIndex,
+                      BC::Common::ChainParams &chainParams,
+                      BC::DB::Storage &storage,
+                      CStagedBlock &staged,
+                      BC::Common::CheckConsensusCtx &ccCtx,
+                      newBestCallback callback)
+{
+  // Block data travels through the assembler serialized: this is where it is parsed
+  size_t unpackedSize = 0;
+  xmstream stream(staged.data(), staged.Size);
+  BC::Proto::Block *block = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
+  if (!block || stream.remaining() != 0) {
+    // The index was reserved before parsing: left in that state the block would never be asked
+    // for again. A header good on its own goes back to BSHeader, one that arrived with this very
+    // data has nothing to back it
+    if (staged.Index) {
+      bool headerValid = !staged.CheckWork || BC::Common::checkConsensus(staged.Index->Header, ccCtx, chainParams);
+      staged.Index->IndexState.store(headerValid ? BSHeader : BSInvalid);
+      LOG_F(ERROR, "Can't parse block %s: %s",
+            staged.Index->Header.GetHash().getHexLE().c_str(),
+            headerValid ? "block data dropped, will be asked for again" : "header rejected too");
+    } else {
+      LOG_F(ERROR, "Can't parse block (invalid block structure)");
+    }
+
+    return false;
+  }
+
+  // Data owning its buffer alone (from network) hands the bytes to the block object: writeBlock
+  // needs them. Data inside a block file is on disk already
+  void *serializedData = nullptr;
+  size_t serializedMemorySize = 0;
+  if (staged.Exclusive) {
+    serializedMemorySize = staged.Buffer.get()->memorySize();
+    serializedData = staged.Buffer.get()->detach();
+  }
+
+  intrusive_ptr<BC::Common::CIndexCacheObject> object(
+    new BC::Common::CIndexCacheObject(&storage.cache(), serializedData, staged.Size, serializedMemorySize, block, unpackedSize));
+
+  if (staged.Index)
+    return acceptStagedBlock(blockIndex, chainParams, storage, staged.Index, object.get(), ccCtx, callback, staged.CheckWork, staged.FileNo, staged.FileOffset) != nullptr;
+  else
+    return AddBlock(blockIndex, chainParams, storage, object.get(), ccCtx, callback, staged.FileNo, staged.FileOffset) != nullptr;
 }
 
 static bool loadBlockIndexDeserializer(BlockInMemoryIndex &blockIndex, LoadingIndexContext &loadingIndexContext, std::vector<size_t> &blockFileSizes, RawData *data, size_t indexesNum, const char *path)
@@ -838,10 +1000,9 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
 bool reindex(BlockInMemoryIndex &blockIndex,
              const std::filesystem::path &blockPath,
              BC::Common::ChainParams &chainParams,
-             BC::DB::Storage &storage)
+             BC::DB::Storage &storage,
+             CBlockAssembler &assembler)
 {
-  size_t bufferSize = 0;
-  std::unique_ptr<uint8_t[]> data;
   char blockFileName[64];
   unsigned blkFileIndex = 0;
   size_t totalBlockCount = 0;
@@ -849,7 +1010,6 @@ bool reindex(BlockInMemoryIndex &blockIndex,
   auto startTime = std::chrono::steady_clock::now();
 
   std::vector<BlockPosition> blockOffsets;
-  unsigned threadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
 
   for (;;) {
     snprintf(blockFileName, sizeof(blockFileName), "blk%05u.dat", blkFileIndex);
@@ -857,52 +1017,47 @@ bool reindex(BlockInMemoryIndex &blockIndex,
     if (!std::filesystem::exists(path))
       break;
 
-    // Backpressure: not-yet-connected blocks live in the cache, unthrottled
-    // loading eats all memory. Waiting is safe only at a file boundary (the
-    // consumer can always advance); the no-progress escape covers a tail that
-    // links through the next file
+    // Backpressure: staged block data and blocks parsed but not connected yet live in memory,
+    // unthrottled reading eats all of it. Waiting is safe only at a file boundary (the pipeline
+    // can always advance); the no-progress escape covers a tail that links through the next file.
+    // Nothing is held back while waiting: the serial stage may need a block still in the assembler
+    assembler.flushAll();
     {
-      size_t lastCacheSize = storage.cache().size();
+      size_t lastSize = assembler.stagedBytes() + storage.cache().size();
       unsigned noProgress = 0;
-      while (storage.cache().overflow() && noProgress < 100) {
+      while ((assembler.overflow() || storage.cache().overflow()) && noProgress < 100) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        size_t cacheSize = storage.cache().size();
-        noProgress = cacheSize < lastCacheSize ? 0 : noProgress + 1;
-        lastCacheSize = cacheSize;
+        size_t size = assembler.stagedBytes() + storage.cache().size();
+        noProgress = size < lastSize ? 0 : noProgress + 1;
+        lastSize = size;
       }
     }
 
-    // outlives the workers below, which keep the pointer while they run
     std::string pathUtf8 = pathToUtf8(path);
-
     LOG_F(INFO, "Loading block file %s ...", pathUtf8.c_str());
 
-    // Allocate memory for block file
+    // Staged blocks point into this buffer: it lives until the last batch referring to it is done
     size_t blockFileSize = std::filesystem::file_size(path);
-    if (blockFileSize > bufferSize) {
-      data.reset(new uint8_t[blockFileSize]);
-      bufferSize = blockFileSize;
-    }
+    intrusive_ptr<CRawBlockData> buffer(new CRawBlockData(operator new(blockFileSize), blockFileSize, nullptr));
+    uint8_t *data = static_cast<uint8_t*>(buffer.get()->data());
 
     {
       // Read block file
       std::unique_ptr<FILE, std::function<void(FILE*)>> hFile(fopen_path(path, "rb"), [](FILE *f) { fclose(f); });
       if (!hFile.get()) {
         LOG_F(ERROR, "Can't open block file %s", pathUtf8.c_str());
-        // storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
         return false;
       }
 
-      if (fread(data.get(), 1, blockFileSize, hFile.get()) != blockFileSize) {
+      if (fread(data, 1, blockFileSize, hFile.get()) != blockFileSize) {
         LOG_F(ERROR, "Can't read block file %s", pathUtf8.c_str());
-        // storage.queue().push(BC::DB::Task(BC::DB::WriteData, nullptr));
         return false;
       }
     }
 
     {
       blockOffsets.clear();
-      xmstream stream(data.get(), blockFileSize);
+      xmstream stream(data, blockFileSize);
       while (stream.remaining()) {
         size_t headerOffset = stream.offsetOf();
         if (data[headerOffset] == 0) {
@@ -934,27 +1089,25 @@ bool reindex(BlockInMemoryIndex &blockIndex,
       }
     }
 
-    size_t workLoad = blockOffsets.size() / threadsNum;
-    size_t workLoadExtra = blockOffsets.size() % threadsNum;
-    size_t blockOffset = 0;
-    std::unique_ptr<std::future<bool>[]> workers(new std::future<bool>[threadsNum]);
-    for (unsigned i = 0; i < threadsNum; i++) {
-      size_t off = blockOffset;
-      size_t size = workLoad + (i < workLoadExtra);
-      blockOffset += size;
-      workers[i] = std::async(std::launch::async, loadBlocks, std::ref(blockIndex), std::ref(chainParams), std::ref(storage), pathUtf8.c_str(), data.get(), &blockOffsets[0] + off, size, blkFileIndex);
-    }
-
-    for (unsigned i = 0; i < threadsNum; i++) {
-      if (!workers[i].get()) {
+    for (const auto &position: blockOffsets) {
+      // Serialized block starts right after the <magic>:4 <blockSize>:4 record prefix
+      if (assembler.attachFromFile(buffer, position.offset + 8, position.size, blkFileIndex, position.offset) == CBlockAssembler::Invalid) {
+        LOG_F(ERROR, "Can't parse block file %s (invalid block structure)", pathUtf8.c_str());
         return false;
       }
+
+      if (assembler.failed())
+        return false;
     }
 
+    // Keep a batch inside one block file
+    assembler.flush();
+
     LOG_F(INFO,
-          "%u blocks loaded from %s; cache size: %.3lfM best: [%u]%s",
+          "%u blocks read from %s; staging: %.3lfM cache: %.3lfM best: [%u]%s",
           static_cast<unsigned>(blockOffsets.size()),
           pathUtf8.c_str(),
+          assembler.stagedBytes() / 1048576.0f,
           storage.cache().size() / 1048576.0f,
           blockIndex.best()->Height,
           blockIndex.best()->Header.GetHash().getHexLE().c_str());
@@ -964,13 +1117,22 @@ bool reindex(BlockInMemoryIndex &blockIndex,
     blkFileIndex++;
   }
 
-  // The write queue tail is part of reindex work; without draining it the
-  // speed number would exclude up to a full block cache of pending writes
+  // Pipeline and write queue tails are part of reindex work: without draining them the speed
+  // number would exclude a cache worth of pending writes. A block whose predecessor never showed
+  // up in the files is handed over here, not dropped
+  assembler.flushAll();
+  assembler.waitIdle();
+  if (assembler.failed())
+    return false;
+
   while (!storage.queue().empty())
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
   auto best = blockIndex.best();
-  LOG_F(INFO, "%zu blocks loaded from disk", totalBlockCount);
+  LOG_F(INFO, "%zu blocks loaded from disk in %zu batches (%zu blocks out of order)",
+        totalBlockCount,
+        static_cast<size_t>(assembler.batchCount()),
+        static_cast<size_t>(assembler.outOfOrderBlocks()));
   LOG_F(INFO, "Best block is %s (%u)", best->Header.GetHash().getHexLE().c_str(), best->Height);
 
   double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count() / 1000.0;

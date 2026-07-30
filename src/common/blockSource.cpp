@@ -96,7 +96,7 @@ void BlockSource::processTask(TaskHP *task)
     auto now = std::chrono::steady_clock::now();
     std::vector<BC::Common::BlockIndex*> stalledBlocks;
     while (index && !index->OnChain) {
-      if (index->IndexState != BSBlock && std::chrono::duration_cast<std::chrono::seconds>(now-index->DownloadingStartTime).count() >= 8)
+      if (!haveBlockData(index->IndexState) && std::chrono::duration_cast<std::chrono::seconds>(now-index->DownloadingStartTime).count() >= 8)
         stalledBlocks.push_back(index);
       index = index->Prev;
     }

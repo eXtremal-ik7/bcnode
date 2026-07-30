@@ -9,11 +9,15 @@
 #include <chrono>
 
 enum BlockStatus {
-  BSEmpty = 0,
-  BSHeader,
-  BSBlock,
-  BSInvalid
+  BSEmpty = 0,  // stub for a block known only as someone's predecessor: no header yet
+  BSHeader,     // header accepted, no block data
+  BSData,       // block data attached and waiting for the batch pipeline, nothing validated yet
+  BSBlock,      // block data unpacked and accepted (failed checks stay here: not asked again)
+  BSInvalid     // rejected for good: consensus or connect check failed
 };
+
+// Block data is here or on its way through the pipeline: don't ask peers for it again
+static inline bool haveBlockData(BlockStatus state) { return state == BSData || state == BSBlock; }
 
 namespace BTC {
 namespace Common {
@@ -89,6 +93,8 @@ public:
   BlockIndexTy *Next = nullptr;
 
   bool OnChain = false;
+  // Data of this block has left the batch assembler; owned by the assembler
+  bool Batched = false;
 
   UInt<256> ChainWork;
   atomic_intrusive_ptr<CIndexCacheObject> Serialized;
