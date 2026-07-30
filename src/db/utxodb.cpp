@@ -29,39 +29,23 @@ static inline uint32_t packHeight(uint32_t height, bool isCoinbase)
 // The cache is mutated synchronously with every connect/disconnect
 // (including the fast log-pop paths), so it never holds a spent output: a
 // positive needs no cross-check against the shard log
-bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result) const
+bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result, bool cacheOnly) const
 {
-  if (Cache_.enabled() && Cache_.lookupConcurrent(txid.begin(), txoutIdx, [&result](const CUtxoCacheValue &value) {
-        result.resize(sizeof(value.Data));
-        memcpy(result.begin(), value.Data, sizeof(value.Data));
-      }))
-    return true;
+  if (Cache_.enabled()) {
+    if (Cache_.lookupConcurrent(txid.begin(), txoutIdx, [&result](const CUtxoCacheValue &value) {
+          result.resize(sizeof(value.Data));
+          memcpy(result.begin(), value.Data, sizeof(value.Data));
+        }))
+      return true;
+    if (cacheOnly)
+      return false; // the miss is resolved by the serial contextual pass
+  }
 
   CUnspentOutputKey key;
   key.Tx = txid;
   key.Index = txoutIdx;
   return this->find(key, [&result](const void *d, size_t s) {
     // strip the packed height suffix, consumers expect pure UnspentOutputInfo
-    result.resize(s - sizeof(uint32_t));
-    memcpy(result.begin(), d, s - sizeof(uint32_t));
-  });
-}
-
-bool UTXODb::queryCache(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result) const
-{
-  if (Cache_.enabled()) {
-    // cache only: a miss defers the input to the contextual db query
-    return Cache_.lookupConcurrent(txid.begin(), txoutIdx, [&result](const CUtxoCacheValue &value) {
-      result.resize(sizeof(value.Data));
-      memcpy(result.begin(), value.Data, sizeof(value.Data));
-    });
-  }
-
-  // No cache configured: search the entire database
-  CUnspentOutputKey key;
-  key.Tx = txid;
-  key.Index = txoutIdx;
-  return this->find(key, [&result](const void *d, size_t s) {
     result.resize(s - sizeof(uint32_t));
     memcpy(result.begin(), d, s - sizeof(uint32_t));
   });

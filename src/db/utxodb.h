@@ -47,10 +47,12 @@ public:
   UTXODb() : CBaseKV<CUnspentOutputKey>("utxo") {}
   virtual ~UTXODb() {}
   void *interface(int) final { return nullptr; }
-  // Thread safe, search utxo in cache; if it not found - look disk storage
-  bool query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result) const;
-  // Thread safe, search utxo in cache only
-  bool queryCache(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result) const;
+  // Seqlock cache probe, then shard logs and RocksDB. Concurrent loaders
+  // running ahead of connect pass cacheOnly: the miss (usually an output of
+  // a still-unconnected block) is legal and resolved by the serial
+  // contextual pass; a full search from workers measured 2-3% of reindex
+  // wall in negative RocksDB gets. Cache disabled: falls back to the db
+  bool query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result, bool cacheOnly = false) const;
 
   // Cache dump location and the block index resolving the stamp height;
   // must be called before initialize()

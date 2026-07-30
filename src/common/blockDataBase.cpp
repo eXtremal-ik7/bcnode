@@ -45,8 +45,8 @@ bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::
       const auto &txin = tx.txIn[txinIdx];
       auto &txinLinked = txLinked.TxIn[txinIdx];
 
-      if (db.queryCache(txin.previousOutputHash, txin.previousOutputIndex, txinLinked)) {
-        // Unspent output found in cache
+      if (db.query(txin.previousOutputHash, txin.previousOutputIndex, txinLinked, /*cacheOnly=*/true)) {
+        // Unspent output found
       } else {
         // Try find in local block (topology precomputed in validation data)
         uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];

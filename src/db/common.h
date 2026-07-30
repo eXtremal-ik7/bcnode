@@ -59,6 +59,13 @@ struct CLog {
   std::vector<SRevision> Revisions;
   uint32_t NextRev = 0;
 
+  // Window bytes charged for records with no arena footprint (delete
+  // markers): their map slot and undo entry still occupy memory, and a
+  // delete-heavy stretch must still reach the flush threshold
+  size_t PhantomBytes = 0;
+
+  size_t windowSize() { return Log.size() + PhantomBytes; }
+
   const void *find(const CKey &key) { return Map.find(key); }
 
   void update(const BC::Proto::BlockHashTy &blockId, const CKey &key, void *newData) {
@@ -94,6 +101,7 @@ struct CLog {
     Undo.clear();
     Revisions.clear();
     NextRev = 0;
+    PhantomBytes = 0;
     Log.reset();
   }
 };
@@ -310,7 +318,7 @@ public:
     CurrentBlock_ = hash;
 
     for (size_t i = 0; i < BaseCfg_.ShardsNum; i++) {
-      if (shard(i).Log.size() >= FlushLogThreshold_) {
+      if (shard(i).windowSize() >= FlushLogThreshold_) {
         if (AsyncFlushEnabled_)
           freezeAndScheduleFlush(i);
         else
@@ -543,14 +551,23 @@ protected:
 template<typename CKey>
 class CBaseKV : public Base<CKey> {
 private:
+  // Arena record of an add: the payload follows the header. The key is not
+  // stored here - it already lives in the map slot, and the flush reads it
+  // from there
   struct CHeader {
-    CKey Key;
-    size_t Size;
-    bool IsConnected;
-    // Set on a delete whose live value was born in this same window: the key
-    // never reached the disk and the flush drops the pair entirely
-    bool BornInWindow;
+    uint32_t Size;
   };
+
+  // A delete allocates no arena record: the map value is the address of one
+  // of these static markers, distinguished by identity. Tombstone deletes an
+  // on-disk key; BornDead marks a key whose live value was born in this same
+  // window - it never reached the disk and the flush drops the pair entirely
+  static inline CHeader TombstoneMarker_;
+  static inline CHeader BornDeadMarker_;
+
+  static bool isMarker(const void *entry) {
+    return entry == &TombstoneMarker_ || entry == &BornDeadMarker_;
+  }
 
 public:
   CBaseKV(const std::string &name) : Base<CKey>(name) {}
@@ -564,14 +581,10 @@ public:
     std::hash<CKey> hasher;
     CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
 
-    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader) + size));
-    header->Key = key;
-    header->Size = size;
-    header->IsConnected = true;
-    header->BornInWindow = false;
-
-    void *buffer = header + 1;
-    memcpy(buffer, data, size);
+    // record rounded up so every header lands 4-aligned in the arena
+    CHeader *header = static_cast<CHeader*>(shard.Log.alloc((sizeof(CHeader) + size + 3) & ~static_cast<size_t>(3)));
+    header->Size = static_cast<uint32_t>(size);
+    memcpy(header + 1, data, size);
 
     shard.update(blockId, key, header);
   }
@@ -580,19 +593,17 @@ public:
     std::hash<CKey> hasher;
     CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
 
-    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader)));
-    header->Key = key;
-    header->Size = 0;
-    header->IsConnected = false;
-
     // CBaseKV keys are write-once across the chain (outpoint, txid): a live
     // predecessor inside the active window means the key was never flushed,
     // so no on-disk tombstone will be needed. The frozen window does not
     // count - its flush writes the value
-    const CHeader *prev = static_cast<const CHeader*>(shard.find(key));
-    header->BornInWindow = prev && prev->IsConnected;
+    const void *prev = shard.find(key);
+    CHeader *marker = prev && !isMarker(prev) ? &BornDeadMarker_ : &TombstoneMarker_;
 
-    shard.update(blockId, key, header);
+    // no arena record: charge the map slot + undo share to the window
+    shard.PhantomBytes += sizeof(CKey) + 2 * sizeof(void*);
+
+    shard.update(blockId, key, marker);
   }
 
   bool find(const CKey &key, std::function<void(const void*, size_t)> callback) const {
@@ -600,19 +611,19 @@ public:
     size_t shardIndex = hasher(key) % this->BaseCfg_.ShardsNum;
 
     // Active first, frozen second: the newest version of a key shadows the
-    // frozen one and a tombstone in the active log must hide a frozen value
-    const CHeader *header = static_cast<const CHeader*>(this->activeLog(shardIndex)->find(key));
-    if (!header) {
+    // frozen one and a delete marker in the active log must hide a frozen
+    // value
+    const void *entry = this->activeLog(shardIndex)->find(key);
+    if (!entry) {
       if (CLog<CKey> *frozen = this->frozenLog(shardIndex))
-        header = static_cast<const CHeader*>(frozen->find(key));
+        entry = frozen->find(key);
     }
-    if (header) {
-      if (header->IsConnected) {
-        callback(header + 1, header->Size);
-        return true;
-      } else {
+    if (entry) {
+      if (isMarker(entry))
         return false;
-      }
+      const CHeader *header = static_cast<const CHeader*>(entry);
+      callback(header + 1, header->Size);
+      return true;
     }
 
     // find in storage
@@ -649,38 +660,38 @@ private:
     // same-prefix run
     struct CSortedRef {
       uint64_t Prefix;
-      const CHeader *Header;
+      const CKey *Key;        // points into the stable frozen map slot
+      const CHeader *Header;  // nullptr: delete the on-disk key
     };
     std::vector<CSortedRef> refs;
     refs.reserve(shard.Map.used());
     size_t batchBytes = 64;
     size_t annihilated = 0;
-    shard.Map.forEachCurrent([&refs, &batchBytes, &annihilated](const CKey&, void *keyData) {
-      const CHeader *header = static_cast<const CHeader*>(keyData);
-      if (!header->IsConnected && header->BornInWindow) {
+    shard.Map.forEachCurrent([&refs, &batchBytes, &annihilated](const CKey &key, void *value) {
+      if (value == &BornDeadMarker_) {
         annihilated++;
         return;
       }
+      const CHeader *header = value == &TombstoneMarker_ ? nullptr : static_cast<const CHeader*>(value);
       uint64_t prefix = 0;
-      memcpy(&prefix, &header->Key, std::min(sizeof(prefix), sizeof(CKey)));
-      refs.push_back({xhtobe(prefix), header});
-      batchBytes += sizeof(CKey) + 4 + (header->IsConnected ? header->Size + 8 : 0);
+      memcpy(&prefix, &key, std::min(sizeof(prefix), sizeof(CKey)));
+      refs.push_back({xhtobe(prefix), &key, header});
+      batchBytes += sizeof(CKey) + 4 + (header ? header->Size + 8 : 0);
     });
 
     std::sort(refs.begin(), refs.end(), [](const CSortedRef &l, const CSortedRef &r) {
       if (l.Prefix != r.Prefix)
         return l.Prefix < r.Prefix;
-      return memcmp(&l.Header->Key, &r.Header->Key, sizeof(CKey)) < 0;
+      return memcmp(l.Key, r.Key, sizeof(CKey)) < 0;
     });
 
     rocksdb::WriteBatch batch(batchBytes);
     batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(blockId.begin()), sizeof(BC::Proto::BlockHashTy)));
 
     for (const auto &ref: refs) {
-      const CHeader *header = ref.Header;
-      auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(&header->Key), sizeof(CKey));
-      if (header->IsConnected)
-        batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(header + 1), header->Size));
+      auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(ref.Key), sizeof(CKey));
+      if (ref.Header)
+        batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(ref.Header + 1), ref.Header->Size));
       else
         batch.Delete(keySlice);
     }
