@@ -67,12 +67,20 @@ struct CLog {
 
   size_t windowSize() { return Log.size() + PhantomBytes; }
 
+  // The hash that picked this shard is passed on instead of recomputed
   const void *find(const CKey &key) { return Map.find(key); }
+  const void *find(const CKey &key, size_t hash) { return Map.find(key, hash); }
 
-  void update(const BC::Proto::BlockHashTy &blockId, const CKey &key, void *newData) {
+
+  void update(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t hash, void *newData) {
+    updateWith(blockId, key, hash, [newData](void*) { return newData; });
+  }
+
+  // One walk for "write a value derived from the one already there"
+  void updateWith(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t hash, auto &&valueOf) {
     if (Revisions.empty() || Revisions.back().BlockId != blockId)
       Revisions.push_back({blockId, Undo.size(), ++NextRev});
-    auto result = Map.update(key, newData, Revisions.back().Rev);
+    auto result = Map.updateWith(key, hash, Revisions.back().Rev, valueOf);
     if (result.FirstInRev)
       Undo.push_back({key, result.Prev});
   }
@@ -560,7 +568,14 @@ private:
   // stored here - it already lives in the map slot, and the flush reads it
   // from there
   struct CHeader {
-    uint32_t Size;
+    // Top bit of the length: the key may already be on disk, so a later remove
+    // must tombstone it instead of annihilating the pair. Set only where a key
+    // can legally be written twice (the BIP30 coinbase repeat)
+    static constexpr uint32_t MayExistOnDiskFlag = 0x80000000u;
+    uint32_t SizeAndFlag;
+
+    uint32_t size() const { return SizeAndFlag & ~MayExistOnDiskFlag; }
+    bool mayExistOnDisk() const { return (SizeAndFlag & MayExistOnDiskFlag) != 0; }
   };
 
   // A delete allocates no arena record: the map value is the address of one
@@ -587,57 +602,62 @@ public:
   }
 
   // Value glued from two pieces straight in the arena: a "payload + a few bytes of metadata"
-  // caller would otherwise build it in a scratch buffer and copy the record a second time
-  void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size, const void *suffix, size_t suffixSize) {
-    std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
+  // caller would otherwise build it in a scratch buffer and copy the record a second time.
+  // mayOverwrite: the key may already exist, so the record forfeits annihilation
+  void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size, const void *suffix, size_t suffixSize, bool mayOverwrite = false) {
+    // One hash per operation: shard from its high bits, map slot from its low
+    const size_t hash = std::hash<CKey>()(key);
+    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
     // record rounded up so every header lands 4-aligned in the arena
     size_t total = size + suffixSize;
     CHeader *header = static_cast<CHeader*>(shard.Log.alloc((sizeof(CHeader) + total + 3) & ~static_cast<size_t>(3)));
-    header->Size = static_cast<uint32_t>(total);
+    header->SizeAndFlag = static_cast<uint32_t>(total) | (mayOverwrite ? CHeader::MayExistOnDiskFlag : 0);
     uint8_t *value = reinterpret_cast<uint8_t*>(header + 1);
     memcpy(value, data, size);
     if (suffixSize)
       memcpy(value + size, suffix, suffixSize);
 
-    shard.update(blockId, key, header);
+    shard.update(blockId, key, hash, header);
   }
 
   void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key) {
-    std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
-
-    // CBaseKV keys are write-once across the chain (outpoint, txid): a live
-    // predecessor inside the active window means the key was never flushed,
-    // so no on-disk tombstone will be needed. The frozen window does not
-    // count - its flush writes the value
-    const void *prev = shard.find(key);
-    CHeader *marker = prev && !isMarker(prev) ? &BornDeadMarker_ : &TombstoneMarker_;
+    const size_t hash = std::hash<CKey>()(key);
+    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
     // no arena record: charge the map slot + undo share to the window
     shard.PhantomBytes += sizeof(CKey) + 2 * sizeof(void*);
 
-    shard.update(blockId, key, marker);
+    // One walk picks the marker and writes it; a separate find() would walk the
+    // same chain twice. CBaseKV keys are write-once (outpoint, txid) bar the
+    // BIP30 repeat, so a live predecessor in the active window means the key
+    // was never flushed and needs no on-disk tombstone. The frozen window does
+    // not count - its flush writes the value
+    shard.updateWith(blockId, key, hash, [](const void *prev) -> void* {
+      // Born in this window and never flushed: drop the pair whole. A record
+      // that admits the key may also be on disk forfeits that
+      const CHeader *header = prev && !isMarker(prev) ? static_cast<const CHeader*>(prev) : nullptr;
+      return header && !header->mayExistOnDisk() ? &BornDeadMarker_ : &TombstoneMarker_;
+    });
   }
 
   bool find(const CKey &key, std::function<void(const void*, size_t)> callback) const {
-    std::hash<CKey> hasher;
-    size_t shardIndex = fastrange(hasher(key), this->BaseCfg_.ShardsNum);
+    const size_t hash = std::hash<CKey>()(key);
+    size_t shardIndex = fastrange(hash, this->BaseCfg_.ShardsNum);
 
     // Active first, frozen second: the newest version of a key shadows the
     // frozen one and a delete marker in the active log must hide a frozen
     // value
-    const void *entry = this->activeLog(shardIndex)->find(key);
+    const void *entry = this->activeLog(shardIndex)->find(key, hash);
     if (!entry) {
       if (CLog<CKey> *frozen = this->frozenLog(shardIndex))
-        entry = frozen->find(key);
+        entry = frozen->find(key, hash);
     }
     if (entry) {
       if (isMarker(entry))
         return false;
       const CHeader *header = static_cast<const CHeader*>(entry);
-      callback(header + 1, header->Size);
+      callback(header + 1, header->size());
       return true;
     }
 
@@ -691,7 +711,7 @@ private:
       uint64_t prefix = 0;
       memcpy(&prefix, &key, std::min(sizeof(prefix), sizeof(CKey)));
       refs.push_back({xhtobe(prefix), &key, header});
-      batchBytes += sizeof(CKey) + 4 + (header ? header->Size + 8 : 0);
+      batchBytes += sizeof(CKey) + 4 + (header ? header->size() + 8 : 0);
     });
 
     std::sort(refs.begin(), refs.end(), [](const CSortedRef &l, const CSortedRef &r) {
@@ -706,7 +726,7 @@ private:
     for (const auto &ref: refs) {
       auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(ref.Key), sizeof(CKey));
       if (ref.Header)
-        batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(ref.Header + 1), ref.Header->Size));
+        batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(ref.Header + 1), ref.Header->size()));
       else
         batch.Delete(keySlice);
     }
@@ -789,14 +809,14 @@ public:
   rocksdb::MergeOperator *mergeOperator() final { return new MergeOperator(); }
 
   void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size, size_t count) {
-    std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
+    const size_t hash = std::hash<CKey>()(key);
+    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
     // get current array size
     const void *prevData = nullptr;
     size_t prevSize = 0;
     int64_t prevCount = 0;
-    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key));
+    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key, hash));
     if (oldHeader) {
       prevData = oldHeader + 1;
       prevSize = oldHeader->Size;
@@ -813,16 +833,16 @@ public:
       memcpy(dst, prevData, prevSize);
     memcpy(dst + prevSize, data, size);
 
-    shard.update(blockId, key, header);
+    shard.update(blockId, key, hash, header);
   }
 
   void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t count) {
-    std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
+    const size_t hash = std::hash<CKey>()(key);
+    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
     // get current array size
     int64_t prevCount = 0;
-    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key));
+    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key, hash));
     if (oldHeader) {
       prevCount = oldHeader->Count;
     }
@@ -832,12 +852,12 @@ public:
     header->Size = 0;
     header->Count = prevCount - count;
 
-    shard.update(blockId, key, header);
+    shard.update(blockId, key, hash, header);
   }
 
   bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalTxCount) {
-    std::hash<CKey> hasher;
-    size_t shardIdx = fastrange(hasher(key), this->BaseCfg_.ShardsNum);
+    const size_t hash = std::hash<CKey>()(key);
+    size_t shardIdx = fastrange(hash, this->BaseCfg_.ShardsNum);
     CLog<CKey> &mlog = this->shard(shardIdx);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIdx].get();
 
@@ -893,7 +913,7 @@ public:
     }
 
     // Read tail from memory (inMemoryOffset, remaining)
-    const CHeader *header = static_cast<const CHeader*>(mlog.find(key));
+    const CHeader *header = static_cast<const CHeader*>(mlog.find(key, hash));
     if (header) {
       const uint8_t *memoryData = reinterpret_cast<const uint8_t*>(header + 1);
       int64_t available = header->Count - inMemoryOffset;
@@ -1114,13 +1134,13 @@ public:
   // items carry the element delta in Aggregate; the call folds them into
   // window-relative running sums, rebased to absolute values at flush
   void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CItem *items, size_t count) {
-    std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
+    const size_t hash = std::hash<CKey>()(key);
+    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
     const void *prevData = nullptr;
     size_t prevSize = 0;
     int64_t prevCount = 0;
-    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key));
+    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key, hash));
     if (oldHeader) {
       prevData = oldHeader + 1;
       prevSize = oldHeader->Size;
@@ -1143,15 +1163,15 @@ public:
       newItems[i].Aggregate = running;
     }
 
-    shard.update(blockId, key, header);
+    shard.update(blockId, key, hash, header);
   }
 
   void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t count) {
-    std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
+    const size_t hash = std::hash<CKey>()(key);
+    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
     int64_t prevCount = 0;
-    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key));
+    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key, hash));
     if (oldHeader)
       prevCount = oldHeader->Count;
 
@@ -1160,12 +1180,12 @@ public:
     header->Size = 0;
     header->Count = prevCount - count;
 
-    shard.update(blockId, key, header);
+    shard.update(blockId, key, hash, header);
   }
 
   bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalCount) {
-    std::hash<CKey> hasher;
-    size_t shardIdx = fastrange(hasher(key), this->BaseCfg_.ShardsNum);
+    const size_t hash = std::hash<CKey>()(key);
+    size_t shardIdx = fastrange(hash, this->BaseCfg_.ShardsNum);
     CLog<CKey> &mlog = this->shard(shardIdx);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIdx].get();
 
@@ -1232,7 +1252,7 @@ public:
     }
 
     // Window tail: rebase window-relative running sums by the durable aggregate
-    const CHeader *header = static_cast<const CHeader*>(mlog.find(key));
+    const CHeader *header = static_cast<const CHeader*>(mlog.find(key, hash));
     if (header) {
       const uint8_t *memoryData = reinterpret_cast<const uint8_t*>(header + 1);
       int64_t windowCount = header->Size / sizeof(CItem);
@@ -1592,21 +1612,21 @@ public:
   }
 
   void merge(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CValue &delta) {
-    std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
+    const size_t hash = std::hash<CKey>()(key);
+    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
     CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader)));
     header->Key = key;
-    const CHeader *prev = static_cast<const CHeader*>(shard.find(key));
+    const CHeader *prev = static_cast<const CHeader*>(shard.find(key, hash));
     header->Value = prev ? prev->Value : CValue();
     header->Value.merge(delta);
 
-    shard.update(blockId, key, header);
+    shard.update(blockId, key, hash, header);
   }
 
   bool find(const CKey &key, CValue &value) const {
-    std::hash<CKey> hasher;
-    size_t shardIndex = fastrange(hasher(key), this->BaseCfg_.ShardsNum);
+    const size_t hash = std::hash<CKey>()(key);
+    size_t shardIndex = fastrange(hash, this->BaseCfg_.ShardsNum);
     // async flush is never enabled for merge tables, the frozen log can't exist
     CLog<CKey> &shard = *this->activeLog(shardIndex);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
@@ -1625,7 +1645,7 @@ public:
     if (storage->Get(rocksdb::ReadOptions(), keySlice, &data).ok() && data.size() == sizeof(CValue))
       memcpy(&value, data.data(), sizeof(CValue));
 
-    const CHeader *header = static_cast<const CHeader*>(shard.find(key));
+    const CHeader *header = static_cast<const CHeader*>(shard.find(key, hash));
     if (header)
       value.merge(header->Value);
 

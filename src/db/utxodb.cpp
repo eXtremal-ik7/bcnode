@@ -177,16 +177,23 @@ void UTXODb::saveCache()
   }
 }
 
-void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
-                         const BC::Proto::Block &block,
-                         const BC::Proto::CBlockLinkedOutputs&,
-                         const BC::Proto::CBlockValidationData &validationData,
-                         BlockInMemoryIndex&,
-                         BlockDatabase&)
+// The connect walk, shared by the log path and the cache-only pop path
+// (withLog false, where the shard log already took the operation as a pop of
+// the pending disconnect - the cache has no pop). Both honour the run pair
+// marks: the pop path is reached only after a full disconnect dropped them,
+// so there the checks are free
+void UTXODb::connectCommon(const BC::Common::BlockIndex *index,
+                           const BC::Proto::Block &block,
+                           const BC::Proto::CBlockValidationData &validationData,
+                           bool withLog)
 {
-  const auto blockId = index->Header.GetHash();
-  const uint32_t height = index->Height;
   assert(validationData.TxIds.size() == block.vtx.size());
+  const uint32_t height = index->Height;
+
+  // a sha256d of the header: the pop path addresses no log and must not pay for it
+  BC::Proto::BlockHashTy blockId;
+  if (withLog)
+    blockId = index->Header.GetHash();
 
   if (Cache_.enabled())
     Cache_.maintain();
@@ -199,41 +206,26 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
   // disconnect that splits it puts the output back
   size_t outOrdinal = 0;
   size_t inOrdinal = 0;
-  // Coinbase
-  {
+  for (size_t i = 0; i < block.vtx.size(); i++) {
+    const auto &tx = block.vtx[i];
+    const bool isCoinbase = i == 0;
+
     // txin in coinbase can't spent anything
-    const auto &coinbaseTx = block.vtx[0];
-    const uint32_t packed = packHeight(height, true);
-    key.Tx = validationData.TxIds[0];
-    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
-        continue;
-      size_t infoSize;
-      const void *info = validationData.outputData(outOrdinal, infoSize);
-      if (infoSize) {
-        key.Index = static_cast<uint32_t>(i);
-        this->add(blockId, key, info, infoSize, &packed, sizeof(packed));
-        cacheAdd(key, info, infoSize, height, true);
+    if (!isCoinbase) {
+      for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+        if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx ||
+            validationData.inputSpendsInBatch(inOrdinal))
+          continue;
+        const auto &txIn = tx.txIn[j];
+        key.Tx = txIn.previousOutputHash;
+        key.Index = txIn.previousOutputIndex;
+        if (withLog)
+          this->remove(blockId, key);
+        cacheRemove(key);
       }
     }
-  }
 
-  // Other transactions
-  const uint32_t packed = packHeight(height, false);
-  for (size_t i = 1; i < block.vtx.size(); i++) {
-    const auto &tx = block.vtx[i];
-
-    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
-      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx ||
-          validationData.inputSpendsInBatch(inOrdinal))
-        continue;
-      const auto &txIn = tx.txIn[j];
-      key.Tx = txIn.previousOutputHash;
-      key.Index = txIn.previousOutputIndex;
-      this->remove(blockId, key);
-      cacheRemove(key);
-    }
-
+    const uint32_t packed = packHeight(height, isCoinbase);
     key.Tx = validationData.TxIds[i];
     for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
       if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
@@ -242,13 +234,96 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
       const void *info = validationData.outputData(outOrdinal, infoSize);
       if (infoSize) {
         key.Index = static_cast<uint32_t>(j);
-        this->add(blockId, key, info, infoSize, &packed, sizeof(packed));
-        cacheAdd(key, info, infoSize, height, false);
+        if (withLog)
+          this->add(blockId, key, info, infoSize, &packed, sizeof(packed), validationData.CoinbaseRepeat);
+        cacheAdd(key, info, infoSize, height, isCoinbase);
       }
     }
   }
   assert(inOrdinal == validationData.InputLocalTx.size());
   assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
+}
+
+// The disconnect walk, shared the same way. Neither path honours the run pair
+// marks: a same-block pair was never connected, so neither side is undone, but
+// a run pair is where the hiding ends - the input puts the output back although
+// the connect never took it away, and the marks are dropped right after, so
+// from here both blocks are plain. The pop path never sees a pair-hiding block
+// at all (cancelableConnect), so for it the marks are empty anyway
+void UTXODb::disconnectCommon(const BC::Common::BlockIndex *index,
+                              const BC::Proto::Block &block,
+                              const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                              const BC::Proto::CBlockValidationData &validationData,
+                              bool withLog)
+{
+  assert(validationData.TxIds.size() == block.vtx.size());
+  assert(linkedOutputs.Tx.size() == block.vtx.size());
+  // The creation height of a restored output is unknown here; the height of
+  // the disconnected block is an upper bound (and its coinbase flag is
+  // unknowable, but a coinbase spend sits 100+ blocks below any reorg). It
+  // skews eviction aging and maturity metadata of reorged spends only
+  const uint32_t height = index->Height;
+  const uint32_t packed = packHeight(height, false);
+  BC::Proto::BlockHashTy blockId;
+  if (withLog)
+    blockId = index->Header.GetHash();
+
+  if (Cache_.enabled())
+    Cache_.maintain();
+
+  CUnspentOutputKey key;
+  size_t outOrdinal = 0;
+  size_t inOrdinal = 0;
+  for (size_t i = 0; i < block.vtx.size(); i++) {
+    const auto &tx = block.vtx[i];
+
+    // txin in coinbase can't spent anything
+    if (i != 0) {
+      const auto &linkedTx = linkedOutputs.Tx[i];
+      assert(linkedTx.TxIn.size() == tx.txIn.size());
+
+      for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+        if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
+          continue;
+        const auto &txIn = tx.txIn[j];
+        const auto &linkedTxin = linkedTx.TxIn[j];
+
+        assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
+
+        key.Tx = txIn.previousOutputHash;
+        key.Index = txIn.previousOutputIndex;
+        if (withLog)
+          this->add(blockId, key, linkedTxin.data(), linkedTxin.size(), &packed, sizeof(packed));
+        cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height, false);
+      }
+    }
+
+    key.Tx = validationData.TxIds[i];
+    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
+      if (validationData.outputSpentLocally(outOrdinal))
+        continue;
+      size_t infoSize;
+      validationData.outputData(outOrdinal, infoSize);
+      if (infoSize) {
+        key.Index = static_cast<uint32_t>(j);
+        if (withLog)
+          this->remove(blockId, key);
+        cacheRemove(key);
+      }
+    }
+  }
+  assert(inOrdinal == validationData.InputLocalTx.size());
+  assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
+}
+
+void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
+                         const BC::Proto::Block &block,
+                         const BC::Proto::CBlockLinkedOutputs&,
+                         const BC::Proto::CBlockValidationData &validationData,
+                         BlockInMemoryIndex&,
+                         BlockDatabase&)
+{
+  connectCommon(index, block, validationData, true);
 }
 
 void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
@@ -258,79 +333,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
-  const auto blockId = index->Header.GetHash();
-  assert(validationData.TxIds.size() == block.vtx.size());
-  // The creation height of a restored output is unknown here; the height of
-  // the disconnected block is an upper bound (and its coinbase flag is
-  // unknowable, but a coinbase spend sits 100+ blocks below any reorg). It
-  // skews eviction aging and maturity metadata of reorged spends only
-  const uint32_t height = index->Height;
-  const uint32_t packed = packHeight(height, false);
-
-  if (Cache_.enabled())
-    Cache_.maintain();
-
-  CUnspentOutputKey key;
-  // A same-block pair was never connected, so neither side is undone. A run pair is where the
-  // hiding ends: the input puts the output back although the connect never took it away, and the
-  // marks are dropped right after, so from here both blocks are plain
-  size_t outOrdinal = 0;
-  size_t inOrdinal = 0;
-  // Coinbase
-  {
-    // txin in coinbase can't spent anything
-    const auto &coinbaseTx = block.vtx[0];
-    key.Tx = validationData.TxIds[0];
-    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal))
-        continue;
-      size_t infoSize;
-      validationData.outputData(outOrdinal, infoSize);
-      if (infoSize) {
-        key.Index = static_cast<uint32_t>(i);
-        this->remove(blockId, key);
-        cacheRemove(key);
-      }
-    }
-  }
-
-  // Other transactions
-  assert(linkedOutputs.Tx.size() == block.vtx.size());
-
-  for (size_t i = 1; i < block.vtx.size(); i++) {
-    const auto &tx = block.vtx[i];
-    const auto &linkedTx = linkedOutputs.Tx[i];
-    assert(linkedTx.TxIn.size() == tx.txIn.size());
-
-    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
-      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
-        continue;
-      const auto &txIn = tx.txIn[j];
-      const auto &linkedTxin = linkedTx.TxIn[j];
-
-      assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
-
-      key.Tx = txIn.previousOutputHash;
-      key.Index = txIn.previousOutputIndex;
-      this->add(blockId, key, linkedTxin.data(), linkedTxin.size(), &packed, sizeof(packed));
-      cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height, false);
-    }
-
-    key.Tx = validationData.TxIds[i];
-    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal))
-        continue;
-      size_t infoSize;
-      validationData.outputData(outOrdinal, infoSize);
-      if (infoSize) {
-        key.Index = static_cast<uint32_t>(j);
-        this->remove(blockId, key);
-        cacheRemove(key);
-      }
-    }
-  }
-  assert(inOrdinal == validationData.InputLocalTx.size());
-  assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
+  disconnectCommon(index, block, linkedOutputs, validationData, true);
 }
 
 void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
@@ -341,58 +344,7 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
   assert(validationData.TxIds.size() == block.vtx.size());
   if (!Cache_.enabled())
     return;
-
-  // The log connect happened as a pop of the pending disconnect; mirror it
-  // for the cache, which has no pop
-  const uint32_t height = index->Height;
-
-  Cache_.maintain();
-
-  CUnspentOutputKey key;
-  // Mirrors connectImpl: the cache never saw either pair kind. Reached only with the marks
-  // already dropped - a block that hides pairs never takes the pop path (see CBaseDb::disconnect)
-  size_t outOrdinal = 0;
-  size_t inOrdinal = 0;
-  {
-    const auto &coinbaseTx = block.vtx[0];
-    key.Tx = validationData.TxIds[0];
-    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
-        continue;
-      size_t infoSize;
-      const void *info = validationData.outputData(outOrdinal, infoSize);
-      if (infoSize) {
-        key.Index = static_cast<uint32_t>(i);
-        cacheAdd(key, info, infoSize, height, true);
-      }
-    }
-  }
-
-  for (size_t i = 1; i < block.vtx.size(); i++) {
-    const auto &tx = block.vtx[i];
-
-    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
-      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
-        continue;
-      key.Tx = tx.txIn[j].previousOutputHash;
-      key.Index = tx.txIn[j].previousOutputIndex;
-      cacheRemove(key);
-    }
-
-    key.Tx = validationData.TxIds[i];
-    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
-        continue;
-      size_t infoSize;
-      const void *info = validationData.outputData(outOrdinal, infoSize);
-      if (infoSize) {
-        key.Index = static_cast<uint32_t>(j);
-        cacheAdd(key, info, infoSize, height, false);
-      }
-    }
-  }
-  assert(inOrdinal == validationData.InputLocalTx.size());
-  assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
+  connectCommon(index, block, validationData, false);
 }
 
 void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
@@ -403,63 +355,7 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
   assert(validationData.TxIds.size() == block.vtx.size());
   if (!Cache_.enabled())
     return;
-
-  // The log disconnect happened as a pop of the pending connect; mirror it
-  // for the cache, which has no pop
-  const uint32_t height = index->Height;
-
-  Cache_.maintain();
-
-  CUnspentOutputKey key;
-  // Exact inverse of connectImpl: what the connect never wrote must not be undone
-  size_t outOrdinal = 0;
-  size_t inOrdinal = 0;
-  {
-    const auto &coinbaseTx = block.vtx[0];
-    key.Tx = validationData.TxIds[0];
-    for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
-        continue;
-      size_t infoSize;
-      validationData.outputData(outOrdinal, infoSize);
-      if (infoSize) {
-        key.Index = static_cast<uint32_t>(i);
-        cacheRemove(key);
-      }
-    }
-  }
-
-  assert(linkedOutputs.Tx.size() == block.vtx.size());
-
-  for (size_t i = 1; i < block.vtx.size(); i++) {
-    const auto &tx = block.vtx[i];
-    const auto &linkedTx = linkedOutputs.Tx[i];
-    assert(linkedTx.TxIn.size() == tx.txIn.size());
-
-    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
-      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx ||
-          validationData.inputSpendsInBatch(inOrdinal))
-        continue;
-      const auto &linkedTxin = linkedTx.TxIn[j];
-      key.Tx = tx.txIn[j].previousOutputHash;
-      key.Index = tx.txIn[j].previousOutputIndex;
-      cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height, false);
-    }
-
-    key.Tx = validationData.TxIds[i];
-    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
-        continue;
-      size_t infoSize;
-      validationData.outputData(outOrdinal, infoSize);
-      if (infoSize) {
-        key.Index = static_cast<uint32_t>(j);
-        cacheRemove(key);
-      }
-    }
-  }
-  assert(inOrdinal == validationData.InputLocalTx.size());
-  assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
+  disconnectCommon(index, block, linkedOutputs, validationData, false);
 }
 
 }

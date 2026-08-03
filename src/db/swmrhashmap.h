@@ -183,11 +183,16 @@ public:
 
   // reader side: wait-free, legal at any time. nullptr = not in this window
   // (a tombstone reports the same: the caller falls through to the frozen
-  // log / disk, where the key is guaranteed older than this window)
-  void *find(const CKey &key) const {
+  // log / disk, where the key is guaranteed older than this window).
+  //
+  // Every entry point has a hash overload taking the value the caller already
+  // computed to pick the shard; it must equal CHasher's for that key
+  void *find(const CKey &key) const { return find(key, Hasher_(key)); }
+
+  void *find(const CKey &key, size_t hash) const {
     const STable *t = Table_.load(std::memory_order_acquire);
     const uint64_t gen = Gen_.load(std::memory_order_relaxed);
-    size_t idx = Hasher_(key) & t->Mask;
+    size_t idx = hash & t->Mask;
     for (size_t probe = 0; probe <= t->Mask; probe++, idx = (idx + 1) & t->Mask) {
       const SSlot &s = t->Slots[idx];
       const uint64_t g = s.Gen.load(std::memory_order_acquire);
@@ -207,13 +212,48 @@ public:
     return nullptr;
   }
 
+  // Warm a slot and its TLB entry ahead of an update. A pure hint: a wrong or
+  // unused prefetch costs one instruction and no correctness. Unused today -
+  // per-outpoint lookahead in the connect walk measured slower than none
+  void prefetch(size_t hash) const {
+    const STable *t = Table_.load(std::memory_order_relaxed);
+    const char *p = reinterpret_cast<const char*>(&t->Slots[hash & t->Mask]);
+#ifdef _MSC_VER
+    _mm_prefetch(p, _MM_HINT_T0);
+    _mm_prefetch(p + sizeof(SSlot) - 1, _MM_HINT_T0);
+#else
+    __builtin_prefetch(p, 1, 3);
+    // a slot is neither a cache line nor aligned to one, so it usually straddles two
+    __builtin_prefetch(p + sizeof(SSlot) - 1, 1, 3);
+#endif
+  }
+
+  void prefetch(const CKey &key) const { prefetch(Hasher_(key)); }
+
   // mutator side: insert or update, disjoint-key concurrent safe.
   // rev deduplicates undo records: the first touch of a key in a revision
   // reports FirstInRev and the caller records {key, Prev} for pop()
   SUpdateResult update(const CKey &key, void *value, uint32_t rev) {
+    return update(key, Hasher_(key), value, rev);
+  }
+
+  SUpdateResult update(const CKey &key, size_t hash, void *value, uint32_t rev) {
+    return updateWith(key, hash, rev, [value](void*) { return value; });
+  }
+
+  template<typename F>
+  SUpdateResult updateWith(const CKey &key, uint32_t rev, F &&valueOf) {
+    return updateWith(key, Hasher_(key), rev, valueOf);
+  }
+
+  // Same walk, but the value is derived from the previous one: a caller that
+  // needs "read what is there, then write something based on it" (CBaseKV
+  // picks its delete marker that way) would otherwise probe the chain twice
+  template<typename F>
+  SUpdateResult updateWith(const CKey &key, size_t hash, uint32_t rev, F &&valueOf) {
     STable *t = Table_.load(std::memory_order_relaxed);
     const uint64_t gen = Gen_.load(std::memory_order_relaxed);
-    size_t idx = Hasher_(key) & t->Mask;
+    size_t idx = hash & t->Mask;
     for (size_t probe = 0; probe <= t->Mask; probe++, idx = (idx + 1) & t->Mask) {
       SSlot &s = t->Slots[idx];
       uint64_t g = s.Gen.load(std::memory_order_acquire);
@@ -222,10 +262,12 @@ public:
           continue;
         // our own published slot: nobody else touches this key
         void *prev = s.Ptr.load(std::memory_order_relaxed);
+        if (prev == tombstone())
+          prev = nullptr;
         bool first = s.LastRev != rev;
         s.LastRev = rev;
-        s.Ptr.store(value, std::memory_order_release);
-        return {prev == tombstone() ? nullptr : prev, first};
+        s.Ptr.store(valueOf(prev), std::memory_order_release);
+        return {prev, first};
       }
       if (g == gen + 1)
         continue; // another mutator mid-insert (a different key by contract)
@@ -242,7 +284,7 @@ public:
           continue;
         s.Key = key;
         s.LastRev = rev;
-        s.Ptr.store(value, std::memory_order_relaxed);
+        s.Ptr.store(valueOf(nullptr), std::memory_order_relaxed);
         s.Gen.store(gen, std::memory_order_release); // publish key + value together
         atomicAdd(Used_, 1);
         // single-writer growth; a concurrent wave must have reserve()d, so
@@ -254,7 +296,7 @@ public:
 
       s.Key = key;
       s.LastRev = rev;
-      s.Ptr.store(value, std::memory_order_relaxed);
+      s.Ptr.store(valueOf(nullptr), std::memory_order_relaxed);
       s.Gen.store(gen, std::memory_order_release); // publish key + value together
       Used_++;
       if (Used_ > t->Capacity - t->Capacity / 4)

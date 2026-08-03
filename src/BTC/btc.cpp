@@ -33,6 +33,13 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->BIP34Height = 227931;
     params->SegwitHeight = 481824;
 
+    // 91842 repeats the coinbase of 91812, 91880 that of 91722. Hashes read
+    // back from the chain itself and identical to Core's IsBIP30Repeat
+    params->BIP30Repeats = {
+      {91842, Proto::BlockHashTy::fromHexLE("00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")},
+      {91880, Proto::BlockHashTy::fromHexLE("00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")}
+    };
+
     {
       // Genesis block
       params->GenesisBlock.header.nVersion = 1;
@@ -272,11 +279,20 @@ bool checkBlockStandalone(const Proto::Block &block, Proto::CBlockValidationData
 
 bool checkBlockContextual(const BlockIndex &index,
                           const Proto::Block &block,
-                          const Proto::CBlockValidationData &validation,
+                          Proto::CBlockValidationData &validation,
                           const Proto::CBlockLinkedOutputs&,
                           const ChainParams &chainParams,
                           std::string &error)
 {
+  // Height first: only the exempt blocks ever pay for the hash
+  validation.CoinbaseRepeat = false;
+  for (const auto &repeat: chainParams.BIP30Repeats) {
+    if (index.Height == repeat.first && index.Header.GetHash() == repeat.second) {
+      validation.CoinbaseRepeat = true;
+      break;
+    }
+  }
+
   bool isValid = true;
   isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
   isValid &= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);

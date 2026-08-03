@@ -648,7 +648,9 @@ static void resolveSegmentInputs(CSegment &segment)
           }
         }
 
-        if (spent) {
+        // A BIP30 repeat is valid with the twin's coins still live and overwrites them. Either
+        // way the newer transaction becomes the creator a later spend links to
+        if (spent || validationData.CoinbaseRepeat) {
           twin->Block = static_cast<uint32_t>(pos);
           twin->TxIdx = static_cast<uint32_t>(txIdx);
           twin->OutBase = outBase;

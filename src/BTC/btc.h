@@ -54,6 +54,12 @@ namespace Common {
     uint32_t BIP34Height;
     uint32_t SegwitHeight;
 
+    // Blocks valid despite repeating an earlier coinbase transaction: BIP30 was
+    // not enforced when they were mined, so the repeat overwrites the earlier
+    // coin. Pinned by height AND hash (Core's IsBIP30Repeat) so no other block
+    // at the same height inherits the exemption; BIP34 made new ones impossible
+    std::vector<std::pair<uint32_t, Proto::BlockHashTy>> BIP30Repeats;
+
     // Prefixes
     std::vector<uint8_t> PublicKeyPrefix;
     std::vector<uint8_t> ScriptPrefix;
@@ -100,9 +106,11 @@ namespace Common {
                             Proto::CBlockValidationData &validation,
                             const ChainParams &chainParams,
                             std::string &error);
+  // Validation data is non-const: this is where a block learns the consensus
+  // exemptions its place in the chain grants it
   bool checkBlockContextual(const BlockIndex &index,
                             const Proto::Block &block,
-                            const Proto::CBlockValidationData &validation,
+                            Proto::CBlockValidationData &validation,
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
                             std::string &error);

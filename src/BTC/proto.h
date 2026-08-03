@@ -294,6 +294,9 @@ struct NetworkAddress {
     // this block, or an input taking an output that does not exist. Found where the topology is
     // built, so the linking of a segment needs no per block bookkeeping for it
     bool LocalSpendInvalid = false;
+    // This block may repeat an earlier coinbase transaction: its outputs overwrite the twin's
+    // coins, destroying them (ChainParams::BIP30Repeats). Set by the contextual check
+    bool CoinbaseRepeat = false;
     // txid of every transaction, parallel to block.vtx ([0] = coinbase);
     // checkBlockStandalone verifies them against the header merkle root
     xvector<TxHashTy> TxIds;
