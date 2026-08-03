@@ -184,7 +184,6 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
                          BlockInMemoryIndex&,
                          BlockDatabase&)
 {
-  SmallStream<1024> serialized;
   const auto blockId = index->Header.GetHash();
   const uint32_t height = index->Height;
   assert(validationData.TxIds.size() == block.vtx.size());
@@ -195,7 +194,9 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
   CUnspentOutputKey key;
   // An output spent by a later tx of the same block (and that input itself)
   // is skipped entirely: the pair is invisible outside its block, so neither
-  // the log nor the cache ever sees it
+  // the log nor the cache ever sees it. A pair spanning two blocks of one run
+  // is skipped the same way - the run connects as one operation, and the
+  // disconnect that splits it puts the output back
   size_t outOrdinal = 0;
   size_t inOrdinal = 0;
   // Coinbase
@@ -205,19 +206,14 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
     const uint32_t packed = packHeight(height, true);
     key.Tx = validationData.TxIds[0];
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal))
+      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
         continue;
-      const auto &txOut = coinbaseTx.txOut[i];
-      key.Index = static_cast<uint32_t>(i);
-
-      serialized.reset();
-      BTC::Script::parseTransactionOutput(txOut, serialized);
-      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
-      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
-        size_t infoSize = serialized.sizeOf();
-        serialized.write(&packed, sizeof(packed));
-        this->add(blockId, key, serialized.data(), serialized.sizeOf());
-        cacheAdd(key, serialized.data(), infoSize, height, true);
+      size_t infoSize;
+      const void *info = validationData.outputData(outOrdinal, infoSize);
+      if (infoSize) {
+        key.Index = static_cast<uint32_t>(i);
+        this->add(blockId, key, info, infoSize, &packed, sizeof(packed));
+        cacheAdd(key, info, infoSize, height, true);
       }
     }
   }
@@ -228,7 +224,8 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
     const auto &tx = block.vtx[i];
 
     for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
-      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
+      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx ||
+          validationData.inputSpendsInBatch(inOrdinal))
         continue;
       const auto &txIn = tx.txIn[j];
       key.Tx = txIn.previousOutputHash;
@@ -239,19 +236,14 @@ void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
 
     key.Tx = validationData.TxIds[i];
     for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal))
+      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
         continue;
-      const auto &txOut = tx.txOut[j];
-      key.Index = static_cast<uint32_t>(j);
-
-      serialized.reset();
-      BTC::Script::parseTransactionOutput(txOut, serialized);
-      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
-      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
-        size_t infoSize = serialized.sizeOf();
-        serialized.write(&packed, sizeof(packed));
-        this->add(blockId, key, serialized.data(), serialized.sizeOf());
-        cacheAdd(key, serialized.data(), infoSize, height, false);
+      size_t infoSize;
+      const void *info = validationData.outputData(outOrdinal, infoSize);
+      if (infoSize) {
+        key.Index = static_cast<uint32_t>(j);
+        this->add(blockId, key, info, infoSize, &packed, sizeof(packed));
+        cacheAdd(key, info, infoSize, height, false);
       }
     }
   }
@@ -266,7 +258,6 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
-  SmallStream<1024> serialized;
   const auto blockId = index->Header.GetHash();
   assert(validationData.TxIds.size() == block.vtx.size());
   // The creation height of a restored output is unknown here; the height of
@@ -280,7 +271,9 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
     Cache_.maintain();
 
   CUnspentOutputKey key;
-  // Same-block pairs were never connected, so neither side is undone here
+  // A same-block pair was never connected, so neither side is undone. A run pair is where the
+  // hiding ends: the input puts the output back although the connect never took it away, and the
+  // marks are dropped right after, so from here both blocks are plain
   size_t outOrdinal = 0;
   size_t inOrdinal = 0;
   // Coinbase
@@ -291,10 +284,9 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
       if (validationData.outputSpentLocally(outOrdinal))
         continue;
-      serialized.reset();
-      BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
-      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
-      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
+      size_t infoSize;
+      validationData.outputData(outOrdinal, infoSize);
+      if (infoSize) {
         key.Index = static_cast<uint32_t>(i);
         this->remove(blockId, key);
         cacheRemove(key);
@@ -320,10 +312,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
 
       key.Tx = txIn.previousOutputHash;
       key.Index = txIn.previousOutputIndex;
-      serialized.reset();
-      serialized.write(linkedTxin.data(), linkedTxin.size());
-      serialized.write(&packed, sizeof(packed));
-      this->add(blockId, key, serialized.data(), serialized.sizeOf());
+      this->add(blockId, key, linkedTxin.data(), linkedTxin.size(), &packed, sizeof(packed));
       cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height, false);
     }
 
@@ -331,10 +320,9 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
     for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
       if (validationData.outputSpentLocally(outOrdinal))
         continue;
-      serialized.reset();
-      BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
-      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
-      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
+      size_t infoSize;
+      validationData.outputData(outOrdinal, infoSize);
+      if (infoSize) {
         key.Index = static_cast<uint32_t>(j);
         this->remove(blockId, key);
         cacheRemove(key);
@@ -356,27 +344,26 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
 
   // The log connect happened as a pop of the pending disconnect; mirror it
   // for the cache, which has no pop
-  SmallStream<1024> serialized;
   const uint32_t height = index->Height;
 
   Cache_.maintain();
 
   CUnspentOutputKey key;
-  // Same-block pairs mirror connectImpl: the cache never saw them
+  // Mirrors connectImpl: the cache never saw either pair kind. Reached only with the marks
+  // already dropped - a block that hides pairs never takes the pop path (see CBaseDb::disconnect)
   size_t outOrdinal = 0;
   size_t inOrdinal = 0;
   {
     const auto &coinbaseTx = block.vtx[0];
     key.Tx = validationData.TxIds[0];
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal))
+      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
         continue;
-      serialized.reset();
-      BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
-      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
-      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
+      size_t infoSize;
+      const void *info = validationData.outputData(outOrdinal, infoSize);
+      if (infoSize) {
         key.Index = static_cast<uint32_t>(i);
-        cacheAdd(key, serialized.data(), serialized.sizeOf(), height, true);
+        cacheAdd(key, info, infoSize, height, true);
       }
     }
   }
@@ -394,14 +381,13 @@ void UTXODb::connectFastImpl(const BC::Common::BlockIndex *index,
 
     key.Tx = validationData.TxIds[i];
     for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal))
+      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
         continue;
-      serialized.reset();
-      BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
-      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
-      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
+      size_t infoSize;
+      const void *info = validationData.outputData(outOrdinal, infoSize);
+      if (infoSize) {
         key.Index = static_cast<uint32_t>(j);
-        cacheAdd(key, serialized.data(), serialized.sizeOf(), height, false);
+        cacheAdd(key, info, infoSize, height, false);
       }
     }
   }
@@ -420,25 +406,23 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
 
   // The log disconnect happened as a pop of the pending connect; mirror it
   // for the cache, which has no pop
-  SmallStream<1024> serialized;
   const uint32_t height = index->Height;
 
   Cache_.maintain();
 
   CUnspentOutputKey key;
-  // Same-block pairs mirror disconnectImpl: the cache never saw them
+  // Exact inverse of connectImpl: what the connect never wrote must not be undone
   size_t outOrdinal = 0;
   size_t inOrdinal = 0;
   {
     const auto &coinbaseTx = block.vtx[0];
     key.Tx = validationData.TxIds[0];
     for (size_t i = 0; i < coinbaseTx.txOut.size(); i++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal))
+      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
         continue;
-      serialized.reset();
-      BTC::Script::parseTransactionOutput(coinbaseTx.txOut[i], serialized);
-      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
-      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
+      size_t infoSize;
+      validationData.outputData(outOrdinal, infoSize);
+      if (infoSize) {
         key.Index = static_cast<uint32_t>(i);
         cacheRemove(key);
       }
@@ -453,7 +437,8 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
     assert(linkedTx.TxIn.size() == tx.txIn.size());
 
     for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
-      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
+      if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx ||
+          validationData.inputSpendsInBatch(inOrdinal))
         continue;
       const auto &linkedTxin = linkedTx.TxIn[j];
       key.Tx = tx.txIn[j].previousOutputHash;
@@ -463,12 +448,11 @@ void UTXODb::disconnectFastImpl(const BC::Common::BlockIndex *index,
 
     key.Tx = validationData.TxIds[i];
     for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal))
+      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
         continue;
-      serialized.reset();
-      BTC::Script::parseTransactionOutput(tx.txOut[j], serialized);
-      const BC::Script::UnspentOutputInfo *info = serialized.data<const BC::Script::UnspentOutputInfo>();
-      if (info->Type != BC::Script::UnspentOutputInfo::EOpReturn) {
+      size_t infoSize;
+      validationData.outputData(outOrdinal, infoSize);
+      if (infoSize) {
         key.Index = static_cast<uint32_t>(j);
         cacheRemove(key);
       }

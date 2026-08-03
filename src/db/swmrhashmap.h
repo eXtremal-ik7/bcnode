@@ -31,11 +31,13 @@
 //
 // Concurrency contract:
 //  - any number of find() readers, wait-free, at any time;
-//  - one writer thread (update/restore/reserve/reset), OR several writer
-//    threads with DISJOINT KEY SETS running between two quiescent points:
-//    claims are arbitrated by the generation CAS, Used_ is a relaxed atomic
-//    add, and a published slot is only ever mutated by the thread that owns
-//    its key. No eviction, no hazard pointers: entries live until reset().
+//  - one writer thread (update/restore/reserve/reset) by default, OR several
+//    writer threads with DISJOINT KEY SETS running between two quiescent
+//    points after setConcurrentMutators(true): claims are arbitrated by the
+//    generation CAS, Used_ is a relaxed atomic add, and a published slot is
+//    only ever mutated by the thread that owns its key. The mode is off by
+//    default because it is not free: it puts a lock cmpxchg and a lock xadd
+//    on every insert. No eviction, no hazard pointers: entries live to reset().
 //  - growth is single-writer only: a concurrent wave must pre-size the
 //    table with reserve() so update() never grows mid-wave (update aborts
 //    on an unexpectedly full table rather than corrupt it);
@@ -89,6 +91,7 @@ private:
   uint64_t Used_ = 0;             // claimed slots this window (atomicAdd from mutators)
   STable *Graveyard_ = nullptr;   // outgrown tables, freed at reset()
   CHasher Hasher_;
+  bool ConcurrentMutators_ = false;
 
   static void *tombstone() { return reinterpret_cast<void*>(uintptr_t(1)); }
 
@@ -226,18 +229,35 @@ public:
       }
       if (g == gen + 1)
         continue; // another mutator mid-insert (a different key by contract)
-      // stale slot: our key is absent, claim right here; losing the CAS
-      // means another mutator extended the cluster - just keep probing
-      if (!s.Gen.compare_exchange_strong(g, gen + 1, std::memory_order_acquire, std::memory_order_relaxed))
-        continue;
+      // stale slot: our key is absent, so it is claimed right here. With one
+      // mutator the slot is ours by definition - fill it and publish with a
+      // single release store. The claim CAS and the atomic counter exist only
+      // to arbitrate between mutators, and both are locked read-modify-writes
+      // on the insert path: the fast path skips them. Readers are unaffected
+      // either way - a slot they see stale ends their probe, and nothing of
+      // this cluster lives past it until the publication below
+      if (ConcurrentMutators_) {
+        // losing the CAS means another mutator extended the cluster - keep probing
+        if (!s.Gen.compare_exchange_strong(g, gen + 1, std::memory_order_acquire, std::memory_order_relaxed))
+          continue;
+        s.Key = key;
+        s.LastRev = rev;
+        s.Ptr.store(value, std::memory_order_relaxed);
+        s.Gen.store(gen, std::memory_order_release); // publish key + value together
+        atomicAdd(Used_, 1);
+        // single-writer growth; a concurrent wave must have reserve()d, so
+        // this trigger never fires there (see the contract above)
+        if (atomicLoad(Used_) > t->Capacity - t->Capacity / 4)
+          grow(t, t->Capacity * 4);
+        return {nullptr, true};
+      }
+
       s.Key = key;
       s.LastRev = rev;
       s.Ptr.store(value, std::memory_order_relaxed);
       s.Gen.store(gen, std::memory_order_release); // publish key + value together
-      atomicAdd(Used_, 1);
-      // single-writer growth; a concurrent wave must have reserve()d, so
-      // this trigger never fires there (see the contract above)
-      if (atomicLoad(Used_) > t->Capacity - t->Capacity / 4)
+      Used_++;
+      if (Used_ > t->Capacity - t->Capacity / 4)
         grow(t, t->Capacity * 4);
       return {nullptr, true};
     }
@@ -296,6 +316,12 @@ public:
     Used_ = 0;
     freeGraveyard();
   }
+
+  // Several mutators with disjoint key sets between two quiescent points: the
+  // claim is arbitrated by a CAS and Used_ becomes an atomic counter. Nothing
+  // turns it on today (the window is mutated by the serial thread alone), and
+  // the two locked instructions per insert are what it costs to leave on
+  void setConcurrentMutators(bool on) { ConcurrentMutators_ = on; }
 
   size_t used() const { return Used_; }
   size_t capacity() const { return Table_.load(std::memory_order_relaxed)->Capacity; }

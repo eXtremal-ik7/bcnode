@@ -287,7 +287,13 @@ struct NetworkAddress {
     static constexpr uint32_t NoLocalTx = 0xFFFFFFFFu;
 
     bool HasWitnessData = false;
-    bool AllOutputsFound = false;
+    bool InputsResolved = false;
+    // The run proved the block spends what it may not: no lookup afterwards can make it valid
+    bool InputsInvalid = false;
+    // Same-block topology found what only an invalid block has: two inputs taking one output of
+    // this block, or an input taking an output that does not exist. Found where the topology is
+    // built, so the linking of a segment needs no per block bookkeeping for it
+    bool LocalSpendInvalid = false;
     // txid of every transaction, parallel to block.vtx ([0] = coinbase);
     // checkBlockStandalone verifies them against the header merkle root
     xvector<TxHashTy> TxIds;
@@ -300,8 +306,37 @@ struct NetworkAddress {
     xvector<uint32_t> InputLocalTx;
     xvector<uint64_t> OutputSpentLocally;
     xvector<CTxValidationData> TxData;
+    // Outputs parsed once, off the connect thread: serialized UnspentOutputInfo of every output
+    // in walk order, empty record for an OP_RETURN one. Databases copy these bytes
+    xvector<uint8_t> OutputData;
+    xvector<uint32_t> OutputDataOffset;
+    // Cross-block spend topology of one run: outputs of this block spent by a later block of the
+    // same run, and the inputs spending them. The utxo db skips both sides like a same-block pair.
+    // Honoured only while the two sides move together - the run connects as one operation, and a
+    // disconnect that splits the pair puts the output back and drops the marks
+    xvector<uint64_t> OutputSpentInBatch;
+    xvector<uint64_t> InputSpendsInBatch;
 
     bool outputSpentLocally(size_t ordinal) const { return (OutputSpentLocally[ordinal >> 6] >> (ordinal & 63)) & 1u; }
+    bool outputSpentInBatch(size_t ordinal) const {
+      return !OutputSpentInBatch.empty() && ((OutputSpentInBatch[ordinal >> 6] >> (ordinal & 63)) & 1u);
+    }
+    bool inputSpendsInBatch(size_t ordinal) const {
+      return !InputSpendsInBatch.empty() && ((InputSpendsInBatch[ordinal >> 6] >> (ordinal & 63)) & 1u);
+    }
+    // A pair the databases must see as one: it holds only while both blocks are on the chain
+    bool hidesPairs() const { return !InputSpendsInBatch.empty() || !OutputSpentInBatch.empty(); }
+    void dropPairs() {
+      OutputSpentInBatch.resize(0);
+      InputSpendsInBatch.resize(0);
+    }
+
+    // Parsed output record; size 0 means the output is not a utxo (OP_RETURN)
+    const void *outputData(size_t ordinal, size_t &size) const {
+      uint32_t begin = OutputDataOffset[ordinal];
+      size = OutputDataOffset[ordinal + 1] - begin;
+      return OutputData.begin() + begin;
+    }
   };
 
   struct MessageVersion {

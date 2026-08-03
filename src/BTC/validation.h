@@ -3,6 +3,7 @@
 #include "proto.h"
 #include "script.h"
 #include "merkleTree.h"
+#include "common/serializeUtils.h"
 #include <cassert>
 #include <cstring>
 #include <limits>
@@ -15,7 +16,9 @@ template<typename BlockTy>
 void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidationData &validation)
 {
   validation.HasWitnessData = false;
-  validation.AllOutputsFound = false;
+  validation.InputsResolved = false;
+  validation.InputsInvalid = false;
+  validation.LocalSpendInvalid = false;
   validation.TxIds.resize(block.vtx.size());
   for (size_t i = 0; i < block.vtx.size(); i++)
     validation.TxIds[i] = block.vtx[i].getTxId();
@@ -27,10 +30,10 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
     }
   }
 
-  // Same-block spend topology. The map mirrors initializeLinkedOutputs: a tx
+  // Same-block spend topology. The map mirrors the input resolvers: a tx
   // becomes visible after its own inputs, so only spends of earlier txs
   // match. An out-of-range vout still marks the input (the block dies in
-  // initializeLinkedOutputs before any connect) but has no output bit to set.
+  // the resolver before any connect) but has no output bit to set.
   // A txid match is trusted to be the spend target (BIP30 uniqueness): an
   // input spending an older on-disk duplicate would be paired with the local
   // twin instead, and the utxodb pair skip would leave the older coin alive.
@@ -46,6 +49,33 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
   validation.InputLocalTx.resize(inputsNum);
   validation.OutputSpentLocally.resize((outputsNum + 63) / 64);
   memset(validation.OutputSpentLocally.begin(), 0, validation.OutputSpentLocally.size() * sizeof(uint64_t));
+
+  // Parsed here, where several blocks are parsed in parallel: the connect stage copies the
+  // record instead of walking the script. An OP_RETURN output is left empty - "not a utxo" to a
+  // database that knows nothing of types
+  {
+    xmstream outputData;
+    outputData.reserve(outputsNum * sizeof(Script::UnspentOutputInfo));
+    outputData.reset();
+    validation.OutputDataOffset.resize(outputsNum + 1);
+
+    size_t ordinal = 0;
+    for (size_t i = 0; i < block.vtx.size(); i++) {
+      const auto &tx = block.vtx[i];
+      for (size_t j = 0; j < tx.txOut.size(); j++, ordinal++) {
+        size_t begin = outputData.offsetOf();
+        validation.OutputDataOffset[ordinal] = static_cast<uint32_t>(begin);
+        Script::parseTransactionOutput(tx.txOut[j], outputData);
+        const Script::UnspentOutputInfo *info =
+          reinterpret_cast<const Script::UnspentOutputInfo*>(outputData.data<uint8_t>() + begin);
+        if (info->Type == Script::UnspentOutputInfo::EOpReturn)
+          outputData.seekSet(begin);
+      }
+    }
+
+    validation.OutputDataOffset[outputsNum] = static_cast<uint32_t>(outputData.offsetOf());
+    xvectorFromStream(std::move(outputData), validation.OutputData);
+  }
 
   // Value packs the tx index with the block-wide ordinal of its first output
   std::unordered_map<Proto::TxHashTy, uint64_t> txIndexMap;
@@ -68,7 +98,14 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
       validation.InputLocalTx[inOrdinal] = localTxIdx;
       if (txin.previousOutputIndex < block.vtx[localTxIdx].txOut.size()) {
         uint64_t bit = (It->second >> 32) + txin.previousOutputIndex;
-        validation.OutputSpentLocally[bit >> 6] |= 1ull << (bit & 63);
+        uint64_t mask = 1ull << (bit & 63);
+        // Already spent by an earlier input of this block: the block is invalid, and saying so
+        // here saves the linker a set per block
+        if (validation.OutputSpentLocally[bit >> 6] & mask)
+          validation.LocalSpendInvalid = true;
+        validation.OutputSpentLocally[bit >> 6] |= mask;
+      } else {
+        validation.LocalSpendInvalid = true;
       }
     }
     txIndexMap[validation.TxIds[i]] = static_cast<uint64_t>(i) | (outOrdinal << 32);

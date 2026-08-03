@@ -4,8 +4,10 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "blockDataBase.h"
+#include "db/keyHash.h"
 #include "db/storage.h"
 #include "common/fopen.h"
+#include "common/parallelRunner.h"
 #include "common/serializeUtils.h"
 #include "common/smallStream.h"
 #include "common/utils.h"
@@ -27,14 +29,18 @@ struct BlockPosition {
   uint32_t size;
 };
 
-bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::Block &block, const BC::DB::UTXODb &db)
+// Every input still empty: from the database, else from an output of this very block. A worker
+// runs it on a block outside a run, where the state it needs may not exist yet - what it could
+// not answer InputsResolved reports. The connect thread runs it on exactly those, and there the
+// state is the one the block connects to
+static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::Block &block, const BC::DB::UTXODb &db)
 {
   std::unordered_set<CUnspentOutputKey> removed;
 
   assert(validationData.TxIds.size() == block.vtx.size());
   linkedOutputs.Tx.resize(block.vtx.size());
 
-  bool allOutputsFound = true;
+  bool resolved = true;
   size_t inOrdinal = 0;
   for (size_t txIdx = 1; txIdx < block.vtx.size(); txIdx++) {
     BC::Proto::Transaction &tx = block.vtx[txIdx];
@@ -45,20 +51,28 @@ bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::
       const auto &txin = tx.txIn[txinIdx];
       auto &txinLinked = txLinked.TxIn[txinIdx];
 
-      if (db.query(txin.previousOutputHash, txin.previousOutputIndex, txinLinked, /*cacheOnly=*/true)) {
+      // Answered by the run: from the same block, or from an earlier block of it
+      if (!txinLinked.empty())
+        continue;
+
+      if (db.query(txin.previousOutputHash, txin.previousOutputIndex, txinLinked)) {
         // Unspent output found
       } else {
         // Try find in local block (topology precomputed in validation data)
         uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];
         if (localTxIdx != BC::Proto::CBlockValidationData::NoLocalTx) {
           BC::Proto::Transaction &localReferencedTx = block.vtx[localTxIdx];
-          if (txin.previousOutputIndex >= localReferencedTx.txOut.size())
+          if (txin.previousOutputIndex >= localReferencedTx.txOut.size()) {
+            validationData.InputsResolved = false;
             return false;
+          }
           CUnspentOutputKey key;
           key.Tx = txin.previousOutputHash;
           key.Index = txin.previousOutputIndex;
-          if (!removed.insert(key).second)
+          if (!removed.insert(key).second) {
+            validationData.InputsResolved = false;
             return false;
+          }
 
           xmstream s;
           BC::Script::parseTransactionOutput(localReferencedTx.txOut[txin.previousOutputIndex], s);
@@ -66,46 +80,46 @@ bool initializeLinkedOutputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::
           info->IsLocalTx = 1;
           xvectorFromStream(std::move(s), txinLinked);
         } else {
-          allOutputsFound = false;
+          resolved = false;
         }
       }
     }
   }
   assert(inOrdinal == validationData.InputLocalTx.size());
 
-  validationData.AllOutputsFound = allOutputsFound;
-  return true;
+  validationData.InputsResolved = resolved;
+  return resolved;
 }
 
-bool initializeLinkedOutputsContextual(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::Block &block, const BC::DB::UTXODb &db)
+// The one point where the database holds the state the segment was built on. Everything the
+// preparation could not answer is looked up here in one wave; an input that finds nothing makes
+// its block invalid. The wave is the critical path, so it takes the pool before preparation
+static void resolveSegmentResidual(CSegment &segment, const BC::DB::UTXODb &db, CParallelRunner &runner)
 {
-  linkedOutputs.Tx.resize(block.vtx.size());
+  const std::vector<CSegment::CInput> &inputs = segment.Inputs;
 
-  for (size_t txIdx = 1; txIdx < block.vtx.size(); txIdx++) {
-    BC::Proto::Transaction &tx = block.vtx[txIdx];
-    auto &txLinked = linkedOutputs.Tx[txIdx];
-
-    txLinked.TxIn.resize(tx.txIn.size());
-
-    for (size_t txinIdx = 0; txinIdx < tx.txIn.size(); txinIdx++) {
-      const auto &txin = tx.txIn[txinIdx];
-      auto &txinLinked = txLinked.TxIn[txinIdx];
-      if (!txinLinked.empty())
-        continue;
-
-      if (!db.query(txin.previousOutputHash, txin.previousOutputIndex, txinLinked)) {
-        LOG_F(ERROR,
-              " * Transaction %s refers non-existing utxo %s:%u",
-              tx.getTxId().getHexLE().c_str(),
-              txin.previousOutputHash.getHexLE().c_str(),
-              txin.previousOutputIndex);
-        // exit(1);
-        return false;
-      }
+  runner.run(inputs.size(), [&inputs, &segment, &db](size_t begin, size_t end) {
+    for (size_t i = begin; i < end; i++) {
+      const CSegment::CInput &input = inputs[i];
+      BC::Common::CIndexCacheObject *object = segment.Objects[input.Object].Object.get();
+      const auto &txin = object->block()->vtx[input.TxIdx].txIn[input.InIdx];
+      auto &slot = object->linkedOutputs().Tx[input.TxIdx].TxIn[input.InIdx];
+      // Emptied first: an empty slot is the only thing that means "the coin is not there", and a
+      // block prepared twice still carries what an earlier wave found
+      slot.resize(0);
+      db.query(txin.previousOutputHash, txin.previousOutputIndex, slot);
     }
+  }, /*priority=*/true);
+
+  for (const CSegment::CInput &input: inputs) {
+    if (segment.Objects[input.Object].Object.get()->linkedOutputs().Tx[input.TxIdx].TxIn[input.InIdx].empty())
+      segment.Objects[input.Object].Completable = false;
   }
 
-  return true;
+  for (CSegment::CObject &entry: segment.Objects) {
+    entry.Object.get()->validationData().InputsResolved = entry.Completable;
+    entry.Object.get()->validationData().InputsInvalid = !entry.Completable;
+  }
 }
 
 BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
@@ -163,15 +177,23 @@ static inline void QueueNextHeaders(std::deque<BC::Common::BlockIndex*> &queue, 
   }
 }
 
-static inline void QueueNextBlocks(std::deque<BC::Common::BlockIndex*> &queue, BC::Common::BlockIndex *start)
+// Everything a connect changes; checks belong to the caller, so a segment can make them for all
+// of its blocks before the first one lands
+static void applyConnect(BC::Common::BlockIndex *index,
+                         BC::Proto::Block &block,
+                         BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                         BC::Proto::CBlockValidationData &validationData,
+                         BlockInMemoryIndex &blockIndex,
+                         BC::DB::Storage &storage,
+                         bool silent)
 {
-  auto it = start->SuccessorBlocks.exchange(nullptr, 1);
-  while (auto ptr = it.pointer()) {
-    queue.push_back(ptr);
-    while (ptr->ConcurrentBlockNext.data() == WaitPtr<BC::Common::BlockIndex>())
-      continue;
-    it = ptr->ConcurrentBlockNext.load();
-  }
+  if (!silent)
+    LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
+  index->Prev->Next = index;
+  index->Prepared.store(true, std::memory_order_relaxed);
+  blockIndex.blockHeightIndex()[index->Height] = index;
+  storage.add(BC::DB::Connect, index, block, linkedOutputs, validationData, blockIndex);
+  blockIndex.setBest(index);
 }
 
 static bool ConnectBlock(BC::Common::BlockIndex *index,
@@ -183,8 +205,13 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
                          BC::DB::Storage &storage,
                          bool silent = true)
 {
-  // Locate linked transaction outputs
-  if (!validationData.AllOutputsFound && !initializeLinkedOutputsContextual(linkedOutputs, block, storage.utxodb())) {
+  // Inputs are resolved before the block gets here whenever the state to resolve them against
+  // exists that early: by the run, or by the single block path. What was left - a block outside
+  // any run, a run that could not open where it was built - is looked up now, against the state
+  // the block connects to. An input still empty means the coin does not exist or is taken
+  if (!validationData.InputsResolved &&
+      (validationData.InputsInvalid ||
+       !resolveBlockInputs(linkedOutputs, validationData, block, storage.utxodb()))) {
     LOG_F(ERROR,
           "Block %s validation failed (non-existent utxo)",
           block.header.GetHash().getHexLE().c_str());
@@ -201,12 +228,7 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
     return false;
   }
 
-  if (!silent)
-    LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
-  index->Prev->Next = index;
-  blockIndex.blockHeightIndex()[index->Height] = index;
-  storage.add(BC::DB::Connect, index, block, linkedOutputs, validationData, blockIndex);
-  blockIndex.setBest(index);
+  applyConnect(index, block, linkedOutputs, validationData, blockIndex, storage, silent);
   return true;
 }
 
@@ -221,11 +243,19 @@ static void DisconnectBlock(BlockInMemoryIndex &blockIndex,
   if (!silent)
     LOG_F(INFO, "Disconnect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
   index->Prev->Next = nullptr;
+  // Free to be bitten into a segment again: the block is not below the frontier any more
+  index->Prepared.store(false, std::memory_order_relaxed);
   blockIndex.blockHeightIndex()[index->Height] = nullptr;
   storage.add(BC::DB::Disconnect, index, block, linkedOutputs, validationData, blockIndex);
+  // The segment this block came in is broken from here: the disconnect put the hidden outputs
+  // back, and every later connect of it must be plain. Only utxodb reads the marks, and it took
+  // its half of the disconnect above, on this thread
+  validationData.dropPairs();
 }
 
-static void BuildHeaderChain(BC::Common::ChainParams &chainParams, BC::Common::BlockIndex *start)
+// A height is what makes a block a candidate: until the header chain reaches it, nothing knows
+// where it stands. Data may have been waiting for this for a whole block file
+static void BuildHeaderChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BC::Common::BlockIndex *start)
 {
   BC::Common::BlockIndex *currentStart = start;
   std::deque<BC::Common::BlockIndex*> queue;
@@ -239,6 +269,8 @@ static void BuildHeaderChain(BC::Common::ChainParams &chainParams, BC::Common::B
     if (current->Height == std::numeric_limits<uint32_t>::max()) {
       current->Height = prev->Height + 1;
       current->ChainWork = prev->ChainWork + BC::Common::GetBlockProof(current->Header, chainParams);
+      if (current->Raw.load(std::memory_order_acquire) || current->Serialized.get())
+        blockIndex.candidateTracker().update(current);
     }
 
     QueueNextHeaders(queue, current);
@@ -297,7 +329,7 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockInde
   // A disk-reloaded object must satisfy the same invariant as a fresh one:
   // validation data (txids included) is filled before any connect/disconnect
   BC::Common::initializeValidationContext(*block, object.get()->validationData());
-  object.get()->validationData().AllOutputsFound = true;
+  object.get()->validationData().InputsResolved = true;
 
   return object;
 }
@@ -372,62 +404,548 @@ static bool switchTo(BC::Common::BlockIndex *newBest,
   return true;
 }
 
-static void buildBlockChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, BC::DB::Storage &storage, BC::Common::BlockIndex *start, std::vector<BC::Common::BlockIndex*> &acceptedBlocks)
-{
-  BC::Common::BlockIndex *currentStart = start;
-  std::deque<BC::Common::BlockIndex*> queue;
+// Open addressing tables for the linking of one segment. A slot holds the hash and where the key
+// already lives (validation data txids, the outpoint of an input) instead of the key itself: one
+// array, no allocation per entry. Linking is the serial stretch of the preparation, and
+// std::unordered_* cost it a malloc per insert and a pointer chase per lookup
+namespace {
+struct CTxSlot {
+  uint64_t Hash;      // 0 - empty slot
+  uint32_t Block;
+  uint32_t TxIdx;
+  uint32_t OutBase;   // block-wide ordinal of the first output of the transaction
+  uint32_t Reserved;
+};
 
-  QueueNextBlocks(queue, currentStart);
-  while (!queue.empty()) {
-    BC::Common::BlockIndex *current = queue.front();
-    BC::Common::BlockIndex *prev = current->Prev;
-    BC::Common::CIndexCacheObject *object = current->Serialized.get();
-    BC::Proto::Block *block = object->block();
+struct CSpendSlot {
+  uint64_t Hash;      // 0 - empty slot
+  uint32_t Input;     // position in the residual list, where the outpoint is
+  uint32_t Reserved;
+};
+
+// Hashing is db/keyHash.h; the only thing added here is the sentinel: a slot with hash 0 is the
+// free slot of these tables. A txid is a hash already, so a word of it is the hash of a txid
+inline uint64_t occupied(uint64_t hash) { return hash ? hash : 1; }
+
+inline uint64_t txidHash(const BC::Proto::TxHashTy &txid) { return occupied(txid.get64(0)); }
+
+inline uint64_t outpointHash(const BC::Proto::TxHashTy &txid, uint32_t index)
+{
+  return occupied(hashOutpoint(txid.begin(), index).H1);
+}
+
+// Load factor 1/2
+size_t tableSize(size_t expected)
+{
+  size_t size = 1024;
+  while (size < expected * 2)
+    size <<= 1;
+  return size;
+}
+
+void markOrdinal(xvector<uint64_t> &bits, size_t ordinal, size_t count)
+{
+  if (bits.empty()) {
+    bits.resize((count + 63) / 64);
+    memset(bits.begin(), 0, bits.size() * sizeof(uint64_t));
+  }
+
+  bits[ordinal >> 6] |= 1ull << (ordinal & 63);
+}
+}
+
+// Linking of a whole segment: an input is answered by its own block, then by an earlier block of
+// the segment, and anything older goes on the residual list. Nothing is looked up - that state
+// does not exist yet. A pair inside the segment is marked on both sides and skipped by the
+// databases, which holds only because the segment connects as one operation
+static void resolveSegmentInputs(CSegment &segment)
+{
+  const size_t count = segment.Objects.size();
+
+  segment.Inputs.clear();
+
+  // Kept between segments (same size every time, warm memory); one set per preparation lane
+  static thread_local std::vector<CTxSlot> txTable;
+  static thread_local std::vector<CSpendSlot> spendTable;
+  static thread_local std::vector<const BC::Proto::TxHashTy*> txIds;
+
+  size_t txCount = 0;
+  size_t inputCount = 0;
+  txIds.resize(count);
+  for (size_t pos = 0; pos < count; pos++) {
+    const BC::Proto::CBlockValidationData &validationData = segment.Objects[pos].Object.get()->validationDataConst();
+    txIds[pos] = validationData.TxIds.begin();
+    txCount += validationData.TxIds.size();
+    inputCount += validationData.InputLocalTx.size();
+  }
+
+  const size_t txMask = tableSize(txCount) - 1;
+  const size_t spendMask = tableSize(inputCount) - 1;
+  txTable.assign(txMask + 1, CTxSlot{});
+  spendTable.assign(spendMask + 1, CSpendSlot{});
+
+  // Where a transaction of the segment lives, nullptr when this txid is seen the first time
+  auto txInsert = [&](uint64_t hash, const BC::Proto::TxHashTy &txid, uint32_t block, uint32_t txIdx, uint32_t outBase) -> CTxSlot* {
+    size_t pos = hash & txMask;
+    for (;;) {
+      CTxSlot &slot = txTable[pos];
+      if (!slot.Hash) {
+        slot = CTxSlot{hash, block, txIdx, outBase, 0};
+        return nullptr;
+      }
+      if (slot.Hash == hash && txIds[slot.Block][slot.TxIdx] == txid)
+        return &slot;
+      pos = (pos + 1) & txMask;
+    }
+  };
+
+  auto txFind = [&](uint64_t hash, const BC::Proto::TxHashTy &txid) -> const CTxSlot* {
+    size_t pos = hash & txMask;
+    for (;;) {
+      const CTxSlot &slot = txTable[pos];
+      if (!slot.Hash)
+        return nullptr;
+      if (slot.Hash == hash && txIds[slot.Block][slot.TxIdx] == txid)
+        return &slot;
+      pos = (pos + 1) & txMask;
+    }
+  };
+
+  // The outpoint of a residual input, read back from where it lives
+  auto outpointOf = [&](uint32_t inputIdx, uint32_t &index) -> const BC::Proto::TxHashTy& {
+    const CSegment::CInput &input = segment.Inputs[inputIdx];
+    const auto &txin = segment.Objects[input.Object].Object.get()->block()->vtx[input.TxIdx].txIn[input.InIdx];
+    index = txin.previousOutputIndex;
+    return txin.previousOutputHash;
+  };
+
+  // False when the segment already spends this coin: the residual wave would find it for both,
+  // and that is a double spend
+  auto spendInsert = [&](uint64_t hash, uint32_t inputIdx) -> bool {
+    size_t pos = hash & spendMask;
+    for (;;) {
+      CSpendSlot &slot = spendTable[pos];
+      if (!slot.Hash) {
+        slot = CSpendSlot{hash, inputIdx, 0};
+        return true;
+      }
+      if (slot.Hash == hash) {
+        uint32_t indexA, indexB;
+        const BC::Proto::TxHashTy &a = outpointOf(slot.Input, indexA);
+        const BC::Proto::TxHashTy &b = outpointOf(inputIdx, indexB);
+        if (indexA == indexB && a == b)
+          return false;
+      }
+      pos = (pos + 1) & spendMask;
+    }
+  };
+
+  for (size_t pos = 0; pos < count; pos++) {
+    BC::Common::CIndexCacheObject *object = segment.Objects[pos].Object.get();
+    BC::Proto::Block &block = *object->block();
     BC::Proto::CBlockValidationData &validationData = object->validationData();
     BC::Proto::CBlockLinkedOutputs &linkedOutputs = object->linkedOutputs();
 
-    current->OnChain = prev->OnChain;
-    if (current->Height == std::numeric_limits<uint32_t>::max()) {
-      current->Height = prev->Height + 1;
-      current->ChainWork = prev->ChainWork + BC::Common::GetBlockProof(current->Header, chainParams);
+    assert(validationData.TxIds.size() == block.vtx.size());
+
+    // Nothing to link: the same-block topology already proved the block invalid, and the segment
+    // is cut here
+    if (validationData.LocalSpendInvalid) {
+      segment.Objects[pos].Completable = false;
+      validationData.InputsInvalid = true;
+      continue;
     }
 
-    BC::Common::BlockIndex *currentBest = blockIndex.best();
-    if (current->ChainWork > currentBest->ChainWork) {
-      // New best block found
-      if (current->Prev == currentBest) {
-        // Connect
-        if (!ConnectBlock(current, *block, linkedOutputs, validationData, chainParams, blockIndex, storage)) {
-          current->IndexState = BSInvalid;
-          QueueNextBlocks(queue, current);
-          queue.pop_front();
+    linkedOutputs.Tx.resize(block.vtx.size());
+
+    // An input left unresolved keeps its block out of the chain; the truncation happens after
+    // the linking, so nothing else has to stop here
+    bool completable = true;
+    size_t inOrdinal = 0;
+
+    for (size_t txIdx = 1; txIdx < block.vtx.size(); txIdx++) {
+      BC::Proto::Transaction &tx = block.vtx[txIdx];
+      auto &txLinked = linkedOutputs.Tx[txIdx];
+      txLinked.TxIn.resize(tx.txIn.size());
+
+      for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+        const auto &txin = tx.txIn[j];
+        auto &txinLinked = txLinked.TxIn[j];
+
+        // Spend of an output of this very block; the topology pass checked it
+        uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];
+        if (localTxIdx != BC::Proto::CBlockValidationData::NoLocalTx) {
+          xmstream s;
+          BC::Script::parseTransactionOutput(block.vtx[localTxIdx].txOut[txin.previousOutputIndex], s);
+          BTC::Script::UnspentOutputInfo *info = s.data<BTC::Script::UnspentOutputInfo>();
+          info->IsLocalTx = 1;
+          xvectorFromStream(std::move(s), txinLinked);
           continue;
         }
-      } else {
-        // Rebuild chain from least common ancestor
-        if (!switchTo(current, chainParams, blockIndex, storage)) {
-          if (!switchTo(currentBest, chainParams, blockIndex, storage)) {
-            // Abnormal situation
-            LOG_F(ERROR, "Block database corrupted");
-            abort();
+
+        // Spend of an output created by an earlier block of the segment
+        uint64_t hash = txidHash(txin.previousOutputHash);
+        if (const CTxSlot *slot = txFind(hash, txin.previousOutputHash)) {
+          BC::Common::CIndexCacheObject *creator = segment.Objects[slot->Block].Object.get();
+          BC::Proto::CBlockValidationData &creatorData = creator->validationData();
+          const BC::Proto::Transaction &creatorTx = creator->block()->vtx[slot->TxIdx];
+          if (txin.previousOutputIndex >= creatorTx.txOut.size()) {
+            completable = false;
+            continue;
           }
 
-          current->IndexState = BSInvalid;
-          QueueNextBlocks(queue, current);
-          queue.pop_front();
+          // Spent once already inside the segment, or not a utxo at all
+          size_t ordinal = slot->OutBase + txin.previousOutputIndex;
+          if (creatorData.outputSpentLocally(ordinal) || creatorData.outputSpentInBatch(ordinal)) {
+            completable = false;
+            continue;
+          }
+          size_t infoSize;
+          const void *info = creatorData.outputData(ordinal, infoSize);
+          if (!infoSize) {
+            completable = false;
+            continue;
+          }
+
+          txinLinked.resize(infoSize);
+          memcpy(txinLinked.begin(), info, infoSize);
+          markOrdinal(creatorData.OutputSpentInBatch, ordinal, creatorData.OutputSpentLocally.size() * 64);
+          markOrdinal(validationData.InputSpendsInBatch, inOrdinal, validationData.InputLocalTx.size());
+          continue;
+        }
+
+        // A coin older than the segment: only the serial stage sees the state it lives in
+        uint32_t inputIdx = static_cast<uint32_t>(segment.Inputs.size());
+        segment.Inputs.push_back(CSegment::CInput{static_cast<uint32_t>(pos),
+                                                  static_cast<uint32_t>(txIdx),
+                                                  static_cast<uint32_t>(j)});
+        if (!spendInsert(outpointHash(txin.previousOutputHash, txin.previousOutputIndex), inputIdx)) {
+          segment.Inputs.pop_back();
+          completable = false;
+        }
+      }
+    }
+    assert(inOrdinal == validationData.InputLocalTx.size());
+
+    uint32_t outBase = 0;
+    for (size_t txIdx = 0; txIdx < block.vtx.size(); txIdx++) {
+      uint32_t outputsNum = static_cast<uint32_t>(block.vtx[txIdx].txOut.size());
+      const BC::Proto::TxHashTy &txid = validationData.TxIds[txIdx];
+      CTxSlot *twin = txInsert(txidHash(txid), txid, static_cast<uint32_t>(pos), static_cast<uint32_t>(txIdx), outBase);
+      if (twin) {
+        // The same txid twice inside the segment: legal only while every output of the earlier
+        // one is spent (BIP30), and impossible since BIP34. Otherwise the block hides a live coin
+        BC::Common::CIndexCacheObject *twinObject = segment.Objects[twin->Block].Object.get();
+        const BC::Proto::CBlockValidationData &twinData = twinObject->validationDataConst();
+        uint32_t twinOutputs = static_cast<uint32_t>(twinObject->block()->vtx[twin->TxIdx].txOut.size());
+
+        bool spent = true;
+        for (uint32_t i = 0; i < twinOutputs; i++) {
+          size_t ordinal = twin->OutBase + i;
+          if (!twinData.outputSpentLocally(ordinal) && !twinData.outputSpentInBatch(ordinal)) {
+            spent = false;
+            break;
+          }
+        }
+
+        if (spent) {
+          twin->Block = static_cast<uint32_t>(pos);
+          twin->TxIdx = static_cast<uint32_t>(txIdx);
+          twin->OutBase = outBase;
+        } else {
+          completable = false;
+        }
+      }
+      outBase += outputsNum;
+    }
+
+    // A verdict of the segment, not a lookup that came too early
+    segment.Objects[pos].Completable = completable;
+    validationData.InputsInvalid = !completable;
+  }
+}
+
+
+// A wave helper pays the proof of work of the blocks it takes; the context is per thread and
+// lives as long as the pool does
+static BC::Common::CheckConsensusCtx &waveConsensusCtx()
+{
+  static thread_local BC::Common::CheckConsensusCtx ctx;
+  static thread_local bool initialized = false;
+  if (!initialized) {
+    BC::Common::checkConsensusInitialize(ctx);
+    initialized = true;
+  }
+
+  return ctx;
+}
+
+// Proof of work of the whole segment: the check needs only the header, costs the same for every
+// block, and here it spreads over the pool in groups a multi-way hash can take
+static void checkSegmentWork(CSegment &segment,
+                             BC::Common::ChainParams &chainParams,
+                             CParallelRunner &runner)
+{
+  // Headers checked in one call: a multiple of the width a multi-way hash takes
+  static constexpr size_t CheckWorkGroup = 64;
+
+  runner.run(segment.Objects.size(), [&segment, &chainParams](size_t begin, size_t end) {
+    BC::Common::CheckConsensusCtx &ccCtx = waveConsensusCtx();
+    const BC::Proto::BlockHeader *headers[CheckWorkGroup];
+    size_t positions[CheckWorkGroup];
+    bool results[CheckWorkGroup];
+    size_t num = 0;
+
+    auto verify = [&]() {
+      BC::Common::checkConsensusMulti(headers, num, ccCtx, chainParams, results);
+      for (size_t i = 0; i < num; i++) {
+        if (!results[i]) {
+          segment.Objects[positions[i]].Valid = false;
+          LOG_F(ERROR,
+                "Check Proof-Of-Work failed for block %s",
+                segment.Objects[positions[i]].Index->Header.GetHash().getHexLE().c_str());
+        }
+      }
+      num = 0;
+    };
+
+    for (size_t i = begin; i < end; i++) {
+      CSegment::CObject &entry = segment.Objects[i];
+      CBlockRawData *raw = entry.Index->Raw.load(std::memory_order_acquire);
+      // No raw data left means the block was prepared before and checked then; a header that
+      // came through AddHeader paid for its work already
+      if (!raw || !raw->CheckWork)
+        continue;
+
+      headers[num] = &entry.Index->Header;
+      positions[num] = i;
+      if (++num == CheckWorkGroup)
+        verify();
+    }
+
+    if (num)
+      verify();
+  });
+}
+
+// Unpack and everything that needs no chain state, block by block over the whole pool. Heights
+// are known from the index in a pull pipeline, so the contextual check is paid here too
+static void prepareSegmentBlocks(BC::Common::ChainParams &chainParams,
+                                 BC::DB::Storage &storage,
+                                 CSegment &segment,
+                                 CParallelRunner &runner,
+                                 CPipelineCounters &counters)
+{
+  std::atomic<uint64_t> parseErrors = 0;
+  std::atomic<size_t> consumed = 0;
+
+  runner.run(segment.Objects.size(), [&](size_t begin, size_t end) {
+    for (size_t i = begin; i < end; i++) {
+      CSegment::CObject &entry = segment.Objects[i];
+      BC::Common::BlockIndex *index = entry.Index;
+
+      // Taken even from a block the work check rejected: until it is released the reader
+      // counts it as read ahead
+      std::unique_ptr<CBlockRawData> raw(index->Raw.exchange(nullptr, std::memory_order_acq_rel));
+      if (raw)
+        consumed += raw->Size;
+      if (!entry.Valid)
+        continue;
+
+      intrusive_ptr<BC::Common::CIndexCacheObject> object(index->Serialized);
+      if (object.get()) {
+        // A segment that had to be cut and bitten again: the block keeps everything but its
+        // links
+      } else if (raw) {
+        size_t unpackedSize = 0;
+        xmstream stream(raw->data(), raw->Size);
+        BC::Proto::Block *block = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
+        if (!block || stream.remaining() != 0) {
+          LOG_F(ERROR, "Can't parse block %s (invalid block structure)", index->Header.GetHash().getHexLE().c_str());
+          if (raw->FileNo != std::numeric_limits<uint32_t>::max())
+            parseErrors++;
+          entry.Valid = false;
+          continue;
+        }
+
+        // Data owning its buffer alone (from the network) hands the bytes to the block object:
+        // writeBlock needs them. Data inside a block file is on disk already
+        void *serializedData = nullptr;
+        size_t serializedMemorySize = 0;
+        if (raw->Exclusive) {
+          serializedMemorySize = raw->Buffer.get()->memorySize();
+          serializedData = raw->Buffer.get()->detach();
+        }
+
+        object = intrusive_ptr<BC::Common::CIndexCacheObject>(
+          new BC::Common::CIndexCacheObject(&storage.cache(), serializedData, raw->Size, serializedMemorySize, block, unpackedSize));
+        index->FileNo = raw->FileNo;
+        index->FileOffset = raw->FileOffset;
+        index->SerializedBlockSize = raw->Size;
+        entry.Relay = raw->Relay;
+      } else {
+        // Written to disk by an earlier connect and asked for again by a reorg
+        object = objectByIndexChecked(index, storage.blockDb());
+      }
+
+      BC::Proto::Block *block = object.get()->block();
+      BC::Proto::CBlockValidationData &validationData = object.get()->validationData();
+      BC::Proto::CBlockLinkedOutputs &linkedOutputs = object.get()->linkedOutputs();
+
+      std::string error;
+      if (validationData.TxIds.size() != block->vtx.size()) {
+        BC::Common::initializeValidationContext(*block, validationData);
+        if (!BC::Common::checkBlockStandalone(*block, validationData, chainParams, error)) {
+          LOG_F(WARNING, "block %s check failed, error: %s", block->header.GetHash().getHexLE().c_str(), error.c_str());
+          entry.Valid = false;
           continue;
         }
       }
-    } else if (validationData.AllOutputsFound) {
-      storage.add(BC::DB::WriteData, current, *block, linkedOutputs, validationData, blockIndex, false);
-    }
 
-    // drop block data cache for connected block
-    acceptedBlocks.push_back(current);
-    QueueNextBlocks(queue, current);
-    queue.pop_front();
-  }
+      if (!BC::Common::checkBlockContextual(*index, *block, validationData, linkedOutputs, chainParams, error)) {
+        LOG_F(ERROR,
+              "Block %s (%u) contextual check failed, error: %s",
+              index->Header.GetHash().getHexLE().c_str(),
+              index->Height,
+              error.c_str());
+        entry.Valid = false;
+        continue;
+      }
+
+      validationData.InputsResolved = false;
+      validationData.InputsInvalid = false;
+      validationData.dropPairs();
+
+      index->IndexState.store(BSBlock);
+      index->Serialized.reset(object.get());
+      entry.Object = object;
+    }
+  });
+
+  counters.RawBytes -= consumed.load();
+  counters.FileParseErrors += parseErrors.load();
 }
+
+// Everything above the block the chain stops at is a descendant of it, so it goes with it
+static void cutSegment(CSegment &segment, size_t keep, const char *reason)
+{
+  const size_t count = segment.Objects.size();
+  LOG_F(ERROR,
+        "Pull pipeline: block %s (%u) %s, %zu blocks above it dropped",
+        segment.Objects[keep].Index->Header.GetHash().getHexLE().c_str(),
+        segment.Objects[keep].Index->Height,
+        reason,
+        count - keep - 1);
+
+  for (size_t i = keep; i < count; i++) {
+    segment.Objects[i].Index->IndexState.store(BSInvalid);
+    segment.Objects[i].Index->Prepared.store(false, std::memory_order_relaxed);
+  }
+
+  segment.Objects.resize(keep);
+}
+
+bool prepareSegment(BlockInMemoryIndex&,
+                    BC::Common::ChainParams &chainParams,
+                    BC::DB::Storage &storage,
+                    CParallelRunner &runner,
+                    CSegment &segment,
+                    CPipelineCounters &counters,
+                    bool prefetch)
+{
+  if (segment.Objects.empty())
+    return false;
+
+  checkSegmentWork(segment, chainParams, runner);
+  prepareSegmentBlocks(chainParams, storage, segment, runner, counters);
+
+  // Prepared whole or not at all: a failing block cuts the chain there, and segments bitten after
+  // this one continue a chain that will not happen. The caller takes them all back - the rejected
+  // block is BSInvalid now, so the next bite stops before it and the good part comes back
+  {
+    size_t valid = 0;
+    while (valid < segment.Objects.size() && segment.Objects[valid].Valid)
+      valid++;
+    if (valid < segment.Objects.size()) {
+      cutSegment(segment, valid, "rejected by its own checks");
+      return false;
+    }
+  }
+
+  resolveSegmentInputs(segment);
+
+  {
+    size_t completable = 0;
+    while (completable < segment.Objects.size() && segment.Objects[completable].Completable)
+      completable++;
+    if (completable < segment.Objects.size()) {
+      cutSegment(segment, completable, "spends what it may not");
+      return false;
+    }
+  }
+
+  // Warms the cache for the existence wave on the critical path. A probe here has no authority:
+  // it may be stale by the time the segment connects, only the wave decides existence
+  if (prefetch && !segment.Inputs.empty()) {
+    const BC::DB::UTXODb &db = storage.utxodb();
+    runner.run(segment.Inputs.size(), [&segment, &db](size_t begin, size_t end) {
+      xvector<uint8_t> value;
+      for (size_t i = begin; i < end; i++) {
+        const CSegment::CInput &input = segment.Inputs[i];
+        BC::Common::CIndexCacheObject *object = segment.Objects[input.Object].Object.get();
+        const auto &txin = object->block()->vtx[input.TxIdx].txIn[input.InIdx];
+        db.query(txin.previousOutputHash, txin.previousOutputIndex, value, /*cacheOnly=*/true);
+      }
+    });
+  }
+
+  return true;
+}
+
+bool connectSegment(BlockInMemoryIndex &blockIndex,
+                    BC::Common::ChainParams &chainParams,
+                    BC::DB::Storage &storage,
+                    CParallelRunner &runner,
+                    CSegment &segment,
+                    size_t *failedAt)
+{
+
+  *failedAt = 0;
+  bool result = true;
+  BC::Common::BlockIndex *head = segment.Objects.front().Index;
+
+  // The chain may stand elsewhere than where the selector cut: only disconnects are needed here,
+  // the new path is the segment itself
+  if (head->Prev != blockIndex.best()) {
+    if (!switchTo(head->Prev, chainParams, blockIndex, storage)) {
+      LOG_F(ERROR, "Block database corrupted");
+      abort();
+    }
+  }
+
+  // Only now does the database hold the state the segment was built on
+  resolveSegmentResidual(segment, storage.utxodb(), runner);
+
+  for (size_t i = 0; i < segment.Objects.size(); i++) {
+    if (!segment.Objects[i].Completable) {
+      *failedAt = i;
+      result = false;
+      break;
+    }
+  }
+
+  if (result) {
+    for (CSegment::CObject &entry: segment.Objects) {
+      BC::Common::CIndexCacheObject *object = entry.Object.get();
+      applyConnect(entry.Index, *object->block(), object->linkedOutputs(), object->validationData(),
+                   blockIndex, storage, true);
+    }
+  }
+
+
+  return result;
+}
+
 
 BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, const BC::Proto::BlockHeader &header, BC::Common::CheckConsensusCtx &ccCtx)
 {
@@ -487,163 +1005,11 @@ BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex, BC::Common::Ch
   index->ConcurrentHeaderNext = WaitPtr<BC::Common::BlockIndex>();
   index->ConcurrentHeaderNext = prevIndex->SuccessorHeaders.exchange(index, 0);
   if (index->ConcurrentHeaderNext.tag() == 1)
-    BuildHeaderChain(chainParams, prevIndex);
+    BuildHeaderChain(blockIndex, chainParams, prevIndex);
 
   return index;
 }
 
-// Off-chain checks; txids are computed once here and consumed by the utxo linker, the merkle
-// check and the databases
-static bool validateBlockData(BC::Common::ChainParams &chainParams,
-                              BC::DB::Storage &storage,
-                              BC::Common::CIndexCacheObject *serialized)
-{
-  BC::Proto::Block *block = serialized->block();
-
-  BC::Common::initializeValidationContext(*block, serialized->validationData());
-  initializeLinkedOutputs(serialized->linkedOutputs(), serialized->validationData(), *block, storage.utxodb());
-
-  std::string error;
-  unsigned blockGeneration = BC::Common::checkBlockStandalone(*block, serialized->validationData(), chainParams, error);
-  if (blockGeneration == 0) {
-    LOG_F(WARNING, "block %s check failed, error: %s", block->header.GetHash().getHexLE().c_str(), error.c_str());
-    return false;
-  }
-
-  return true;
-}
-
-// Attach validated block data to its index and try to continue the chain
-static void publishBlockData(BlockInMemoryIndex &blockIndex,
-                             BC::Common::ChainParams &chainParams,
-                             BC::DB::Storage &storage,
-                             BC::Common::BlockIndex *index,
-                             BC::Common::CIndexCacheObject *serialized,
-                             newBestCallback callback,
-                             uint32_t fileNo,
-                             uint32_t fileOffset)
-{
-  index->Serialized.reset(serialized);
-  index->FileNo = fileNo;
-  index->FileOffset = fileOffset;
-  index->SerializedBlockSize = static_cast<uint32_t>(serialized->blockData().size());
-  index->ConcurrentBlockNext = WaitPtr<BC::Common::BlockIndex>();
-  index->ConcurrentBlockNext = index->Prev->SuccessorBlocks.exchange(index, 0);
-  if (index->ConcurrentBlockNext.tag() == 1) {
-    std::vector<BC::Common::BlockIndex*> acceptedBlocks;
-    blockIndex.combiner().call(static_cast<BlockProcessingTask*>(index->Prev), [&blockIndex, &chainParams, &storage, &acceptedBlocks](BC::Common::BlockIndex *start) {
-      buildBlockChain(blockIndex, chainParams, storage, start, acceptedBlocks);
-    });
-
-    if (!acceptedBlocks.empty()) {
-      storage.wakeUp();
-      if (callback)
-        callback(acceptedBlocks);
-    }
-  }
-}
-
-BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
-                                 BC::Common::ChainParams &chainParams,
-                                 BC::DB::Storage &storage,
-                                 BC::Common::CIndexCacheObject *serialized,
-                                 BC::Common::CheckConsensusCtx &ccCtx,
-                                 newBestCallback callback,
-                                 uint32_t fileNo,
-                                 uint32_t fileOffset)
-{
-  BC::Proto::Block *block = serialized->block();
-
-  // Check presence of this block
-  BC::Proto::BlockHashTy hash = block->header.GetHash();
-  BC::Common::BlockIndex *index = nullptr;
-  bool alreadyHaveHeader = false;
-
-  {
-    auto It = blockIndex.blockIndex().find(hash);
-    if (It != blockIndex.blockIndex().end()) {
-      index = It->second;
-      uint32_t prevIndexState = index->IndexState.exchange(BSBlock);
-      if (prevIndexState == BSEmpty) {
-        // Locked index stub
-      } else if (prevIndexState == BSHeader) {
-        // Locked header
-        alreadyHaveHeader = true;
-      } else {
-        LOG_F(WARNING, "Already have block %s (%u)", hash.getHexLE().c_str(), index->Height);
-        return index;
-      }
-    }
-  }
-
-  // Do all off-chain block checking here
-  // Don't check PoW if we already have header
-  if (!alreadyHaveHeader) {
-    // Check consensus (such as PoW)
-    if (!BC::Common::checkConsensus(block->header, ccCtx, chainParams)) {
-      LOG_F(ERROR, "Check Proof-Of-Work failed for block %s", hash.getHexLE().c_str());
-      return nullptr;
-    }
-  }
-
-  // Validate block
-  if (!validateBlockData(chainParams, storage, serialized))
-    return nullptr;
-
-  // Prepare block index structure for predecessor block
-  auto prevIndex = BC::Common::BlockIndex::create(BSEmpty, nullptr);
-
-  auto prevIt = blockIndex.blockIndex().insert(std::pair(block->header.hashPrevBlock, prevIndex));
-  if (!prevIt.second) {
-    delete prevIndex;
-    prevIndex = prevIt.first->second;
-  }
-
-  // Try insert incoming block to index
-  if (!index) {
-    index = BC::Common::BlockIndex::create(BSBlock, prevIndex);
-    auto It = blockIndex.blockIndex().insert(std::pair(hash, index));
-    if (!It.second) {
-      // Already have index for current block
-      delete index;
-      index = It.first->second;
-      uint32_t prevIndexState = index->IndexState.exchange(BSBlock);
-      if (prevIndexState == BSEmpty) {
-        // Locked index stub
-        // Delete recently allocated index
-        index->Prev = prevIndex;
-        index->Header = block->header;
-      } else if (prevIndexState == BSHeader) {
-        // Locked header
-        alreadyHaveHeader = true;
-      } else {
-        LOG_F(WARNING, "Already have block %s (%u)", hash.getHexLE().c_str(), index->Height);
-        return index;
-      }
-    } else {
-      // New index created for current block; prev index already initialized
-      index->Header = block->header;
-    }
-  } else {
-    // Already have index for current block; state checked before
-    if (!alreadyHaveHeader) {
-      index->Prev = prevIndex;
-      index->Header = block->header;
-    }
-  }
-
-  // Continue header chain if we see header first time
-  if (!alreadyHaveHeader) {
-    index->ConcurrentHeaderNext = WaitPtr<BC::Common::BlockIndex>();
-    index->ConcurrentHeaderNext = prevIndex->SuccessorHeaders.exchange(index, 0);
-    if (index->ConcurrentHeaderNext.tag() == 1)
-      BuildHeaderChain(chainParams, prevIndex);
-  }
-
-  // Try to continue chain
-  publishBlockData(blockIndex, chainParams, storage, index, serialized, callback, fileNo, fileOffset);
-  return index;
-}
 
 // BSEmpty (stub) and BSHeader are the states block data may take over
 static bool reserveIndexForData(BC::Common::BlockIndex *index, bool *alreadyHaveHeader)
@@ -723,7 +1089,7 @@ BC::Common::BlockIndex *attachBlockData(BlockInMemoryIndex &blockIndex,
     index->ConcurrentHeaderNext = WaitPtr<BC::Common::BlockIndex>();
     index->ConcurrentHeaderNext = prevIndex->SuccessorHeaders.exchange(index, 0);
     if (index->ConcurrentHeaderNext.tag() == 1)
-      BuildHeaderChain(chainParams, prevIndex);
+      BuildHeaderChain(blockIndex, chainParams, prevIndex);
   }
 
   // A header that came through AddHeader has its consensus check done; one seen first time here
@@ -732,80 +1098,6 @@ BC::Common::BlockIndex *attachBlockData(BlockInMemoryIndex &blockIndex,
   return index;
 }
 
-// Accept a block with an attached index: everything AddBlock does after the index is in place
-static BC::Common::BlockIndex *acceptStagedBlock(BlockInMemoryIndex &blockIndex,
-                                                 BC::Common::ChainParams &chainParams,
-                                                 BC::DB::Storage &storage,
-                                                 BC::Common::BlockIndex *index,
-                                                 BC::Common::CIndexCacheObject *serialized,
-                                                 BC::Common::CheckConsensusCtx &ccCtx,
-                                                 newBestCallback callback,
-                                                 bool checkWork,
-                                                 uint32_t fileNo,
-                                                 uint32_t fileOffset)
-{
-  BC::Proto::Block *block = serialized->block();
-
-  // Failed checks leave the index as AddBlock leaves it: not asked for again
-  index->IndexState.store(BSBlock);
-
-  if (checkWork && !BC::Common::checkConsensus(block->header, ccCtx, chainParams)) {
-    LOG_F(ERROR, "Check Proof-Of-Work failed for block %s", index->Header.GetHash().getHexLE().c_str());
-    return nullptr;
-  }
-
-  if (!validateBlockData(chainParams, storage, serialized))
-    return nullptr;
-
-  publishBlockData(blockIndex, chainParams, storage, index, serialized, callback, fileNo, fileOffset);
-  return index;
-}
-
-bool processBlockData(BlockInMemoryIndex &blockIndex,
-                      BC::Common::ChainParams &chainParams,
-                      BC::DB::Storage &storage,
-                      CStagedBlock &staged,
-                      BC::Common::CheckConsensusCtx &ccCtx,
-                      newBestCallback callback)
-{
-  // Block data travels through the assembler serialized: this is where it is parsed
-  size_t unpackedSize = 0;
-  xmstream stream(staged.data(), staged.Size);
-  BC::Proto::Block *block = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
-  if (!block || stream.remaining() != 0) {
-    // The index was reserved before parsing: left in that state the block would never be asked
-    // for again. A header good on its own goes back to BSHeader, one that arrived with this very
-    // data has nothing to back it
-    if (staged.Index) {
-      bool headerValid = !staged.CheckWork || BC::Common::checkConsensus(staged.Index->Header, ccCtx, chainParams);
-      staged.Index->IndexState.store(headerValid ? BSHeader : BSInvalid);
-      LOG_F(ERROR, "Can't parse block %s: %s",
-            staged.Index->Header.GetHash().getHexLE().c_str(),
-            headerValid ? "block data dropped, will be asked for again" : "header rejected too");
-    } else {
-      LOG_F(ERROR, "Can't parse block (invalid block structure)");
-    }
-
-    return false;
-  }
-
-  // Data owning its buffer alone (from network) hands the bytes to the block object: writeBlock
-  // needs them. Data inside a block file is on disk already
-  void *serializedData = nullptr;
-  size_t serializedMemorySize = 0;
-  if (staged.Exclusive) {
-    serializedMemorySize = staged.Buffer.get()->memorySize();
-    serializedData = staged.Buffer.get()->detach();
-  }
-
-  intrusive_ptr<BC::Common::CIndexCacheObject> object(
-    new BC::Common::CIndexCacheObject(&storage.cache(), serializedData, staged.Size, serializedMemorySize, block, unpackedSize));
-
-  if (staged.Index)
-    return acceptStagedBlock(blockIndex, chainParams, storage, staged.Index, object.get(), ccCtx, callback, staged.CheckWork, staged.FileNo, staged.FileOffset) != nullptr;
-  else
-    return AddBlock(blockIndex, chainParams, storage, object.get(), ccCtx, callback, staged.FileNo, staged.FileOffset) != nullptr;
-}
 
 static bool loadBlockIndexDeserializer(BlockInMemoryIndex &blockIndex, LoadingIndexContext &loadingIndexContext, std::vector<size_t> &blockFileSizes, RawData *data, size_t indexesNum, const char *path)
 {
@@ -979,9 +1271,13 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
 
     blockIndex.blockHeightIndex()[index->Height] = index;
     index->Prev->Next = index;
+    // Below the preparation frontier from the start: a walk down from a candidate stops at the
+    // connected chain, not at the genesis block
+    index->Prepared.store(true, std::memory_order_relaxed);
     index = index->Prev;
   }
 
+  index->Prepared.store(true, std::memory_order_relaxed);
   blockIndex.blockHeightIndex()[index->Height] = index;
   if (index != blockIndex.genesis()) {
     LOG_F(ERROR, "Index for [%u]%s is broken (breaks at [%u]%s",
@@ -997,11 +1293,12 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
   return true;
 }
 
+
 bool reindex(BlockInMemoryIndex &blockIndex,
              const std::filesystem::path &blockPath,
              BC::Common::ChainParams &chainParams,
              BC::DB::Storage &storage,
-             CBlockAssembler &assembler)
+             CBlockPipeline &pipeline)
 {
   char blockFileName[64];
   unsigned blkFileIndex = 0;
@@ -1017,26 +1314,20 @@ bool reindex(BlockInMemoryIndex &blockIndex,
     if (!std::filesystem::exists(path))
       break;
 
-    // Backpressure: staged block data and blocks parsed but not connected yet live in memory,
-    // unthrottled reading eats all of it. Waiting is safe only at a file boundary (the pipeline
-    // can always advance); the no-progress escape covers a tail that links through the next file.
-    // Nothing is held back while waiting: the serial stage may need a block still in the assembler
-    assembler.flushAll();
+    // Read ahead limit: raw block data attached but not prepared yet lives in memory. Nothing
+    // else here - the pipeline decides what to connect from the index, so a reader that waits
+    // holds nobody up. The one case it would is a pipeline with nothing to do: the block it
+    // needs is in a file not read yet, and only the reader can bring it
     {
-      size_t lastSize = assembler.stagedBytes() + storage.cache().size();
-      unsigned noProgress = 0;
-      while ((assembler.overflow() || storage.cache().overflow()) && noProgress < 100) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        size_t size = assembler.stagedBytes() + storage.cache().size();
-        noProgress = size < lastSize ? 0 : noProgress + 1;
-        lastSize = size;
-      }
+      constexpr auto nap = std::chrono::milliseconds(1);
+      while (pipeline.throttled())
+        std::this_thread::sleep_for(nap);
     }
 
     std::string pathUtf8 = pathToUtf8(path);
     LOG_F(INFO, "Loading block file %s ...", pathUtf8.c_str());
 
-    // Staged blocks point into this buffer: it lives until the last batch referring to it is done
+    // Attached blocks point into this buffer: it lives until the last block of it is prepared
     size_t blockFileSize = std::filesystem::file_size(path);
     intrusive_ptr<CRawBlockData> buffer(new CRawBlockData(operator new(blockFileSize), blockFileSize, nullptr));
     uint8_t *data = static_cast<uint8_t*>(buffer.get()->data());
@@ -1091,26 +1382,25 @@ bool reindex(BlockInMemoryIndex &blockIndex,
 
     for (const auto &position: blockOffsets) {
       // Serialized block starts right after the <magic>:4 <blockSize>:4 record prefix
-      if (assembler.attachFromFile(buffer, position.offset + 8, position.size, blkFileIndex, position.offset) == CBlockAssembler::Invalid) {
+      if (pipeline.attachFromFile(buffer, position.offset + 8, position.size, blkFileIndex, position.offset) == CBlockPipeline::Invalid) {
         LOG_F(ERROR, "Can't parse block file %s (invalid block structure)", pathUtf8.c_str());
         return false;
       }
-
-      if (assembler.failed())
-        return false;
     }
 
-    // Keep a batch inside one block file
-    assembler.flush();
+    if (pipeline.failed())
+      return false;
 
     LOG_F(INFO,
-          "%u blocks read from %s; staging: %.3lfM cache: %.3lfM best: [%u]%s",
+          "%u blocks read from %s; read ahead: %.3lfM cache: %.3lfM best: [%u]%s",
           static_cast<unsigned>(blockOffsets.size()),
           pathUtf8.c_str(),
-          assembler.stagedBytes() / 1048576.0f,
+          pipeline.rawBytes() / 1048576.0f,
           storage.cache().size() / 1048576.0f,
           blockIndex.best()->Height,
           blockIndex.best()->Header.GetHash().getHexLE().c_str());
+
+    pipeline.rotateFile();
 
     totalBlockCount += blockOffsets.size();
     totalBytesRead += blockFileSize;
@@ -1118,21 +1408,16 @@ bool reindex(BlockInMemoryIndex &blockIndex,
   }
 
   // Pipeline and write queue tails are part of reindex work: without draining them the speed
-  // number would exclude a cache worth of pending writes. A block whose predecessor never showed
-  // up in the files is handed over here, not dropped
-  assembler.flushAll();
-  assembler.waitIdle();
-  if (assembler.failed())
+  // number would exclude a cache worth of pending writes
+  pipeline.waitDrained();
+  if (pipeline.failed())
     return false;
 
   while (!storage.queue().empty())
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
   auto best = blockIndex.best();
-  LOG_F(INFO, "%zu blocks loaded from disk in %zu batches (%zu blocks out of order)",
-        totalBlockCount,
-        static_cast<size_t>(assembler.batchCount()),
-        static_cast<size_t>(assembler.outOfOrderBlocks()));
+  LOG_F(INFO, "%zu blocks loaded from disk", totalBlockCount);
   LOG_F(INFO, "Best block is %s (%u)", best->Header.GetHash().getHexLE().c_str(), best->Height);
 
   double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count() / 1000.0;

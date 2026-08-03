@@ -6,6 +6,7 @@
 #pragma once
 
 #include "db/common.h"
+#include "db/keyHash.h"
 #include "db/swmrcache.h"
 #include "BTC/script.h"
 
@@ -20,7 +21,7 @@ template<>
 class std::hash<CUnspentOutputKey> {
 public:
   size_t operator()(const CUnspentOutputKey &key) const noexcept {
-    return key.Tx.get64(0) + key.Tx.get64(1) * key.Index + key.Tx.get64(2) * key.Index + key.Tx.get64(3) * key.Index;
+    return static_cast<size_t>(hashOutpoint(key.Tx.begin(), key.Index).H1);
   }
 };
 
@@ -68,26 +69,32 @@ public:
 
 private:
   uint32_t version() final { return 1; }
-  bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
+  bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) override;
 
   void connectImpl(const BC::Common::BlockIndex *index,
                    const BC::Proto::Block &block,
                    const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                    const BC::Proto::CBlockValidationData &validationData,
                    BlockInMemoryIndex &blockIndex,
-                   BlockDatabase &blockDb);
+                   BlockDatabase &blockDb) override;
 
   void disconnectImpl(const BC::Common::BlockIndex *index,
                       const BC::Proto::Block &block,
                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                       const BC::Proto::CBlockValidationData &validationData,
                       BlockInMemoryIndex &blockIndex,
-                      BlockDatabase &blockDb);
+                      BlockDatabase &blockDb) override;
 
   void connectFastImpl(const BC::Common::BlockIndex *index,
                        const BC::Proto::Block &block,
                        const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                        const BC::Proto::CBlockValidationData &validationData) final;
+
+  // A block whose run pairs are still hidden: its connect never took the hidden output away, and
+  // only the full disconnect puts it back
+  bool cancelableConnect(const BC::Proto::CBlockValidationData &validationData) const override {
+    return !validationData.hidesPairs();
+  }
 
   void disconnectFastImpl(const BC::Common::BlockIndex *index,
                           const BC::Proto::Block &block,

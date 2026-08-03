@@ -98,6 +98,14 @@ namespace Common {
   // Consensus (PoW)
   void checkConsensusInitialize(CheckConsensusCtx &ctx);
   bool checkConsensus(const XPM::Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
+  static inline void checkConsensusMulti(const XPM::Proto::BlockHeader *const *headers,
+                                         size_t count,
+                                         CheckConsensusCtx &ctx,
+                                         ChainParams &chainParams,
+                                         bool *results) {
+    for (size_t i = 0; i < count; i++)
+      results[i] = checkConsensus(*headers[i], ctx, chainParams);
+  }
 
   static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
 

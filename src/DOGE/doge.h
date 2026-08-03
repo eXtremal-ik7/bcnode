@@ -8,6 +8,8 @@
 #include "proto.h"
 #include "LTC/ltc.h"
 #include "BTC/merkleTree.h"
+#include "crypto/scrypt.h"
+#include <algorithm>
 #include <string.h>
 
 namespace DOGE {
@@ -86,6 +88,27 @@ namespace Common {
     return header.nVersion & Proto::BlockHeader::VERSION_AUXPOW ?
       LTC::Common::checkPow(header.ParentBlock, header.nBits, ctx, chainParams.powLimit) :
       LTC::Common::checkPow(header, header.nBits, ctx, chainParams.powLimit);
+  }
+
+  // Auxpow keeps the hashed header and its target apart: sorted out here, before the scrypt path
+  static inline void checkConsensusMulti(const Proto::BlockHeader *const *headers,
+                                         size_t count,
+                                         CheckConsensusCtx&,
+                                         ChainParams &chainParams,
+                                         bool *results) {
+    for (size_t base = 0; base < count; base += SCRYPT_WAYS) {
+      size_t num = std::min<size_t>(SCRYPT_WAYS, count - base);
+      const Proto::PureBlockHeader *hashed[SCRYPT_WAYS];
+      uint32_t nBits[SCRYPT_WAYS];
+
+      for (size_t i = 0; i < num; i++) {
+        const Proto::BlockHeader *header = headers[base + i];
+        hashed[i] = header->nVersion & Proto::BlockHeader::VERSION_AUXPOW ? &header->ParentBlock : header;
+        nBits[i] = header->nBits;
+      }
+
+      LTC::Common::checkPowMulti(hashed, nBits, num, chainParams.powLimit, results + base);
+    }
   }
 };
 

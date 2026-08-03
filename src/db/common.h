@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "db/keyHash.h"
 #include "common/blockDataBase.h"
 #include "common/mlog.h"
 #include "common/utils.h"
@@ -335,7 +336,7 @@ public:
                   BlockDatabase &blockDb) final {
     auto hash = index->Header.GetHash();
 
-    if (!PendingBlocks_.empty()) {
+    if (!PendingBlocks_.empty() && cancelableConnect(validationData)) {
       auto last = PendingBlocks_.back();
       if (last.IsConnected && last.BlockId == hash) {
         for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
@@ -393,6 +394,10 @@ public:
                                const BC::Proto::Block&,
                                const BC::Proto::CBlockLinkedOutputs&,
                                const BC::Proto::CBlockValidationData&) {}
+
+  // The pop reverts exactly what the connect wrote, so a database that left part of the block
+  // out on purpose has nothing to revert and asks for the full path instead
+  virtual bool cancelableConnect(const BC::Proto::CBlockValidationData&) const { return true; }
 
   virtual void disconnectFastImpl(const BC::Common::BlockIndex*,
                                   const BC::Proto::Block&,
@@ -578,20 +583,30 @@ public:
   rocksdb::MergeOperator *mergeOperator() final { return nullptr; }
 
   void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size) {
+    add(blockId, key, data, size, nullptr, 0);
+  }
+
+  // Value glued from two pieces straight in the arena: a "payload + a few bytes of metadata"
+  // caller would otherwise build it in a scratch buffer and copy the record a second time
+  void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size, const void *suffix, size_t suffixSize) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
+    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
 
     // record rounded up so every header lands 4-aligned in the arena
-    CHeader *header = static_cast<CHeader*>(shard.Log.alloc((sizeof(CHeader) + size + 3) & ~static_cast<size_t>(3)));
-    header->Size = static_cast<uint32_t>(size);
-    memcpy(header + 1, data, size);
+    size_t total = size + suffixSize;
+    CHeader *header = static_cast<CHeader*>(shard.Log.alloc((sizeof(CHeader) + total + 3) & ~static_cast<size_t>(3)));
+    header->Size = static_cast<uint32_t>(total);
+    uint8_t *value = reinterpret_cast<uint8_t*>(header + 1);
+    memcpy(value, data, size);
+    if (suffixSize)
+      memcpy(value + size, suffix, suffixSize);
 
     shard.update(blockId, key, header);
   }
 
   void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
+    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
 
     // CBaseKV keys are write-once across the chain (outpoint, txid): a live
     // predecessor inside the active window means the key was never flushed,
@@ -608,7 +623,7 @@ public:
 
   bool find(const CKey &key, std::function<void(const void*, size_t)> callback) const {
     std::hash<CKey> hasher;
-    size_t shardIndex = hasher(key) % this->BaseCfg_.ShardsNum;
+    size_t shardIndex = fastrange(hasher(key), this->BaseCfg_.ShardsNum);
 
     // Active first, frozen second: the newest version of a key shadows the
     // frozen one and a delete marker in the active log must hide a frozen
@@ -775,7 +790,7 @@ public:
 
   void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size, size_t count) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
+    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
 
     // get current array size
     const void *prevData = nullptr;
@@ -803,7 +818,7 @@ public:
 
   void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t count) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
+    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
 
     // get current array size
     int64_t prevCount = 0;
@@ -822,7 +837,7 @@ public:
 
   bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalTxCount) {
     std::hash<CKey> hasher;
-    size_t shardIdx = hasher(key) % this->BaseCfg_.ShardsNum;
+    size_t shardIdx = fastrange(hasher(key), this->BaseCfg_.ShardsNum);
     CLog<CKey> &mlog = this->shard(shardIdx);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIdx].get();
 
@@ -1100,7 +1115,7 @@ public:
   // window-relative running sums, rebased to absolute values at flush
   void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CItem *items, size_t count) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
+    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
 
     const void *prevData = nullptr;
     size_t prevSize = 0;
@@ -1133,7 +1148,7 @@ public:
 
   void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t count) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
+    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
 
     int64_t prevCount = 0;
     const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key));
@@ -1150,7 +1165,7 @@ public:
 
   bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalCount) {
     std::hash<CKey> hasher;
-    size_t shardIdx = hasher(key) % this->BaseCfg_.ShardsNum;
+    size_t shardIdx = fastrange(hasher(key), this->BaseCfg_.ShardsNum);
     CLog<CKey> &mlog = this->shard(shardIdx);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIdx].get();
 
@@ -1578,7 +1593,7 @@ public:
 
   void merge(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CValue &delta) {
     std::hash<CKey> hasher;
-    CLog<CKey> &shard = this->shard(hasher(key) % this->BaseCfg_.ShardsNum);
+    CLog<CKey> &shard = this->shard(fastrange(hasher(key), this->BaseCfg_.ShardsNum));
 
     CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader)));
     header->Key = key;
@@ -1591,7 +1606,7 @@ public:
 
   bool find(const CKey &key, CValue &value) const {
     std::hash<CKey> hasher;
-    size_t shardIndex = hasher(key) % this->BaseCfg_.ShardsNum;
+    size_t shardIndex = fastrange(hasher(key), this->BaseCfg_.ShardsNum);
     // async flush is never enabled for merge tables, the frozen log can't exist
     CLog<CKey> &shard = *this->activeLog(shardIndex);
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();

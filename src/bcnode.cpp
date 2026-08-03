@@ -157,8 +157,8 @@ struct Context {
   // Storage manager
   BC::DB::Storage Storage;
 
-  // Batch pipeline (shared by the reindex reader and network catch-up)
-  CBlockAssembler Assembler;
+  // Pull pipeline (shared by the reindex reader and network catch-up)
+  CBlockPipeline Pipeline;
 
   // Network
   BC::Network::Node Node;
@@ -227,6 +227,8 @@ int main(int argc, char **argv)
     genesisIndex->Header = context.ChainParams.GenesisBlock.header;
     genesisIndex->ChainWork = BC::Common::GetBlockProof(genesisIndex->Header, context.ChainParams);
     genesisIndex->OnChain = true;
+    // The walk from a candidate stops at the connected chain, and this is where it starts
+    genesisIndex->Prepared = true;
     {
       xmstream stream;
       BTC::serialize(stream, context.ChainParams.GenesisBlock);
@@ -245,7 +247,7 @@ int main(int argc, char **argv)
         outputs.Tx[i].TxIn.resize(context.ChainParams.GenesisBlock.vtx[i].txIn.size());
 
       BC::Common::initializeValidationContext(*unpacked, genesisObject->validationData());
-      genesisObject->validationData().AllOutputsFound = true;
+      genesisObject->validationData().InputsResolved = true;
 
       genesisIndex->Serialized.reset(genesisObject);
     }
@@ -303,8 +305,12 @@ int main(int argc, char **argv)
   unsigned outgoingConnectionsLimit = 16;
   unsigned incomingConnectionsLimit = std::numeric_limits<unsigned>::max();
   bool archiveEnabled = false;
-  unsigned batchThreadsNum = 0;
-  CBlockAssembler::CParams batchParams;
+  unsigned waveThreadsNum = 0;
+  // Parsed block data waiting to connect; the reindex reader throttles on it
+  size_t blockCacheSize = BC::Configuration::DefaultBlockCacheSize;
+  // Block data connected and waiting for the storage thread; 0 - same as the block cache
+  size_t storageBacklogSize = 0;
+  CBlockPipeline::CParams pipelineParams;
   if (std::filesystem::exists(configPath)) {
     try {
       cfg->parse(configPath.string().c_str());
@@ -329,11 +335,16 @@ int main(int argc, char **argv)
       outgoingConnectionsLimit = cfg->lookupInt("bcnode", "outgoingConnectionsLimit", 16);
       incomingConnectionsLimit = cfg->lookupInt("bcnode", "incomingConnectionsLimit", std::numeric_limits<unsigned>::max());
 
-      // Batch pipeline
-      batchThreadsNum = cfg->lookupInt("bcnode", "batchThreadsNum", 0);
-      batchParams.BatchBlocksLimit = cfg->lookupInt("bcnode", "batchBlocks", static_cast<int>(batchParams.BatchBlocksLimit));
-      batchParams.BatchSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "batchSizeMb", static_cast<int>(batchParams.BatchSizeLimit / 1048576))) * 1048576;
-      batchParams.StagingSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "stagingSizeMb", static_cast<int>(batchParams.StagingSizeLimit / 1048576))) * 1048576;
+      // Pull pipeline
+      waveThreadsNum = cfg->lookupInt("bcnode", "waveThreadsNum", 0);
+      pipelineParams.SegmentSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "segmentSizeMb", static_cast<int>(pipelineParams.SegmentSizeLimit / 1048576))) * 1048576;
+      pipelineParams.SegmentBlocksLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "segmentBlocks", static_cast<int>(pipelineParams.SegmentBlocksLimit)));
+      pipelineParams.ReadyQueueDepth = static_cast<size_t>(cfg->lookupInt("bcnode", "readyQueueDepth", static_cast<int>(pipelineParams.ReadyQueueDepth)));
+      pipelineParams.PrepLanes = static_cast<size_t>(cfg->lookupInt("bcnode", "prepLanes", static_cast<int>(pipelineParams.PrepLanes)));
+      pipelineParams.RawSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "readAheadMb", static_cast<int>(pipelineParams.RawSizeLimit / 1048576))) * 1048576;
+      pipelineParams.Prefetch = cfg->lookupBoolean("bcnode", "prefetch", pipelineParams.Prefetch);
+      storageBacklogSize = static_cast<size_t>(cfg->lookupInt("bcnode", "storageBacklogMb", 0)) * 1048576;
+      blockCacheSize = static_cast<size_t>(cfg->lookupInt("bcnode", "blockCacheSizeMb", static_cast<int>(blockCacheSize / 1048576))) * 1048576;
 
       {
         const char *p = cfg->lookupString("bcnode", "indexPath", nullptr);
@@ -362,7 +373,9 @@ int main(int argc, char **argv)
     workerThreadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
   unsigned totalThreadsNum = workerThreadsNum + rtThreadsNum;
 
-  context.Storage.cache().setLimit(BC::Configuration::DefaultBlockCacheSize);
+  context.Storage.cache().setLimit(blockCacheSize);
+  // Same budget for what waits to be written: it is the same block data, one step further on
+  pipelineParams.StorageBacklogLimit = storageBacklogSize ? storageBacklogSize : blockCacheSize;
 
   // Lookup peers (DNS seeds and user defined nodes)
   // TODO: do it asynchronously (now using std::async)
@@ -442,28 +455,27 @@ int main(int argc, char **argv)
   if (!context.Storage.run([&context]() { postQuitOperation(context.MainBase); }))
     return 1;
 
-  // Batch pipeline: shared by the reindex reader and network catch-up
-  if (batchThreadsNum == 0)
-    batchThreadsNum = workerThreadsNum;
-  if (!context.Assembler.start(context.BlockIndex, context.ChainParams, context.Storage, batchThreadsNum, batchParams))
+  // Pull pipeline: shared by the reindex reader and network catch-up
+  pipelineParams.WaveThreads = waveThreadsNum;
+  if (!context.Pipeline.start(context.BlockIndex, context.ChainParams, context.Storage, pipelineParams))
     return 1;
 
   if (gReindex) {
-    if (!reindex(context.BlockIndex, context.BlocksDir, context.ChainParams, context.Storage, context.Assembler)) {
-      context.Assembler.stop();
+    if (!reindex(context.BlockIndex, context.BlocksDir, context.ChainParams, context.Storage, context.Pipeline)) {
+      context.Pipeline.stop();
       postQuitOperation(context.MainBase);
       return 1;
     }
 
     if (gReindexOnly) {
-      context.Assembler.stop();
+      context.Pipeline.stop();
       LOG_F(INFO, "Reindex done, exiting");
       return 0;
     }
   }
 
   // Starting daemon
-  context.Node.Init(context.BlockIndex, context.ChainParams, context.Storage, context.Assembler, context.MainBase, totalThreadsNum, workerThreadsNum, outgoingConnectionsLimit, incomingConnectionsLimit);
+  context.Node.Init(context.BlockIndex, context.ChainParams, context.Storage, context.Pipeline, context.MainBase, totalThreadsNum, workerThreadsNum, outgoingConnectionsLimit, incomingConnectionsLimit);
 
   for (size_t i = 0; i < lookupThreadsNum; i++) {
     if (!workers[i].get())
@@ -539,8 +551,8 @@ int main(int argc, char **argv)
   for (unsigned i = 0; i < totalThreadsNum; i++)
     workerThreads[i].join();
 
-  // Drains the batches already submitted
-  context.Assembler.stop();
+  // Drains the segments already prepared
+  context.Pipeline.stop();
 
   LOG_F(INFO, "done");
   return 0;

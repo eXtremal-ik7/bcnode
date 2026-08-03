@@ -83,6 +83,16 @@ namespace Common {
   // Check functions
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
   bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
+  // Group check: the pipeline hands over a whole chunk so a chain with a multi-way hash kernel
+  // can use it. Here the group is just walked
+  static inline void checkConsensusMulti(const Proto::BlockHeader *const *headers,
+                                         size_t count,
+                                         CheckConsensusCtx &ctx,
+                                         ChainParams &chainParams,
+                                         bool *results) {
+    for (size_t i = 0; i < count; i++)
+      results[i] = checkConsensus(*headers[i], ctx, chainParams);
+  }
 
   static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
 

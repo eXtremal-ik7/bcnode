@@ -450,3 +450,13 @@ void scrypt_1024_1_1_256(const void *input, uint8_t output[32])
   char scratchpad[LTC_SCRATCHPAD_SIZE];
   scrypt_1024_1_1_256_sp(input, (char*)output, scratchpad);
 }
+
+// One scratchpad for the group and the inputs already collected: what a lane interleaved kernel
+// needs. Until there is one the group is walked lane by lane
+void scrypt_1024_1_1_256_multi(const void *const *inputs, uint8_t *outputs, size_t count)
+{
+  char scratchpad[LTC_SCRATCHPAD_SIZE];
+  size_t i;
+  for (i = 0; i < count; i++)
+    scrypt_1024_1_1_256_sp((const char*)inputs[i], (char*)(outputs + i*32), scratchpad);
+}

@@ -7,9 +7,11 @@
 #include "common/blockDataBase.h"
 #include "db/archive.h"
 #include <asyncio/asyncio.h>
+#include <chrono>
 
 namespace BC {
 namespace DB {
+
 
 Storage::~Storage()
 {
@@ -73,7 +75,12 @@ void Storage::add(ActionTy type,
       break;
   }
 
-  Queue_.emplace(type, index);
+  size_t memory = 0;
+  if (BC::Common::CIndexCacheObject *object = index->Serialized.get())
+    memory = object->blockData().memorySize();
+  QueuedMemory_.fetch_add(memory, std::memory_order_relaxed);
+
+  Queue_.emplace(type, index, memory);
   if (wakeUp)
     userEventActivate(NewTaskEvent_);
 }
@@ -101,7 +108,6 @@ void Storage::onQueuePush()
   bool needFlush = false;
   while (Queue_.try_pop(task)) {
     intrusive_ptr<BTC::Common::CIndexCacheObject> object = objectByIndex(task.Index, *BlockDb_);
-
     assert(object.get());
     switch (task.Type) {
       case Connect :
@@ -120,6 +126,8 @@ void Storage::onQueuePush()
         break;
 
     }
+
+    QueuedMemory_.fetch_sub(task.Memory, std::memory_order_relaxed);
 
     if (needFlush) {
       flush();

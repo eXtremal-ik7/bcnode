@@ -852,6 +852,16 @@ void Node::OnGetAddr(Peer *peer)
 
 void Node::Start()
 {
+  // The verdict on a block is asynchronous now: relay happens when the serial stage connects it,
+  // not when the peer thread hands it over. Blocks of a catch-up download are not relayed - they
+  // never carry the flag
+  Pipeline_->setCallback([this](const std::vector<BC::Common::BlockIndex*> &connected) {
+    enumeratePeers([&connected](Peer *peer) {
+      for (const auto index: connected)
+        peer->inv({index->Header.GetHash()});
+    });
+  });
+
   Sync();
 }
 
@@ -871,9 +881,6 @@ void Node::OnBCNodeConnection(HostAddress address, aioObject *object)
 void Node::Sync()
 {
   unsigned interval = 4*1000000;
-
-  // A batch left under-filled by a stuttering peer must not wait for the next one
-  Assembler_->flushOnTimeout();
 
   BC::Common::BlockIndex *best = BlockIndex_->best();
   bool hasConnectedPeers = false;
@@ -1026,67 +1033,28 @@ void Node::Sync(Peer *peer,
                 bool scheduledBlock,
                 bool downloadFinished)
 {
-  // Sync mode: a block asked for as part of catch-up goes to the assembler unparsed. Anything
-  // else (a block relayed at the tip) keeps the direct path with its latency, relay and orphans
-  BC::Common::BlockIndex *staged = nullptr;
-  if (scheduledBlock && Assembler_->started() &&
-      Assembler_->attachFromNetwork(data, static_cast<uint32_t>(size), static_cast<uint32_t>(memorySize), header, hash, &staged) == CBlockAssembler::Staged) {
+  // One path for everything: the data is attached to its index and the pipeline decides what to
+  // connect and when. A block relayed at the tip becomes a segment of its own, so the verdict
+  // takes a wave over one block instead of a single thread walking it
+  BC::Common::BlockIndex *attached = nullptr;
+  CBlockPipeline::EResult result =
+    Pipeline_->attachFromNetwork(data, static_cast<uint32_t>(size), static_cast<uint32_t>(memorySize),
+                                 header, hash, !scheduledBlock, &attached);
+  if (result == CBlockPipeline::Staged) {
     if (downloadFinished) {
-      // Peer batch complete: don't leave an under-filled batch waiting for the next one
-      Assembler_->flush();
-
       // Best chain lags the received block here: blocks are still in the pipeline
       auto best = BlockIndex_->best();
       LOG_F(INFO, "Best chain: %s(%u); Last received: %s(%u); cache: %.3lfM",
             best->Header.GetHash().getHexLE().c_str(), best->Height,
-            hash.getHexLE().c_str(), staged->Height,
+            hash.getHexLE().c_str(), attached->Height,
             Storage_->cache().size() / 1048576.0f);
 
       if (peer->startDownloadBlocks())
         scheduleBlocksDownload(peer);
     }
 
-    return;
-  }
-
-  // Unpacking block
-  size_t unpackedSize = 0;
-  intrusive_ptr<BC::Common::CIndexCacheObject> objectPtr;
-  {
-    xmstream serialized(data, size);
-    BC::Proto::Block *unpacked = BC::unpack2<BC::Proto::Block>(serialized, &unpackedSize);
-    if (!unpacked || serialized.remaining()) {
-      LOG_F(ERROR, "Peer %s: can't unserialize block", peer->Name.c_str());
-      operator delete(data);
-      return;
-    }
-
-    objectPtr = intrusive_ptr<BC::Common::CIndexCacheObject>(new BC::Common::CIndexCacheObject(&Storage_->cache(), data, size, memorySize, unpacked, unpackedSize));
-  }
-
-  BC::Common::CIndexCacheObject *object = objectPtr.get();
-  BC::Common::CheckConsensusCtx ccCtx;
-  BC::Common::checkConsensusInitialize(ccCtx);
-  auto oldBest = BlockIndex_->best();
-
-  auto callback = [this, peer, scheduledBlock](const std::vector<BC::Common::BlockIndex*> &acceptedBlocks) {
-    // Relay blocks
-    if (scheduledBlock)
-      return;
-
-    enumeratePeers([peer, &acceptedBlocks](Peer *connectedPeer) {
-      if (connectedPeer != peer) {
-        for (const auto index: acceptedBlocks)
-          connectedPeer->inv({index->Header.GetHash()});
-      }
-    });
-  };
-
-  // Need calculate block hash now
-  BC::Common::BlockIndex *index;
-  if ( (index = AddBlock(*BlockIndex_, *ChainParams_, *Storage_, object, ccCtx, callback)) ) {
-    BC::Proto::BlockHashTy hash = index->Header.GetHash();
-    if (index->Height == std::numeric_limits<uint32_t>::max()) {
+    // Nothing of the block is known yet, its predecessor included: ask for the chain it hangs on
+    if (!scheduledBlock && attached->Height == std::numeric_limits<uint32_t>::max()) {
       LOG_F(INFO, "%s: orhpan block %s received, node possible not synchronized", peer->Name.c_str(), hash.getHexLE().c_str());
 
       bool newSourceCreated = false;
@@ -1104,26 +1072,14 @@ void Node::Sync(Peer *peer,
         }
       }
     }
-  } else {
-    LOG_F(WARNING, "%s: invalid block received", peer->Name.c_str());
+
+    return;
   }
 
-  if (index) {
-    auto newBest = BlockIndex_->best();
-    if (downloadFinished) {
-      LOG_F(INFO, "Best chain: %s(%u); Last received: %s(%u); cache: %.3lfM",
-            newBest->Header.GetHash().getHexLE().c_str(), newBest->Height,
-            index->Header.GetHash().getHexLE().c_str(), index->Height,
-            Storage_->cache().size() / 1048576.0f);
-    } else if (!scheduledBlock && newBest != oldBest) {
-      LOG_F(INFO, "New best chain: %s(%u)", newBest->Header.GetHash().getHexLE().c_str(), newBest->Height);
-    }
-  }
-
-  if (downloadFinished && scheduledBlock && peer->startDownloadBlocks())
-    scheduleBlocksDownload(peer);
+  // Already have this block
+  operator delete(data);
+  return;
 }
-
 void Node::Sync(std::vector<BC::Proto::BlockHashTy>&)
 {
   // TODO: check that hashes belongs to current block source

@@ -326,7 +326,7 @@ private:
   BlockInMemoryIndex *BlockIndex_;
   BC::Common::ChainParams *ChainParams_;
   BC::DB::Storage *Storage_;
-  CBlockAssembler *Assembler_;
+  CBlockPipeline *Pipeline_;
   asyncBase *Base;
   unsigned ThreadsNum_;
   unsigned WorkerThreadsNum_;
@@ -361,7 +361,7 @@ public:
   void Init(BlockInMemoryIndex &blockIndex,
             BC::Common::ChainParams &chainParams,
             BC::DB::Storage &storage,
-            CBlockAssembler &assembler,
+            CBlockPipeline &pipeline,
             asyncBase *base,
             unsigned threadsNum,
             unsigned workerThreadsNum,
@@ -370,7 +370,7 @@ public:
     BlockIndex_ = &blockIndex;
     ChainParams_ = &chainParams;
     Storage_ = &storage;
-    Assembler_ = &assembler;
+    Pipeline_ = &pipeline;
     Base = base;
     ThreadsNum_ = threadsNum;
     WorkerThreadsNum_ = workerThreadsNum;

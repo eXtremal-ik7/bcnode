@@ -8,6 +8,8 @@
 #include "common/serializeUtils.h"
 #include "common/utils.h"
 
+#include <algorithm>
+
 namespace LTC {
 namespace Common {
 
@@ -165,10 +167,10 @@ bool setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, const UInt<256> &powLimit)
+static bool powMatch(const uint8_t hash[32], uint32_t nBits, const UInt<256> &powLimit)
 {
   UInt<256> scryptHash;
-  scrypt_1024_1_1_256(&header, reinterpret_cast<uint8_t*>(scryptHash.data()));
+  memcpy(scryptHash.data(), hash, 32);
   for (unsigned i = 0; i < 4; i++)
     scryptHash.data()[i] = readle(scryptHash.data()[i]);
 
@@ -185,6 +187,47 @@ bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCt
       return false;
 
   return true;
+}
+
+bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, const UInt<256> &powLimit)
+{
+  uint8_t hash[32];
+  scrypt_1024_1_1_256(&header, hash);
+  return powMatch(hash, nBits, powLimit);
+}
+
+void checkPowMulti(const Proto::BlockHeader *const *headers,
+                   const uint32_t *nBits,
+                   size_t count,
+                   const UInt<256> &powLimit,
+                   bool *results)
+{
+  for (size_t base = 0; base < count; base += SCRYPT_WAYS) {
+    size_t num = std::min<size_t>(SCRYPT_WAYS, count - base);
+    const void *inputs[SCRYPT_WAYS];
+    uint8_t hashes[SCRYPT_WAYS][32];
+
+    for (size_t i = 0; i < num; i++)
+      inputs[i] = headers[base + i];
+    scrypt_1024_1_1_256_multi(inputs, &hashes[0][0], num);
+    for (size_t i = 0; i < num; i++)
+      results[base + i] = powMatch(hashes[i], nBits[base + i], powLimit);
+  }
+}
+
+void checkConsensusMulti(const Proto::BlockHeader *const *headers,
+                         size_t count,
+                         CheckConsensusCtx&,
+                         ChainParams &chainParams,
+                         bool *results)
+{
+  for (size_t base = 0; base < count; base += SCRYPT_WAYS) {
+    size_t num = std::min<size_t>(SCRYPT_WAYS, count - base);
+    uint32_t nBits[SCRYPT_WAYS];
+    for (size_t i = 0; i < num; i++)
+      nBits[i] = headers[base + i]->nBits;
+    checkPowMulti(headers + base, nBits, num, chainParams.powLimit, results + base);
+  }
 }
 
 UInt<256> GetBlockProof(const Proto::BlockHeader &header)

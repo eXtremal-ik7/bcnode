@@ -7,6 +7,7 @@
 
 #include "db/utxodb.h"
 #include <tbb/concurrent_queue.h>
+#include <atomic>
 #include <functional>
 #include <thread>
 
@@ -28,8 +29,10 @@ enum ActionTy {
 struct Task {
   ActionTy Type = Connect;
   BC::Common::BlockIndex *Index = nullptr;
+  // Block data the task keeps alive until it is written; the reader throttles on the sum
+  size_t Memory = 0;
   Task() {};
-  Task(ActionTy type, BC::Common::BlockIndex *index) : Type(type), Index(index) {}
+  Task(ActionTy type, BC::Common::BlockIndex *index, size_t memory) : Type(type), Index(index), Memory(memory) {}
 };
 
 
@@ -61,6 +64,10 @@ public:
   void flush();
 
   tbb::concurrent_queue<Task> &queue() { return Queue_; }
+  // Parsed block data of tasks queued but not processed yet. The block cache cannot serve as
+  // the read ahead measure: it counts the data the pipeline itself holds in flight, and a
+  // reader throttled on that runs in lockstep with the chain
+  size_t queuedMemory() const { return QueuedMemory_.load(std::memory_order_relaxed); }
 
 private:
   static void timerCb(aioUserEvent*, void *arg) { static_cast<Storage*>(arg)->onTimer(); }
@@ -83,6 +90,7 @@ private:
   std::vector<BC::Common::BlockIndex*> CachedBlocks_;
   std::chrono::time_point<std::chrono::steady_clock> LastFlushTime_ = std::chrono::steady_clock::now();
 
+  std::atomic<size_t> QueuedMemory_ = 0;
   CAllocationInfo BlockCache;
   UTXODb UTXODb_;
 };

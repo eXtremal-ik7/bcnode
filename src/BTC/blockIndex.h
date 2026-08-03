@@ -7,6 +7,9 @@
 #include "proto.h"
 
 #include <chrono>
+#include <memory>
+
+struct CBlockRawData;
 
 enum BlockStatus {
   BSEmpty = 0,  // stub for a block known only as someone's predecessor: no header yet
@@ -93,11 +96,15 @@ public:
   BlockIndexTy *Next = nullptr;
 
   bool OnChain = false;
-  // Data of this block has left the batch assembler; owned by the assembler
-  bool Batched = false;
+  // Block data went into a segment: it is the preparation frontier or below it, and the walk
+  // from a candidate stops here. Cleared when the block is disconnected or its segment is
+  // thrown away
+  std::atomic<bool> Prepared = false;
 
   UInt<256> ChainWork;
   atomic_intrusive_ptr<CIndexCacheObject> Serialized;
+  // Raw block data waiting for a preparation wave; owned by whoever takes it out
+  std::atomic<CBlockRawData*> Raw = nullptr;
   // TODO: make union with other field for save memory
   std::chrono::time_point<std::chrono::steady_clock> DownloadingStartTime = std::chrono::time_point<std::chrono::steady_clock>::max();
 

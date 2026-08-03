@@ -82,6 +82,14 @@ namespace Common {
   static inline UInt<256> GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) { return GetBlockProof(header); }
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
   static inline bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) { return checkPow(header, header.nBits, ctx, chainParams.powLimit); }
+  static inline void checkConsensusMulti(const Proto::BlockHeader *const *headers,
+                                         size_t count,
+                                         CheckConsensusCtx &ctx,
+                                         ChainParams &chainParams,
+                                         bool *results) {
+    for (size_t i = 0; i < count; i++)
+      results[i] = checkConsensus(*headers[i], ctx, chainParams);
+  }
 };
 
 class X {

@@ -54,7 +54,7 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
     // to keep the connect invariant (txids precomputed on every path)
     BC::Proto::CBlockValidationData validationData;
     BC::Common::initializeValidationContext(block, validationData);
-    validationData.AllOutputsFound = true;
+    validationData.InputsResolved = true;
 
     // Connect archive
     for (size_t i = 0; i < archiveDatabases.size(); i++) {

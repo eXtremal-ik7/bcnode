@@ -63,11 +63,23 @@ namespace Common {
   unsigned getBlockGeneration(const ChainParams &chainParams, LTC::Common::BlockIndex *index);
 
   bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx &, const UInt<256> &powLimit);
+  // Group of headers at once: hashing is all a block check costs, and a multi-way kernel wants
+  // its inputs collected. Targets come apart - auxpow hashes the parent against the child target
+  void checkPowMulti(const Proto::BlockHeader *const *headers,
+                     const uint32_t *nBits,
+                     size_t count,
+                     const UInt<256> &powLimit,
+                     bool *results);
   UInt<256> GetBlockProof(const Proto::BlockHeader &header);
 
   static inline UInt<256> GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) { return GetBlockProof(header); }
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
   static inline bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) { return checkPow(header, header.nBits, ctx, chainParams.powLimit); }
+  void checkConsensusMulti(const Proto::BlockHeader *const *headers,
+                           size_t count,
+                           CheckConsensusCtx &ctx,
+                           ChainParams &chainParams,
+                           bool *results);
 
   static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
 

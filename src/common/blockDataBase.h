@@ -6,8 +6,7 @@
 #pragma once
 
 #include "BC/bc.h"
-#include "common/blockBatch.h"
-#include "common/blockIndexCombiner.h"
+#include "common/blockPipeline.h"
 #include "common/linearDataStorage.h"
 #include <tbb/concurrent_queue.h>
 #include <tbb/concurrent_unordered_map.h>
@@ -28,8 +27,6 @@ class Storage;
 class BlockInMemoryIndex;
 class BlockDatabase;
 
-typedef std::function<void(const std::vector<BC::Common::BlockIndex*>&)> newBestCallback;
-
 BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
                                     BC::Common::BlockIndex *previousBest,
                                     std::vector<BC::Common::BlockIndex*> &forDisconnect);
@@ -39,33 +36,38 @@ BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex,
                                   const BC::Proto::BlockHeader &header,
                                   BC::Common::CheckConsensusCtx &ccCtx);
 
-BC::Common::BlockIndex *AddBlock(BlockInMemoryIndex &blockIndex,
-                                 BC::Common::ChainParams &chainParams,
-                                 BC::DB::Storage &storage,
-                                 BC::Common::CIndexCacheObject *serialized,
-                                 BC::Common::CheckConsensusCtx &ccCtx,
-                                 newBestCallback callback,
-                                 uint32_t fileNo=std::numeric_limits<uint32_t>::max(),
-                                 uint32_t fileOffset=std::numeric_limits<uint32_t>::max());
-
-// attachBlockData - reserve an index for a staged block: everything AddBlock does with the index
-// and the header chain, nothing else (the data is not parsed here). *checkWork is set when the
-// header work was never verified. Returns nullptr when the block can't get an index of its own
-// (already have this block); such a block goes the old way
+// attachBlockData - reserve an index for block data: the index, the header chain and nothing
+// else (the data is not parsed here). *checkWork is set when the header work was never
+// verified. Returns nullptr when the block can't get an index of its own (already have it)
 BC::Common::BlockIndex *attachBlockData(BlockInMemoryIndex &blockIndex,
                                         BC::Common::ChainParams &chainParams,
                                         const BC::Proto::BlockHeader &header,
                                         const BC::Proto::BlockHashTy &hash,
                                         bool *checkWork);
 
-// processBlockData - unpack a staged block and accept it with the same code the direct path uses:
-// AddBlock for a block without a reserved index, its off-chain tail otherwise
-bool processBlockData(BlockInMemoryIndex &blockIndex,
-                      BC::Common::ChainParams &chainParams,
-                      BC::DB::Storage &storage,
-                      CStagedBlock &staged,
-                      BC::Common::CheckConsensusCtx &ccCtx,
-                      newBestCallback callback);
+// Everything a segment needs before the chain state matters: proof of work, unpack, standalone
+// and contextual checks in parallel waves, then the linking of its inputs - what a block of the
+// segment answers for itself, what an earlier block of the segment answers, and what only the
+// state right before the segment can answer (the residual list). A block that fails its own
+// checks cuts the segment short. False when nothing of it is left
+bool prepareSegment(BlockInMemoryIndex &blockIndex,
+                    BC::Common::ChainParams &chainParams,
+                    BC::DB::Storage &storage,
+                    CParallelRunner &runner,
+                    CSegment &segment,
+                    CPipelineCounters &counters,
+                    bool prefetch);
+
+// Connect of a prepared segment: rebase if needed, the existence wave over the residual inputs,
+// then apply block by block. Every verdict is made before the first block lands - a segment
+// reaches the chain whole or not at all. On failure *failedAt is the position of the block the
+// chain stops at
+bool connectSegment(BlockInMemoryIndex &blockIndex,
+                    BC::Common::ChainParams &chainParams,
+                    BC::DB::Storage &storage,
+                    CParallelRunner &runner,
+                    CSegment &segment,
+                    size_t *failedAt);
 
 bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
                        const std::filesystem::path &blockPath,
@@ -75,7 +77,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
              const std::filesystem::path &blockPath,
              BC::Common::ChainParams &chainParams,
              BC::DB::Storage &storage,
-             CBlockAssembler &assembler);
+             CBlockPipeline &pipeline);
 
 
 class BlockInMemoryIndex {
@@ -104,10 +106,10 @@ public:
   // Old-style accessors
   auto &blockIndex() { return BlockIndex_; }
   auto &blockHeightIndex() { return BlockHeightIndex_; }
-  auto &combiner() { return ChainStateCombiner_; }
+  CCandidateTracker &candidateTracker() { return CandidateTracker_; }
 
 private:
-  Combiner<BlockProcessingTask> ChainStateCombiner_;
+  CCandidateTracker CandidateTracker_;
   tbb::concurrent_unordered_map<BC::Proto::BlockHashTy, BC::Common::BlockIndex*, std::hash<BC::Proto::BlockHashTy>> BlockIndex_;
   tbb::concurrent_unordered_map<uint32_t, BC::Common::BlockIndex*, std::hash<uint32_t>> BlockHeightIndex_;
   std::atomic<BC::Common::BlockIndex*> BestIndex_ = nullptr;

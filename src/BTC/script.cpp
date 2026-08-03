@@ -235,7 +235,14 @@ void Script::parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspe
 {
   const uint8_t *script = out.pkScript.data();
 
+  // Records of many outputs are appended to one stream (the parsed output blob
+  // of a block), so every seek inside this one is relative to where it started
+  const size_t base = unspentOutputInfo.offsetOf();
   UnspentOutputInfo *info = unspentOutputInfo.reserve<UnspentOutputInfo>(1);
+  // Whatever the type leaves unused (the rest of the union, the fields it does
+  // not set) goes to disk with the record: zero it, or the same coin gets
+  // different bytes in different runs
+  memset(static_cast<void*>(info), 0, sizeof(UnspentOutputInfo));
   info->Value = out.value;
 
   if (out.pkScript.size() >= 1 && script[0] == OP_RETURN) {
@@ -251,7 +258,7 @@ void Script::parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspe
     // PUSH_65(PublicKey) OP_CHECKSIG
     info->Type = UnspentOutputInfo::EPubKey;
     info->IsPubKeyCompressed = false;
-    unspentOutputInfo.seekSet(UnspentOutputInfo::customDataOffset());
+    unspentOutputInfo.seekSet(base + UnspentOutputInfo::customDataOffset());
     unspentOutputInfo.write(script+1, 65);
   } else if (out.pkScript.size() == 25 &&
              script[0] == OP_DUP &&
@@ -292,9 +299,13 @@ void Script::parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspe
     info->ScriptHash = sha256FollowRipemd160(script, out.pkScript.size());
   } else {
     info->Type = UnspentOutputInfo::ENonStandard;
-    unspentOutputInfo.seekSet(UnspentOutputInfo::customDataOffset());
+    unspentOutputInfo.seekSet(base + UnspentOutputInfo::customDataOffset());
     unspentOutputInfo.write(script, out.pkScript.size());
   }
+
+  // Custom data shorter than the union it replaces still leaves a whole record
+  if (unspentOutputInfo.offsetOf() < base + sizeof(UnspentOutputInfo))
+    unspentOutputInfo.seekSet(base + sizeof(UnspentOutputInfo));
 }
 
 }

@@ -32,6 +32,7 @@
 //
 // ValueT must be trivially copyable and expose a public uint32_t Height.
 
+#include "db/keyHash.h"
 #include <atomic>
 #include <algorithm>
 #include <cassert>
@@ -97,14 +98,11 @@ private:
   // true = disjoint-key concurrent mutators (CAS claims, atomic counters)
   bool ConcurrentMutators_ = false;
 
-  // txid is already a cryptographic hash: its bytes are the hash function
   static SRef refOf(const uint8_t *txid, uint32_t vout) {
-    uint64_t a, b;
-    memcpy(&a, txid, 8);
-    memcpy(&b, txid + 8, 8);
+    const COutpointHash h = hashOutpoint(txid, vout);
     SRef ref;
-    ref.H1 = a ^ (0x9E3779B97F4A7C15ull * (static_cast<uint64_t>(vout) + 1));
-    ref.H2 = b ^ (0xC2B2AE3D27D4EB4Full * (static_cast<uint64_t>(vout) + 1));
+    ref.H1 = h.H1;
+    ref.H2 = h.H2;
     // fastrange consumes the high bits, so the tag must come from the low ones
     ref.Tag = static_cast<uint8_t>(ref.H1);
     if (!ref.Tag)
@@ -112,16 +110,7 @@ private:
     return ref;
   }
 
-  // fastrange: high 64 bits of h * NumBuckets_
-  size_t bucketOf(uint64_t h) const {
-#ifdef _MSC_VER
-    unsigned __int64 hi;
-    _umul128(h, NumBuckets_, &hi);
-    return static_cast<size_t>(hi);
-#else
-    return static_cast<size_t>((static_cast<unsigned __int128>(h) * NumBuckets_) >> 64);
-#endif
-  }
+  size_t bucketOf(uint64_t h) const { return fastrange(h, NumBuckets_); }
 
   static unsigned ctz64(uint64_t v) {
 #ifdef _MSC_VER
