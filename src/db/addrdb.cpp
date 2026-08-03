@@ -90,7 +90,7 @@ bool AddrDb::queryTop(const std::string &index, size_t offset, size_t limit,
   return this->top(index, offset, limit, result);
 }
 
-void AddrDb::connectImpl(const BC::Common::BlockIndex *index,
+void AddrDb::connectImpl(const BC::Common::BlockIndex*,
                          const BC::Proto::Block &block,
                          const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                          const BC::Proto::CBlockValidationData &validationData,
@@ -100,15 +100,14 @@ void AddrDb::connectImpl(const BC::Common::BlockIndex *index,
   if (block.vtx.empty())
     return;
 
-  const auto blockId = index->Header.GetHash();
   std::unordered_map<BC::Script::CAddress, CAddrValue> deltaMap;
   buildBlockDelta(block, linkedOutputs, validationData.CoinbaseRepeat, deltaMap);
 
   for (const auto &addr: deltaMap)
-    this->merge(blockId, addr.first, addr.second);
+    this->merge(addr.first, addr.second);
 }
 
-void AddrDb::disconnectImpl(const BC::Common::BlockIndex *index,
+void AddrDb::disconnectImpl(const BC::Common::BlockIndex*,
                             const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             const BC::Proto::CBlockValidationData &validationData,
@@ -118,13 +117,12 @@ void AddrDb::disconnectImpl(const BC::Common::BlockIndex *index,
   if (block.vtx.empty())
     return;
 
-  const auto blockId = index->Header.GetHash();
   std::unordered_map<BC::Script::CAddress, CAddrValue> deltaMap;
   buildBlockDelta(block, linkedOutputs, validationData.CoinbaseRepeat, deltaMap);
 
   for (auto &addr: deltaMap) {
     addr.second.negate();
-    this->merge(blockId, addr.first, addr.second);
+    this->merge(addr.first, addr.second);
   }
 }
 

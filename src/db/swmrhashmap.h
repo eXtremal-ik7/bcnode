@@ -7,10 +7,9 @@
 // readable until the log is recycled, and recycling is a counter bump.
 //
 // The map stores non-owning value pointers into the log arena; a null result
-// means "not in this window, look deeper" (frozen log / disk), a tombstone
-// entry answers "known absent in this window" the same way. Keys are never
-// removed within a window (a pop() restore writes a tombstone instead), so
-// linear-probe chains never break.
+// means "not in this window, look deeper" (frozen log / disk). A delete is a
+// value like any other (the layer above stores its own marker), and keys are
+// never removed within a window, so linear-probe chains never break.
 //
 // Slot life cycle within one window ("gen" is the map generation, even):
 //     stale (Gen != gen)  --claim: CAS Gen -> gen+1-->  mid-insert
@@ -31,7 +30,7 @@
 //
 // Concurrency contract:
 //  - any number of find() readers, wait-free, at any time;
-//  - one writer thread (update/restore/reserve/reset) by default, OR several
+//  - one writer thread (update/reserve/reset) by default, OR several
 //    writer threads with DISJOINT KEY SETS running between two quiescent
 //    points after setConcurrentMutators(true): claims are arbitrated by the
 //    generation CAS, Used_ is a relaxed atomic add, and a published slot is
@@ -65,17 +64,10 @@
 
 template<typename CKey, typename CHasher = std::hash<CKey>>
 class CSwmrHashMap {
-public:
-  struct SUpdateResult {
-    void *Prev;         // previous value, nullptr if the key was absent
-    bool FirstInRev;    // first touch of this key in this revision (undo point)
-  };
-
 private:
   struct SSlot {
     std::atomic<uint64_t> Gen;
-    std::atomic<void*> Ptr;   // value, TOMB, or garbage while Gen is stale
-    uint32_t LastRev;         // written only by the slot owner, never read concurrently
+    std::atomic<void*> Ptr;   // value, or garbage while Gen is stale
     CKey Key;                 // immutable from publication to reset
   };
 
@@ -92,8 +84,6 @@ private:
   STable *Graveyard_ = nullptr;   // outgrown tables, freed at reset()
   CHasher Hasher_;
   bool ConcurrentMutators_ = false;
-
-  static void *tombstone() { return reinterpret_cast<void*>(uintptr_t(1)); }
 
   template<typename T>
   static void atomicAdd(T &v, long long delta) {
@@ -121,8 +111,8 @@ private:
     t->Mask = capacity - 1;
     t->NextGrave = nullptr;
     t->Slots = reinterpret_cast<SSlot*>(t + 1);
-    // only the generations need a defined value: Key/Ptr/LastRev of a stale
-    // slot are never read, the claim writes them before the publication
+    // only the generations need a defined value: Key/Ptr of a stale slot are
+    // never read, the claim writes them before the publication
     for (size_t i = 0; i < capacity; i++)
       t->Slots[i].Gen.store(0, std::memory_order_relaxed);
     return t;
@@ -146,14 +136,11 @@ private:
       if (s.Gen.load(std::memory_order_relaxed) != gen)
         continue;
       void *p = s.Ptr.load(std::memory_order_relaxed);
-      if (p == tombstone())
-        continue; // a tombstone means "absent": fresh chains don't need it
       size_t idx = Hasher_(s.Key) & fresh->Mask;
       for (;;) {
         SSlot &d = fresh->Slots[idx];
         if (d.Gen.load(std::memory_order_relaxed) != gen) {
           d.Key = s.Key;
-          d.LastRev = s.LastRev;
           d.Ptr.store(p, std::memory_order_relaxed);
           d.Gen.store(gen, std::memory_order_relaxed);
           break;
@@ -181,9 +168,9 @@ public:
   CSwmrHashMap(const CSwmrHashMap&) = delete;
   CSwmrHashMap &operator=(const CSwmrHashMap&) = delete;
 
-  // reader side: wait-free, legal at any time. nullptr = not in this window
-  // (a tombstone reports the same: the caller falls through to the frozen
-  // log / disk, where the key is guaranteed older than this window).
+  // reader side: wait-free, legal at any time. nullptr = not in this window,
+  // the caller falls through to the frozen log / disk, where the key is
+  // guaranteed older than this window.
   //
   // Every entry point has a hash overload taking the value the caller already
   // computed to pick the shard; it must equal CHasher's for that key
@@ -199,10 +186,8 @@ public:
       if (g == gen) {
         // published: the key is immutable, the acquire above pairs with the
         // publication release, so reading it plainly is race-free
-        if (s.Key == key) {
-          void *p = s.Ptr.load(std::memory_order_acquire);
-          return p == tombstone() ? nullptr : p;
-        }
+        if (s.Key == key)
+          return s.Ptr.load(std::memory_order_acquire);
         continue;
       }
       if (g == gen + 1)
@@ -230,27 +215,25 @@ public:
 
   void prefetch(const CKey &key) const { prefetch(Hasher_(key)); }
 
-  // mutator side: insert or update, disjoint-key concurrent safe.
-  // rev deduplicates undo records: the first touch of a key in a revision
-  // reports FirstInRev and the caller records {key, Prev} for pop()
-  SUpdateResult update(const CKey &key, void *value, uint32_t rev) {
-    return update(key, Hasher_(key), value, rev);
+  // mutator side: insert or update, disjoint-key concurrent safe
+  void update(const CKey &key, void *value) {
+    update(key, Hasher_(key), value);
   }
 
-  SUpdateResult update(const CKey &key, size_t hash, void *value, uint32_t rev) {
-    return updateWith(key, hash, rev, [value](void*) { return value; });
+  void update(const CKey &key, size_t hash, void *value) {
+    updateWith(key, hash, [value](void*) { return value; });
   }
 
   template<typename F>
-  SUpdateResult updateWith(const CKey &key, uint32_t rev, F &&valueOf) {
-    return updateWith(key, Hasher_(key), rev, valueOf);
+  void updateWith(const CKey &key, F &&valueOf) {
+    updateWith(key, Hasher_(key), valueOf);
   }
 
   // Same walk, but the value is derived from the previous one: a caller that
   // needs "read what is there, then write something based on it" (CBaseKV
   // picks its delete marker that way) would otherwise probe the chain twice
   template<typename F>
-  SUpdateResult updateWith(const CKey &key, size_t hash, uint32_t rev, F &&valueOf) {
+  void updateWith(const CKey &key, size_t hash, F &&valueOf) {
     STable *t = Table_.load(std::memory_order_relaxed);
     const uint64_t gen = Gen_.load(std::memory_order_relaxed);
     size_t idx = hash & t->Mask;
@@ -262,12 +245,8 @@ public:
           continue;
         // our own published slot: nobody else touches this key
         void *prev = s.Ptr.load(std::memory_order_relaxed);
-        if (prev == tombstone())
-          prev = nullptr;
-        bool first = s.LastRev != rev;
-        s.LastRev = rev;
         s.Ptr.store(valueOf(prev), std::memory_order_release);
-        return {prev, first};
+        return;
       }
       if (g == gen + 1)
         continue; // another mutator mid-insert (a different key by contract)
@@ -283,7 +262,6 @@ public:
         if (!s.Gen.compare_exchange_strong(g, gen + 1, std::memory_order_acquire, std::memory_order_relaxed))
           continue;
         s.Key = key;
-        s.LastRev = rev;
         s.Ptr.store(valueOf(nullptr), std::memory_order_relaxed);
         s.Gen.store(gen, std::memory_order_release); // publish key + value together
         atomicAdd(Used_, 1);
@@ -291,42 +269,24 @@ public:
         // this trigger never fires there (see the contract above)
         if (atomicLoad(Used_) > t->Capacity - t->Capacity / 4)
           grow(t, t->Capacity * 4);
-        return {nullptr, true};
+        return;
       }
 
       s.Key = key;
-      s.LastRev = rev;
       s.Ptr.store(valueOf(nullptr), std::memory_order_relaxed);
       s.Gen.store(gen, std::memory_order_release); // publish key + value together
       Used_++;
       if (Used_ > t->Capacity - t->Capacity / 4)
         grow(t, t->Capacity * 4);
-      return {nullptr, true};
+      return;
     }
     // no stale slot in a full circle: only a concurrent wave that broke the
     // reserve() contract can fill the table this far, no correct answer left
     abort();
   }
 
-  // pop() restore path (single mutator, readers allowed): rewrite the value
-  // of an existing key, nullptr restores "absent" as a tombstone so the
-  // probe chains never break
-  void restore(const CKey &key, void *prev) {
-    STable *t = Table_.load(std::memory_order_relaxed);
-    const uint64_t gen = Gen_.load(std::memory_order_relaxed);
-    size_t idx = Hasher_(key) & t->Mask;
-    for (size_t probe = 0; probe <= t->Mask; probe++, idx = (idx + 1) & t->Mask) {
-      SSlot &s = t->Slots[idx];
-      if (s.Gen.load(std::memory_order_relaxed) == gen && s.Key == key) {
-        s.Ptr.store(prev ? prev : tombstone(), std::memory_order_release);
-        return;
-      }
-    }
-    abort(); // the undo list referenced a key this window does not hold
-  }
-
   // quiescent scan (frozen map in the flusher, or the owner between waves):
-  // fn(key, value) for every live entry, tombstones skipped
+  // fn(key, value) for every live entry
   template<typename F>
   void forEachCurrent(F &&fn) const {
     const STable *t = Table_.load(std::memory_order_relaxed);
@@ -335,10 +295,7 @@ public:
       const SSlot &s = t->Slots[i];
       if (s.Gen.load(std::memory_order_relaxed) != gen)
         continue;
-      void *p = s.Ptr.load(std::memory_order_relaxed);
-      if (p == tombstone())
-        continue;
-      fn(static_cast<const CKey&>(s.Key), p);
+      fn(static_cast<const CKey&>(s.Key), s.Ptr.load(std::memory_order_relaxed));
     }
   }
 

@@ -61,11 +61,11 @@ void TxDb::connectImpl(const BC::Common::BlockIndex *index,
     data->Index = i;
     BC::serialize(stream, tx);
     BC::serialize(stream, linkedOutputs.Tx[i]);
-    this->add(blockId, validationData.TxIds[i], stream.data(), stream.sizeOf());
+    this->putNew(validationData.TxIds[i], stream.data(), stream.sizeOf());
   }
 }
 
-void TxDb::disconnectImpl(const BC::Common::BlockIndex *index,
+void TxDb::disconnectImpl(const BC::Common::BlockIndex*,
                           const BC::Proto::Block &block,
                           const BC::Proto::CBlockLinkedOutputs&,
                           const BC::Proto::CBlockValidationData &validationData,
@@ -73,9 +73,8 @@ void TxDb::disconnectImpl(const BC::Common::BlockIndex *index,
                           BlockDatabase&)
 {
   assert(validationData.TxIds.size() == block.vtx.size());
-  const auto blockId = index->Header.GetHash();
   for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
-    remove(blockId, validationData.TxIds[i]);
+    erase(validationData.TxIds[i]);
 }
 
 }

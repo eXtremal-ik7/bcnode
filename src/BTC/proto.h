@@ -348,8 +348,8 @@ struct NetworkAddress {
     bool inputSpendsInBatch(size_t ordinal) const {
       return !InputSpendsInBatch.empty() && ((InputSpendsInBatch[ordinal >> 6] >> (ordinal & 63)) & 1u);
     }
-    // A pair the databases must see as one: it holds only while both blocks are on the chain
-    bool hidesPairs() const { return !InputSpendsInBatch.empty() || !OutputSpentInBatch.empty(); }
+    // The pair holds only while both blocks are on the chain: the disconnect
+    // that splits it puts the output back and drops the marks
     void dropPairs() {
       OutputSpentInBatch.resize(0);
       InputSpendsInBatch.resize(0);

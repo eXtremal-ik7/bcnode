@@ -26,13 +26,6 @@
 namespace BC {
 namespace DB {
 
-struct CEntry {
-  BC::Proto::BlockHashTy BlockId;
-  bool IsConnected;
-  CEntry() {}
-  CEntry(const BC::Proto::BlockHashTy &blockId, bool isConnected) : BlockId(blockId), IsConnected(isConnected) {}
-};
-
 template<typename CKey>
 struct CLog {
   MLog Log;
@@ -42,27 +35,9 @@ struct CLog {
   // the working-set size once and keeps its capacity across window resets
   CSwmrHashMap<CKey> Map{4096};
 
-  // Undo log: (key, previous value) recorded on the first touch of a key in
-  // a revision, with revision boundaries on top; pop() replays the tail of
-  // the last revision in reverse. Revision numbers are monotonic within the
-  // window and never reused, so a slot's LastRev surviving from a popped
-  // revision cannot alias the next block and swallow its undo record
-  struct SUndo {
-    CKey Key;
-    void *Prev;
-  };
-  struct SRevision {
-    BC::Proto::BlockHashTy BlockId;
-    size_t UndoStart;
-    uint32_t Rev;
-  };
-  std::vector<SUndo> Undo;
-  std::vector<SRevision> Revisions;
-  uint32_t NextRev = 0;
-
   // Window bytes charged for records with no arena footprint (delete
-  // markers): their map slot and undo entry still occupy memory, and a
-  // delete-heavy stretch must still reach the flush threshold
+  // markers): their map slot still occupies memory, and a delete-heavy
+  // stretch must still reach the flush threshold
   size_t PhantomBytes = 0;
 
   size_t windowSize() { return Log.size() + PhantomBytes; }
@@ -72,32 +47,13 @@ struct CLog {
   const void *find(const CKey &key, size_t hash) { return Map.find(key, hash); }
 
 
-  void update(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t hash, void *newData) {
-    updateWith(blockId, key, hash, [newData](void*) { return newData; });
+  void update(const CKey &key, size_t hash, void *newData) {
+    Map.update(key, hash, newData);
   }
 
   // One walk for "write a value derived from the one already there"
-  void updateWith(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t hash, auto &&valueOf) {
-    if (Revisions.empty() || Revisions.back().BlockId != blockId)
-      Revisions.push_back({blockId, Undo.size(), ++NextRev});
-    auto result = Map.updateWith(key, hash, Revisions.back().Rev, valueOf);
-    if (result.FirstInRev)
-      Undo.push_back({key, result.Prev});
-  }
-
-  // Reverts the last revision if it belongs to blockId (the only case the
-  // callers produce); a null previous value is restored as a tombstone, so
-  // the map answers "absent in this window" without breaking probe chains
-  void pop(const BC::Proto::BlockHashTy &blockId) {
-    if (Revisions.empty() || Revisions.back().BlockId != blockId)
-      return;
-    size_t start = Revisions.back().UndoStart;
-    for (size_t i = Undo.size(); i > start; ) {
-      i--;
-      Map.restore(Undo[i].Key, Undo[i].Prev);
-    }
-    Undo.resize(start);
-    Revisions.pop_back();
+  void updateWith(const CKey &key, size_t hash, auto &&valueOf) {
+    Map.updateWith(key, hash, valueOf);
   }
 
   // O(1) window reset: the generation bump invalidates every map entry at
@@ -107,9 +63,6 @@ struct CLog {
   // for real by EBR in the aggkv design)
   void reset() {
     Map.reset();
-    Undo.clear();
-    Revisions.clear();
-    NextRev = 0;
     PhantomBytes = 0;
     Log.reset();
   }
@@ -307,33 +260,8 @@ public:
                const BC::Proto::CBlockValidationData &validationData,
                BlockInMemoryIndex &blockIndex,
                BlockDatabase &blockDb) final {
-    auto hash = index->Header.GetHash();
-
-    if (!PendingBlocks_.empty()) {
-      auto last = PendingBlocks_.back();
-      if (!last.IsConnected && last.BlockId == hash) {
-        // The pop reverts the active log only; entries that already left it
-        // (frozen or flushed) are beyond cancel - same window as a threshold
-        // flush between the pair (bug F), unchanged by async flush
-        for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
-          shard(i).pop(hash);
-        connectFastImpl(index, block, linkedOutputs, validationData);
-        return;
-      }
-    }
-
     connectImpl(index, block, linkedOutputs, validationData, blockIndex, blockDb);
-    PendingBlocks_.emplace_back(hash, true);
-    CurrentBlock_ = hash;
-
-    for (size_t i = 0; i < BaseCfg_.ShardsNum; i++) {
-      if (shard(i).windowSize() >= FlushLogThreshold_) {
-        if (AsyncFlushEnabled_)
-          freezeAndScheduleFlush(i);
-        else
-          flushImpl(CurrentBlock_, i);
-      }
-    }
+    finishMutation(index->Header.GetHash());
   }
 
   void disconnect(const BC::Common::BlockIndex *index,
@@ -342,21 +270,8 @@ public:
                   const BC::Proto::CBlockValidationData &validationData,
                   BlockInMemoryIndex &blockIndex,
                   BlockDatabase &blockDb) final {
-    auto hash = index->Header.GetHash();
-
-    if (!PendingBlocks_.empty() && cancelableConnect(validationData)) {
-      auto last = PendingBlocks_.back();
-      if (last.IsConnected && last.BlockId == hash) {
-        for (size_t i = 0; i < BaseCfg_.ShardsNum; i++)
-          shard(i).pop(hash);
-        disconnectFastImpl(index, block, linkedOutputs, validationData);
-        return;
-      }
-    }
-
     disconnectImpl(index, block, linkedOutputs, validationData, blockIndex, blockDb);
-    PendingBlocks_.emplace_back(hash, false);
-    CurrentBlock_ = index->Header.hashPrevBlock;
+    finishMutation(index->Header.hashPrevBlock);
   }
 
   void flush() final {
@@ -394,24 +309,6 @@ public:
                               BlockInMemoryIndex &blockIndex,
                               BlockDatabase &blockDb) = 0;
 
-  // Fast-path counterparts: connect/disconnect applied by popping the
-  // unflushed log instead of running the full impl. The pop is the whole
-  // story for the log; a subclass keeping state outside it reverts that
-  // state here
-  virtual void connectFastImpl(const BC::Common::BlockIndex*,
-                               const BC::Proto::Block&,
-                               const BC::Proto::CBlockLinkedOutputs&,
-                               const BC::Proto::CBlockValidationData&) {}
-
-  // The pop reverts exactly what the connect wrote, so a database that left part of the block
-  // out on purpose has nothing to revert and asks for the full path instead
-  virtual bool cancelableConnect(const BC::Proto::CBlockValidationData&) const { return true; }
-
-  virtual void disconnectFastImpl(const BC::Common::BlockIndex*,
-                                  const BC::Proto::Block&,
-                                  const BC::Proto::CBlockLinkedOutputs&,
-                                  const BC::Proto::CBlockValidationData&) {}
-
   // Async-flush counterpart of flushImpl: write the frozen log's content and
   // touch nothing else - the flusher drains the maps afterwards, the arena is
   // rewound by the writer when the log is recycled. Implemented only by
@@ -421,6 +318,24 @@ public:
   }
 
 protected:
+  // The tail every chain mutation shares: the tip moves to the block the
+  // operation left the database at, then a shard whose window crossed the
+  // threshold is written out. Both directions go through here - a deep
+  // reorg or a startup rebase writes as much as a forward run does, and
+  // checking after connect only would let its window grow unbounded
+  void finishMutation(const BC::Proto::BlockHashTy &newTip) {
+    CurrentBlock_ = newTip;
+
+    for (size_t i = 0; i < BaseCfg_.ShardsNum; i++) {
+      if (shard(i).windowSize() >= FlushLogThreshold_) {
+        if (AsyncFlushEnabled_)
+          freezeAndScheduleFlush(i);
+        else
+          flushImpl(CurrentBlock_, i);
+      }
+    }
+  }
+
   // Two logs per shard: the active one takes writes; a threshold flush
   // freezes it and installs the recycled spare in its place, the frozen one
   // is written out by the background flusher. With async flush disabled only
@@ -542,7 +457,6 @@ protected:
   CBaseCfg BaseCfg_;
 
   // Database structures
-  std::vector<CEntry> PendingBlocks_;
   std::unique_ptr<CShardSlot[]> Shards_;
   std::vector<std::unique_ptr<rocksdb::DB>> OnDiskStorage_;
 
@@ -568,14 +482,14 @@ private:
   // stored here - it already lives in the map slot, and the flush reads it
   // from there
   struct CHeader {
-    // Top bit of the length: the key may already be on disk, so a later remove
-    // must tombstone it instead of annihilating the pair. Set only where a key
-    // can legally be written twice (the BIP30 coinbase repeat)
-    static constexpr uint32_t MayExistOnDiskFlag = 0x80000000u;
+    // Top bit of the length: a value of this key may live below the active
+    // window (frozen log or disk), so a later erase must tombstone it instead
+    // of annihilating the pair
+    static constexpr uint32_t MayExistBelowFlag = 0x80000000u;
     uint32_t SizeAndFlag;
 
-    uint32_t size() const { return SizeAndFlag & ~MayExistOnDiskFlag; }
-    bool mayExistOnDisk() const { return (SizeAndFlag & MayExistOnDiskFlag) != 0; }
+    uint32_t size() const { return SizeAndFlag & ~MayExistBelowFlag; }
+    bool mayExistBelow() const { return (SizeAndFlag & MayExistBelowFlag) != 0; }
   };
 
   // A delete allocates no arena record: the map value is the address of one
@@ -590,6 +504,15 @@ private:
   }
 
 public:
+  // Where the written value can have come from. A value that was born in this
+  // window and never left it can be annihilated by a later erase - the pair
+  // never reaches the disk. A value that may replace something below (frozen
+  // log or RocksDB) forfeits that: its erase must write a real tombstone
+  enum class EPutBase : uint8_t {
+    DefinitelyAbsentBelow,
+    MayExistBelow
+  };
+
   CBaseKV(const std::string &name) : Base<CKey>(name) {}
 
   // The flusher dispatches virtual flushFrozenImpl implemented at this
@@ -597,47 +520,37 @@ public:
   virtual ~CBaseKV() { this->shutdownAsyncFlush(); }
   rocksdb::MergeOperator *mergeOperator() final { return nullptr; }
 
-  void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size) {
-    add(blockId, key, data, size, nullptr, 0);
+  // A value nothing below can hold: a brand new output, a transaction of a
+  // block being connected for the first time
+  void putNew(const CKey &key, const void *data, size_t size, const void *suffix = nullptr, size_t suffixSize = 0) {
+    put(key, data, size, suffix, suffixSize, EPutBase::DefinitelyAbsentBelow);
   }
 
-  // Value glued from two pieces straight in the arena: a "payload + a few bytes of metadata"
-  // caller would otherwise build it in a scratch buffer and copy the record a second time.
-  // mayOverwrite: the key may already exist, so the record forfeits annihilation
-  void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size, const void *suffix, size_t suffixSize, bool mayOverwrite = false) {
-    // One hash per operation: shard from its high bits, map slot from its low
+  // A value that may land on an existing one: an output put back by a
+  // disconnect, a BIP30 coinbase repeating an earlier one. Conservative by
+  // design - if the key really was window-born, the flush writes one Put and
+  // one Delete instead of nothing
+  void putRestore(const CKey &key, const void *data, size_t size, const void *suffix = nullptr, size_t suffixSize = 0) {
+    put(key, data, size, suffix, suffixSize, EPutBase::MayExistBelow);
+  }
+
+  void erase(const CKey &key) {
     const size_t hash = std::hash<CKey>()(key);
     CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
-    // record rounded up so every header lands 4-aligned in the arena
-    size_t total = size + suffixSize;
-    CHeader *header = static_cast<CHeader*>(shard.Log.alloc((sizeof(CHeader) + total + 3) & ~static_cast<size_t>(3)));
-    header->SizeAndFlag = static_cast<uint32_t>(total) | (mayOverwrite ? CHeader::MayExistOnDiskFlag : 0);
-    uint8_t *value = reinterpret_cast<uint8_t*>(header + 1);
-    memcpy(value, data, size);
-    if (suffixSize)
-      memcpy(value + size, suffix, suffixSize);
-
-    shard.update(blockId, key, hash, header);
-  }
-
-  void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key) {
-    const size_t hash = std::hash<CKey>()(key);
-    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
-
-    // no arena record: charge the map slot + undo share to the window
+    // no arena record: charge the map slot to the window
     shard.PhantomBytes += sizeof(CKey) + 2 * sizeof(void*);
 
-    // One walk picks the marker and writes it; a separate find() would walk the
-    // same chain twice. CBaseKV keys are write-once (outpoint, txid) bar the
-    // BIP30 repeat, so a live predecessor in the active window means the key
-    // was never flushed and needs no on-disk tombstone. The frozen window does
-    // not count - its flush writes the value
-    shard.updateWith(blockId, key, hash, [](const void *prev) -> void* {
-      // Born in this window and never flushed: drop the pair whole. A record
-      // that admits the key may also be on disk forfeits that
+    // One walk picks the marker and writes it; a separate find() would walk
+    // the same chain twice
+    shard.updateWith(key, hash, [](const void *prev) -> void* {
+      // Already dead and never below: a second erase changes nothing
+      if (prev == &BornDeadMarker_)
+        return &BornDeadMarker_;
+      // Born in this window and never flushed: drop the pair whole. A value
+      // that admits something below it forfeits that
       const CHeader *header = prev && !isMarker(prev) ? static_cast<const CHeader*>(prev) : nullptr;
-      return header && !header->mayExistOnDisk() ? &BornDeadMarker_ : &TombstoneMarker_;
+      return header && !header->mayExistBelow() ? &BornDeadMarker_ : &TombstoneMarker_;
     });
   }
 
@@ -684,6 +597,35 @@ public:
   }
 
 private:
+  // Value glued from two pieces straight in the arena: a "payload + a few bytes
+  // of metadata" caller would otherwise build it in a scratch buffer and copy
+  // the record a second time
+  void put(const CKey &key, const void *data, size_t size, const void *suffix, size_t suffixSize, EPutBase base) {
+    // One hash per operation: shard from its high bits, map slot from its low
+    const size_t hash = std::hash<CKey>()(key);
+    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
+
+    // record rounded up so every header lands 4-aligned in the arena
+    size_t total = size + suffixSize;
+    CHeader *header = static_cast<CHeader*>(shard.Log.alloc((sizeof(CHeader) + total + 3) & ~static_cast<size_t>(3)));
+    header->SizeAndFlag = static_cast<uint32_t>(total) | (base == EPutBase::MayExistBelow ? CHeader::MayExistBelowFlag : 0);
+    uint8_t *value = reinterpret_cast<uint8_t*>(header + 1);
+    memcpy(value, data, size);
+    if (suffixSize)
+      memcpy(value + size, suffix, suffixSize);
+
+    // The flag is monotonic inside a window: what the replaced value knew
+    // about the layers below cannot be taken back by the value replacing it.
+    // A tombstone is such a value too - it is only ever written for a key
+    // that may exist below, a window-born key dies as BornDead instead
+    shard.updateWith(key, hash, [header](const void *prev) -> void* {
+      if (prev == &TombstoneMarker_ ||
+          (prev && !isMarker(prev) && static_cast<const CHeader*>(prev)->mayExistBelow()))
+        header->SizeAndFlag |= CHeader::MayExistBelowFlag;
+      return header;
+    });
+  }
+
   // Builds and writes the batch of one log's final values; shared by the
   // synchronous flush and the background flusher
   void writeLog(const BC::Proto::BlockHashTy &blockId, size_t shardIndex, CLog<CKey> &shard) {
@@ -740,330 +682,35 @@ private:
   }
 };
 
-template<typename CKey>
-class CBaseArrayFixed : public Base<CKey> {
-private:
-#pragma pack(push, 1)
-  struct CHeader {
-    CKey Key;
-    size_t Size;
-    int64_t Count;
-    int64_t ChunkOffset;
-  };
-
-
-  struct CChunkKey {
-    CKey Key;
-    uint64_t Index;
-  };
-#pragma pack(pop)
-
-private:
-  class MergeOperator : public rocksdb::MergeOperator {
-    virtual bool FullMerge(const rocksdb::Slice&,
-                           const rocksdb::Slice *existing_value,
-                           const std::deque<std::string> &operand_list,
-                           std::string *new_value,
-                           rocksdb::Logger*) const override {
-      assert(existing_value);
-      new_value->assign(existing_value->data(), existing_value->data() + existing_value->size());
-      for (const auto &operand: operand_list) {
-        assert(operand.size() >= 8);
-
-        uint64_t offset = *reinterpret_cast<const uint64_t*>(operand.data());
-        uint64_t requiredSize = offset + operand.size() - sizeof(uint64_t);
-        if (new_value->size() < requiredSize)
-          new_value->resize(requiredSize);
-
-        memcpy(new_value->data() + offset, operand.data() + sizeof(uint64_t), operand.size() - sizeof(uint64_t));
-      }
-      return true;
-    }
-
-    virtual bool PartialMerge(const rocksdb::Slice&,
-                              const rocksdb::Slice &left,
-                              const rocksdb::Slice &right,
-                              std::string *out,
-                              rocksdb::Logger*) const override {
-      assert(left.size() >= 8);
-      assert(right.size() >= 8);
-      [[maybe_unused]] uint64_t leftChunkOffset = *reinterpret_cast<const uint64_t*>(left.data());
-      [[maybe_unused]] uint64_t rightChunkOffset = *reinterpret_cast<const uint64_t*>(right.data());
-      assert(leftChunkOffset + left.size() - sizeof(uint64_t) == rightChunkOffset);
-
-      out->assign(left.data(), left.data() + left.size());
-      out->append(right.data() + sizeof(uint64_t), right.data() + right.size());
-      return true;
-    }
-
-    virtual const char* Name() const override {
-      return "CBaseArrayFixed";
-    }
-  };
-
-public:
-  CBaseArrayFixed(const std::string &name, size_t valueSize, size_t chunkSize) :
-    Base<CKey>(name), ValueSize_(valueSize), ChunkSize_(chunkSize) {}
-  virtual ~CBaseArrayFixed() {}
-
-  rocksdb::MergeOperator *mergeOperator() final { return new MergeOperator(); }
-
-  void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const void *data, size_t size, size_t count) {
-    const size_t hash = std::hash<CKey>()(key);
-    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
-
-    // get current array size
-    const void *prevData = nullptr;
-    size_t prevSize = 0;
-    int64_t prevCount = 0;
-    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key, hash));
-    if (oldHeader) {
-      prevData = oldHeader + 1;
-      prevSize = oldHeader->Size;
-      prevCount = oldHeader->Count;
-    }
-
-    // allocate new buffer
-    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader) + prevSize + size));
-    uint8_t *dst = reinterpret_cast<uint8_t*>(header + 1);
-    header->Key = key;
-    header->Size = prevSize + size;
-    header->Count = prevCount + count;
-    if (prevData)
-      memcpy(dst, prevData, prevSize);
-    memcpy(dst + prevSize, data, size);
-
-    shard.update(blockId, key, hash, header);
-  }
-
-  void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t count) {
-    const size_t hash = std::hash<CKey>()(key);
-    CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
-
-    // get current array size
-    int64_t prevCount = 0;
-    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key, hash));
-    if (oldHeader) {
-      prevCount = oldHeader->Count;
-    }
-
-    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader)));
-    header->Key = key;
-    header->Size = 0;
-    header->Count = prevCount - count;
-
-    shard.update(blockId, key, hash, header);
-  }
-
-  bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalTxCount) {
-    const size_t hash = std::hash<CKey>()(key);
-    size_t shardIdx = fastrange(hash, this->BaseCfg_.ShardsNum);
-    CLog<CKey> &mlog = this->shard(shardIdx);
-    rocksdb::DB *storage = this->OnDiskStorage_[shardIdx].get();
-
-    if (count == 0)
-      return false;
-    size_t firstChunk = from / ChunkSize_;
-    size_t lastChunk = (from + count - 1) / ChunkSize_;
-
-    std::vector<std::string> readResult;
-
-    {
-      std::vector<CChunkKey> chunkKeys;
-      std::vector<rocksdb::Slice> allKeySlices;
-
-      // add metadata key
-      allKeySlices.push_back(rocksdb::Slice(reinterpret_cast<const char*>(&key), sizeof(CKey)));
-      // add keys for all chunks
-      for (size_t chunkId = firstChunk; chunkId <= lastChunk; chunkId++) {
-        CChunkKey &k = chunkKeys.emplace_back();
-        k.Key = key;
-        k.Index = xhtobe<uint64_t>(chunkId);
-      }
-      for (const auto &k: chunkKeys)
-        allKeySlices.push_back(rocksdb::Slice(reinterpret_cast<const char*>(&k), sizeof(CChunkKey)));
-
-      auto metadataReadResult = storage->MultiGet(rocksdb::ReadOptions(), allKeySlices, &readResult);
-      // Missing metadata is not an error: the key may live only in the memtable tail
-      if (!metadataReadResult[0].ok())
-        readResult[0].clear();
-    }
-
-    int64_t onDiskArraySize = readResult[0].size() == sizeof(uint64_t) ? *reinterpret_cast<const int64_t*>(readResult[0].data()) : 0;
-    int64_t onDiskAvailable = std::min((int64_t)(from + count), onDiskArraySize) - from;
-    int64_t inMemoryOffset = std::max((int64_t)from - onDiskArraySize, (int64_t)0);
-    int64_t remaining = count;
-    *totalTxCount = onDiskArraySize;
-
-    // Read disk data
-    if (onDiskAvailable > 0) {
-      int64_t chunkOffset = from % ChunkSize_;
-      for (size_t chunkId = firstChunk, index = 1; chunkId <= lastChunk; chunkId++, index++) {
-        const char *chunkData = readResult[index].data();
-        int64_t count = readResult[index].size() / ValueSize_;
-        int64_t available = count - chunkOffset;
-        if (available <= 0)
-          break;
-        int64_t needToRead = std::min(available, remaining);
-
-        memcpy(result.reserve(needToRead * ValueSize_), chunkData + chunkOffset * ValueSize_, needToRead * ValueSize_);
-        remaining -= needToRead;
-        chunkOffset = 0;
-      }
-    }
-
-    // Read tail from memory (inMemoryOffset, remaining)
-    const CHeader *header = static_cast<const CHeader*>(mlog.find(key, hash));
-    if (header) {
-      const uint8_t *memoryData = reinterpret_cast<const uint8_t*>(header + 1);
-      int64_t available = header->Count - inMemoryOffset;
-      int64_t needToRead = std::min(available, remaining);
-      if (needToRead > 0)
-        memcpy(result.reserve(needToRead * ValueSize_), memoryData + inMemoryOffset*ValueSize_, needToRead * ValueSize_);
-      *totalTxCount += header->Count;
-    }
-
-    // TODO: consistency check using MLog::generation
-    return true;
-  }
-
-  virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) final {
-    CLog<CKey> &shard = this->shard(shardIndex);
-    MLog &mlog = shard.Log;
-    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
-
-    // Collect all keys
-    std::vector<CKey> allKeys;
-    std::vector<CHeader*> allData;
-    std::vector<rocksdb::Slice> allKeySlices;
-    std::vector<std::string> metadata;
-
-    shard.Map.forEachCurrent([&](const CKey &key, void *keyData) {
-      allKeys.emplace_back(key);
-      allData.push_back(static_cast<CHeader*>(keyData));
-    });
-
-    // Make slices for metadata reading
-    for (size_t i = 0; i < allKeys.size(); i++)
-      allKeySlices.emplace_back((const char*)&allKeys[i], sizeof(CKey));
-
-    // Read metadata
-    auto metadataReadResult = storage->MultiGet(rocksdb::ReadOptions(), allKeySlices, &metadata);
-
-    // Processing keys
-    rocksdb::WriteBatch batch;
-
-    batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(blockId.begin()), sizeof(BC::Proto::BlockHashTy)));
-    for (size_t i = 0; i < allKeys.size(); i++) {
-      CHeader *header = allData[i];
-      int64_t currentArraySize = 0;
-      if (metadataReadResult[i].ok() && metadata[i].size() == sizeof(uint64_t))
-        currentArraySize = *(int64_t*)metadata[i].data();
-
-      int64_t currentChunksNum = currentArraySize / ChunkSize_ + (currentArraySize % ChunkSize_ != 0);
-      int64_t newArraySize = currentArraySize + header->Count;
-      if (newArraySize < 0)
-        newArraySize = 0;
-
-      int64_t newChunksNum = newArraySize / ChunkSize_ + (newArraySize % ChunkSize_ != 0);
-
-      // Update metadata
-      {
-        auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(&header->Key), sizeof(CKey));
-        if (newArraySize) {
-          int64_t *arraySize = mlog.alloc<int64_t>();
-          *arraySize = newArraySize;
-          batch.Put(keySlice, rocksdb::Slice((const char*)arraySize, sizeof(int64_t)));
-        } else {
-          batch.Delete(keySlice);
-        }
-      }
-
-      if (newChunksNum < currentChunksNum) {
-        // Delete empty chunks
-        for (int64_t chunkIdx = newChunksNum; chunkIdx < currentChunksNum; chunkIdx++) {
-          CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
-          chunkKey->Key = allKeys[i];
-          chunkKey->Index = chunkIdx;
-          auto slice = rocksdb::Slice(reinterpret_cast<const char*>(chunkKey), sizeof(CChunkKey));
-          batch.Delete(slice);
-        }
-      } else {
-        size_t remaining = header->Count;
-        int64_t offset = currentArraySize;
-        const char *dataPtr = reinterpret_cast<const char*>(&header->ChunkOffset);
-
-        if (currentArraySize % ChunkSize_) {
-          // Merge last chunk
-          size_t writeSize = std::min(remaining, ChunkSize_ - (size_t)(currentArraySize % ChunkSize_));
-
-          CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
-          chunkKey->Key = allKeys[i];
-          chunkKey->Index = xhtobe<int64_t>(currentChunksNum - 1);
-          header->ChunkOffset = ValueSize_ * (offset % ChunkSize_);
-          auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(chunkKey), sizeof(CChunkKey));
-          auto valueSlice = rocksdb::Slice(dataPtr, writeSize * ValueSize_ + sizeof(int64_t));
-          batch.Merge(keySlice, valueSlice);
-
-          dataPtr += writeSize * ValueSize_ + sizeof(int64_t);
-          remaining -= writeSize;
-          offset += writeSize;
-        } else {
-          dataPtr += sizeof(uint64_t);
-        }
-
-        for (int64_t chunkIdx = currentChunksNum; chunkIdx < newChunksNum; chunkIdx++) {
-          size_t writeSize = std::min(remaining, ChunkSize_);
-          assert(writeSize != 0);
-
-          CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
-          chunkKey->Key = allKeys[i];
-          chunkKey->Index = xhtobe<int64_t>(chunkIdx);
-          auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(chunkKey), sizeof(CChunkKey));
-          auto valueSlice = rocksdb::Slice(dataPtr, writeSize * ValueSize_);
-          batch.Put(keySlice, valueSlice);
-
-          dataPtr += writeSize * ValueSize_;
-          remaining -= writeSize;
-          offset += writeSize;
-        }
-      }
-    }
-
-    rocksdb::WriteOptions writeOptions;
-    writeOptions.disableWAL = true;
-    storage->Write(writeOptions, &batch);
-    shard.reset();
-  }
-
-public:
-  size_t ValueSize_ = 0;
-  size_t ChunkSize_ = 0;
-};
-
 // Fixed-size element array with a running aggregate: besides the fact itself,
 // every element carries in its Aggregate field the fold of all elements up to
 // and including it, so a range read returns ready prefix sums (address history
 // with the balance after each tx, balance chart).
-// The write path stays as blind as CBaseArrayFixed: add() receives elements
-// whose Aggregate holds the element DELTA and folds them into window-relative
-// running sums (uint64 wrap-around, a negative delta is two's complement);
-// flushImpl() rebases the window by the durable aggregate kept in the per-key
-// metadata it reads anyway, so chunk data still leaves as offset-patch merge
-// operands with no extra reads on the hot path. Truncation (disconnect) keeps
-// every surviving prefix sum valid by construction; only the reorg-only
-// truncate path reads one chunk back to restore the metadata aggregate.
+//
+// A window is normalized to "trim the durable prefix, then append":
+//     final = durable[0 : durableCount - BaseTrim] ++ Tail
+// BaseTrim never decreases while the window lives and the Tail holds only
+// elements born in it, so a reorg that truncates the durable end and appends
+// an alternate branch is an ordinary pair of operations with nothing special
+// about it - the append is not lost and needs no rollback of the window.
+// add() receives elements whose Aggregate holds the element DELTA and folds
+// them into window-relative running sums (uint64 wrap-around, a negative delta
+// is two's complement); the flush rebases them onto the aggregate of the last
+// surviving durable element and writes them from that position on, overwriting
+// whatever the trimmed branch left there. Truncating part of the Tail keeps
+// every surviving prefix sum valid by construction; only a trim reaching into
+// the durable prefix reads one chunk back for the new rebase point.
 // CItem requirements: trivially copyable, fixed size, public uint64_t
 // Aggregate field with the semantics above.
 template<typename CKey, typename CItem>
 class CBaseArrayAggregated : public Base<CKey> {
 private:
 #pragma pack(push, 1)
+  // Arena record of a window: the Tail follows it. The key is not stored here -
+  // it already lives in the map slot, and the flush reads it from there
   struct CHeader {
-    CKey Key;
-    size_t Size;
-    int64_t Count;
-    int64_t ChunkOffset;
+    uint64_t BaseTrim;   // elements dropped from the durable prefix
+    uint64_t TailCount;  // elements appended over what survives (the payload)
   };
 
   struct CChunkKey {
@@ -1078,6 +725,13 @@ private:
     uint64_t Aggregate;
   };
 #pragma pack(pop)
+
+  static const CItem *tail(const CHeader *header) { return reinterpret_cast<const CItem*>(header + 1); }
+  static CItem *tail(CHeader *header) { return reinterpret_cast<CItem*>(header + 1); }
+
+  static rocksdb::Slice slice(const CChunkKey &key) {
+    return rocksdb::Slice(reinterpret_cast<const char*>(&key), sizeof(CChunkKey));
+  }
 
 private:
   class MergeOperator : public rocksdb::MergeOperator {
@@ -1133,54 +787,51 @@ public:
 
   // items carry the element delta in Aggregate; the call folds them into
   // window-relative running sums, rebased to absolute values at flush
-  void add(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CItem *items, size_t count) {
+  void add(const CKey &key, const CItem *items, size_t count) {
     const size_t hash = std::hash<CKey>()(key);
     CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
-    const void *prevData = nullptr;
-    size_t prevSize = 0;
-    int64_t prevCount = 0;
-    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key, hash));
-    if (oldHeader) {
-      prevData = oldHeader + 1;
-      prevSize = oldHeader->Size;
-      prevCount = oldHeader->Count;
-    }
+    const CHeader *prev = static_cast<const CHeader*>(shard.find(key, hash));
+    const uint64_t prevCount = prev ? prev->TailCount : 0;
 
-    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader) + prevSize + count*sizeof(CItem)));
-    uint8_t *dst = reinterpret_cast<uint8_t*>(header + 1);
-    header->Key = key;
-    header->Size = prevSize + count*sizeof(CItem);
-    header->Count = prevCount + count;
-    if (prevData)
-      memcpy(dst, prevData, prevSize);
+    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader) + (prevCount + count)*sizeof(CItem)));
+    header->BaseTrim = prev ? prev->BaseTrim : 0;
+    header->TailCount = prevCount + count;
 
-    CItem *newItems = reinterpret_cast<CItem*>(dst + prevSize);
+    CItem *dst = tail(header);
+    if (prevCount)
+      memcpy(static_cast<void*>(dst), tail(prev), prevCount*sizeof(CItem));
+
+    CItem *newItems = dst + prevCount;
     memcpy(static_cast<void*>(newItems), items, count*sizeof(CItem));
-    uint64_t running = prevSize ? reinterpret_cast<const CItem*>(dst + prevSize - sizeof(CItem))->Aggregate : 0;
+    uint64_t running = prevCount ? dst[prevCount - 1].Aggregate : 0;
     for (size_t i = 0; i < count; i++) {
       running += newItems[i].Aggregate;
       newItems[i].Aggregate = running;
     }
 
-    shard.update(blockId, key, hash, header);
+    shard.update(key, hash, header);
   }
 
-  void remove(const BC::Proto::BlockHashTy &blockId, const CKey &key, size_t count) {
+  // Drop the last count elements. The Tail goes first, only what is left over
+  // is charged to the durable prefix; elements appended afterwards start a
+  // fresh Tail over the new end
+  void truncate(const CKey &key, size_t count) {
     const size_t hash = std::hash<CKey>()(key);
     CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
-    int64_t prevCount = 0;
-    const CHeader *oldHeader = static_cast<const CHeader*>(shard.find(key, hash));
-    if (oldHeader)
-      prevCount = oldHeader->Count;
+    const CHeader *prev = static_cast<const CHeader*>(shard.find(key, hash));
+    const uint64_t prevCount = prev ? prev->TailCount : 0;
+    const uint64_t fromTail = std::min<uint64_t>(count, prevCount);
+    const uint64_t newCount = prevCount - fromTail;
 
-    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader)));
-    header->Key = key;
-    header->Size = 0;
-    header->Count = prevCount - count;
+    CHeader *header = static_cast<CHeader*>(shard.Log.alloc(sizeof(CHeader) + newCount*sizeof(CItem)));
+    header->BaseTrim = (prev ? prev->BaseTrim : 0) + (count - fromTail);
+    header->TailCount = newCount;
+    if (newCount)
+      memcpy(static_cast<void*>(tail(header)), tail(prev), newCount*sizeof(CItem));
 
-    shard.update(blockId, key, hash, header);
+    shard.update(key, hash, header);
   }
 
   bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalCount) {
@@ -1194,8 +845,14 @@ public:
     size_t firstChunk = from / ChunkSize_;
     size_t lastChunk = (from + count - 1) / ChunkSize_;
 
-    std::vector<std::string> readResult;
+    // Metadata, data chunks and the boundary chunk come from one snapshot: a
+    // flush landing between two of those reads would otherwise move the end of
+    // the array without moving the data, or the other way round
+    rocksdb::ReadOptions readOptions;
+    readOptions.snapshot = storage->GetSnapshot();
+    bool ok = true;
 
+    std::vector<std::string> readResult;
     {
       std::vector<CChunkKey> chunkKeys;
       std::vector<rocksdb::Slice> allKeySlices;
@@ -1209,205 +866,256 @@ public:
         k.Index = xhtobe<uint64_t>(chunkId);
       }
       for (const auto &k: chunkKeys)
-        allKeySlices.push_back(rocksdb::Slice(reinterpret_cast<const char*>(&k), sizeof(CChunkKey)));
+        allKeySlices.push_back(slice(k));
 
-      auto metadataReadResult = storage->MultiGet(rocksdb::ReadOptions(), allKeySlices, &readResult);
-      // Missing metadata is not an error: the key may live only in the memtable tail
+      auto metadataReadResult = storage->MultiGet(readOptions, allKeySlices, &readResult);
+      // Missing metadata is not an error: the key may live only in the window
       if (!metadataReadResult[0].ok())
         readResult[0].clear();
     }
 
-    int64_t onDiskArraySize = 0;
-    uint64_t onDiskAggregate = 0;
+    int64_t durableCount = 0;
+    uint64_t durableAggregate = 0;
     if (readResult[0].size() == sizeof(CMetadata)) {
       const CMetadata *meta = reinterpret_cast<const CMetadata*>(readResult[0].data());
-      onDiskArraySize = meta->Count;
-      onDiskAggregate = meta->Aggregate;
+      durableCount = meta->Count;
+      durableAggregate = meta->Aggregate;
     }
 
-    int64_t onDiskAvailable = std::min((int64_t)(from + count), onDiskArraySize) - from;
-    int64_t inMemoryOffset = std::max((int64_t)from - onDiskArraySize, (int64_t)0);
-    int64_t remaining = count;
-    *totalCount = onDiskArraySize;
-
-    // Read disk data
-    if (onDiskAvailable > 0) {
-      int64_t chunkOffset = from % ChunkSize_;
-      // Bounded by the durable count, not the chunk payload: after a truncation
-      // the last chunk keeps stale bytes past the array end
-      int64_t diskRemaining = onDiskAvailable;
-      for (size_t chunkId = firstChunk, index = 1; chunkId <= lastChunk && diskRemaining > 0; chunkId++, index++) {
-        const char *chunkData = readResult[index].data();
-        int64_t elementsNum = readResult[index].size() / sizeof(CItem);
-        int64_t available = elementsNum - chunkOffset;
-        if (available <= 0)
-          break;
-        int64_t needToRead = std::min(available, diskRemaining);
-
-        memcpy(result.reserve(needToRead * sizeof(CItem)), chunkData + chunkOffset * sizeof(CItem), needToRead * sizeof(CItem));
-        diskRemaining -= needToRead;
-        remaining -= needToRead;
-        chunkOffset = 0;
-      }
-    }
-
-    // Window tail: rebase window-relative running sums by the durable aggregate
+    // The window says how much of the durable prefix is still there and what
+    // is appended over it
     const CHeader *header = static_cast<const CHeader*>(mlog.find(key, hash));
-    if (header) {
-      const uint8_t *memoryData = reinterpret_cast<const uint8_t*>(header + 1);
-      int64_t windowCount = header->Size / sizeof(CItem);
-      int64_t available = windowCount - inMemoryOffset;
-      int64_t needToRead = std::min(available, remaining);
-      if (needToRead > 0) {
-        CItem *items = static_cast<CItem*>(result.reserve(needToRead * sizeof(CItem)));
-        memcpy(static_cast<void*>(items), memoryData + inMemoryOffset * sizeof(CItem), needToRead * sizeof(CItem));
-        for (int64_t i = 0; i < needToRead; i++)
-          items[i].Aggregate += onDiskAggregate;
+    const uint64_t baseTrim = header ? header->BaseTrim : 0;
+    const uint64_t tailCount = header ? header->TailCount : 0;
+    const int64_t baseCount = durableCount - static_cast<int64_t>(baseTrim);
+    uint64_t baseAggregate = durableAggregate;
+
+    if (baseCount < 0) {
+      LOG_F(ERROR, "%s: window trims %llu elements of an array holding %lld", this->Name_.c_str(),
+            static_cast<unsigned long long>(baseTrim), static_cast<long long>(durableCount));
+      ok = false;
+    } else if (baseTrim) {
+      // The durable end moved: the rebase point is the element that survived
+      baseAggregate = 0;
+      if (baseCount > 0 && !aggregateAt(storage, readOptions, key, baseCount - 1, baseAggregate)) {
+        LOG_F(ERROR, "%s: can't read back the aggregate of element %lld", this->Name_.c_str(),
+              static_cast<long long>(baseCount - 1));
+        ok = false;
       }
-      *totalCount += header->Count;
     }
 
-    return true;
+    if (ok) {
+      // Disk range, bounded by the surviving prefix and not by the durable
+      // count: after a trim the last chunk keeps stale bytes past the end
+      int64_t onDiskAvailable = std::min((int64_t)(from + count), baseCount) - static_cast<int64_t>(from);
+      int64_t inMemoryOffset = std::max(static_cast<int64_t>(from) - baseCount, (int64_t)0);
+      int64_t remaining = count;
+      *totalCount = static_cast<size_t>(baseCount) + tailCount;
+
+      if (onDiskAvailable > 0) {
+        int64_t chunkOffset = from % ChunkSize_;
+        int64_t diskRemaining = onDiskAvailable;
+        for (size_t chunkId = firstChunk, index = 1; chunkId <= lastChunk && diskRemaining > 0; chunkId++, index++) {
+          const char *chunkData = readResult[index].data();
+          int64_t elementsNum = readResult[index].size() / sizeof(CItem);
+          int64_t available = elementsNum - chunkOffset;
+          if (available <= 0)
+            break;
+          int64_t needToRead = std::min(available, diskRemaining);
+
+          memcpy(result.reserve(needToRead * sizeof(CItem)), chunkData + chunkOffset * sizeof(CItem), needToRead * sizeof(CItem));
+          diskRemaining -= needToRead;
+          remaining -= needToRead;
+          chunkOffset = 0;
+        }
+      }
+
+      // Window tail: rebase window-relative running sums by the surviving prefix
+      if (tailCount) {
+        int64_t available = static_cast<int64_t>(tailCount) - inMemoryOffset;
+        int64_t needToRead = std::min(available, remaining);
+        if (needToRead > 0) {
+          CItem *items = static_cast<CItem*>(result.reserve(needToRead * sizeof(CItem)));
+          memcpy(static_cast<void*>(items), tail(header) + inMemoryOffset, needToRead * sizeof(CItem));
+          for (int64_t i = 0; i < needToRead; i++)
+            items[i].Aggregate += baseAggregate;
+        }
+      }
+    }
+
+    storage->ReleaseSnapshot(readOptions.snapshot);
+    return ok;
   }
 
   virtual void flushImpl(const BC::Proto::BlockHashTy &blockId, size_t shardIndex) final {
     CLog<CKey> &shard = this->shard(shardIndex);
-    MLog &mlog = shard.Log;
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
 
-    // Collect all keys
-    std::vector<CKey> allKeys;
-    std::vector<CHeader*> allData;
+    // Collect all keys; they stay put in the map slots until the reset below
+    std::vector<const CKey*> allKeys;
+    std::vector<const CHeader*> allData;
     std::vector<rocksdb::Slice> allKeySlices;
     std::vector<std::string> metadata;
 
     shard.Map.forEachCurrent([&](const CKey &key, void *keyData) {
-      allKeys.emplace_back(key);
-      allData.push_back(static_cast<CHeader*>(keyData));
+      allKeys.push_back(&key);
+      allData.push_back(static_cast<const CHeader*>(keyData));
     });
 
     for (size_t i = 0; i < allKeys.size(); i++)
-      allKeySlices.emplace_back((const char*)&allKeys[i], sizeof(CKey));
+      allKeySlices.emplace_back((const char*)allKeys[i], sizeof(CKey));
 
-    auto metadataReadResult = storage->MultiGet(rocksdb::ReadOptions(), allKeySlices, &metadata);
+    // Metadata and the boundary chunks of trimmed keys are one consistent view
+    rocksdb::ReadOptions readOptions;
+    readOptions.snapshot = storage->GetSnapshot();
+    auto metadataReadResult = storage->MultiGet(readOptions, allKeySlices, &metadata);
 
     rocksdb::WriteBatch batch;
 
     batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(blockId.begin()), sizeof(BC::Proto::BlockHashTy)));
+    // Absolute aggregates are built here and never written into the published
+    // window: a query running concurrently keeps reading window-relative sums
+    std::vector<uint8_t> scratch;
+
     for (size_t i = 0; i < allKeys.size(); i++) {
-      CHeader *header = allData[i];
-      int64_t currentArraySize = 0;
-      uint64_t currentAggregate = 0;
+      const CHeader *header = allData[i];
+      int64_t durableCount = 0;
+      uint64_t durableAggregate = 0;
       if (metadataReadResult[i].ok() && metadata[i].size() == sizeof(CMetadata)) {
         const CMetadata *currentMeta = reinterpret_cast<const CMetadata*>(metadata[i].data());
-        currentArraySize = currentMeta->Count;
-        currentAggregate = currentMeta->Aggregate;
+        durableCount = currentMeta->Count;
+        durableAggregate = currentMeta->Aggregate;
       }
 
-      int64_t currentChunksNum = currentArraySize / ChunkSize_ + (currentArraySize % ChunkSize_ != 0);
-      int64_t newArraySize = currentArraySize + header->Count;
-      if (newArraySize < 0)
-        newArraySize = 0;
+      const int64_t baseCount = durableCount - static_cast<int64_t>(header->BaseTrim);
+      const int64_t newCount = baseCount + static_cast<int64_t>(header->TailCount);
 
-      int64_t newChunksNum = newArraySize / ChunkSize_ + (newArraySize % ChunkSize_ != 0);
+      // Fail closed: a window that trims more than the array holds means the
+      // operations reaching this database no longer describe one chain, and
+      // clamping it would silently write an array nobody can rebuild
+      if (baseCount < 0) {
+        LOG_F(ERROR, "%s: shard %zu, window trims %llu elements of an array holding %lld",
+              this->Name_.c_str(), shardIndex,
+              static_cast<unsigned long long>(header->BaseTrim), static_cast<long long>(durableCount));
+        abort();
+      }
 
-      // Rebase window-relative running sums to absolute values
-      CItem *windowItems = reinterpret_cast<CItem*>(header + 1);
-      int64_t windowCount = header->Size / sizeof(CItem);
-      for (int64_t j = 0; j < windowCount; j++)
-        windowItems[j].Aggregate += currentAggregate;
-
-      uint64_t newAggregate = windowCount ? windowItems[windowCount - 1].Aggregate : currentAggregate;
-
-      if (header->Count != windowCount) {
-        // The window contains removes - a reorg deeper than the unflushed window.
-        // Only pure truncation is supported: drop the chunks past the new end and
-        // take the aggregate back from the new last durable element. Elements
-        // appended over a truncated window would land on stale positions and are
-        // not written (same layout limitation as CBaseArrayFixed)
-        if (windowCount)
-          LOG_F(WARNING, "%s: dropping %lld elements appended over a truncated window", this->name().c_str(), (long long)windowCount);
-
-        for (int64_t chunkIdx = newChunksNum; chunkIdx < currentChunksNum; chunkIdx++) {
-          CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
-          chunkKey->Key = allKeys[i];
-          chunkKey->Index = xhtobe<uint64_t>(chunkIdx);
-          batch.Delete(rocksdb::Slice(reinterpret_cast<const char*>(chunkKey), sizeof(CChunkKey)));
+      // The rebase point of the window: the aggregate of the last element that
+      // survived the trim, read back from its chunk when the trim moved it
+      uint64_t baseAggregate = durableAggregate;
+      if (header->BaseTrim) {
+        baseAggregate = 0;
+        if (baseCount > 0 && !aggregateAt(storage, readOptions, *allKeys[i], baseCount - 1, baseAggregate)) {
+          LOG_F(ERROR, "%s: shard %zu, can't read back the aggregate of element %lld",
+                this->Name_.c_str(), shardIndex, static_cast<long long>(baseCount - 1));
+          abort();
         }
+      }
 
-        if (newArraySize > 0) {
+      uint64_t newAggregate = baseAggregate;
+      if (header->TailCount) {
+        const CItem *tailItems = tail(header);
+        newAggregate = baseAggregate + tailItems[header->TailCount - 1].Aggregate;
+
+        size_t remaining = header->TailCount;
+        size_t taken = 0;
+        int64_t offset = baseCount;
+
+        // A partial chunk at the boundary is patched in place by an offset
+        // merge operand, whole chunks are written outright: past the boundary
+        // the new branch overwrites the trimmed one element for element
+        if (offset % static_cast<int64_t>(ChunkSize_)) {
+          size_t writeSize = std::min(remaining, ChunkSize_ - static_cast<size_t>(offset % ChunkSize_));
+          uint64_t chunkOffset = sizeof(CItem) * static_cast<uint64_t>(offset % ChunkSize_);
+          scratch.resize(sizeof(uint64_t) + writeSize * sizeof(CItem));
+          memcpy(scratch.data(), &chunkOffset, sizeof(chunkOffset));
+          rebase(scratch.data() + sizeof(uint64_t), tailItems + taken, writeSize, baseAggregate);
+
           CChunkKey chunkKey;
-          chunkKey.Key = allKeys[i];
-          chunkKey.Index = xhtobe<uint64_t>((newArraySize - 1) / ChunkSize_);
-          size_t offsetInChunk = (newArraySize - 1) % ChunkSize_;
-          std::string chunkData;
-          if (storage->Get(rocksdb::ReadOptions(), rocksdb::Slice(reinterpret_cast<const char*>(&chunkKey), sizeof(CChunkKey)), &chunkData).ok() &&
-              chunkData.size() >= (offsetInChunk + 1) * sizeof(CItem)) {
-            newAggregate = reinterpret_cast<const CItem*>(chunkData.data())[offsetInChunk].Aggregate;
-          } else {
-            LOG_F(ERROR, "%s: can't read back the aggregate of element %lld on truncation", this->name().c_str(), (long long)(newArraySize - 1));
-          }
-        }
-      } else if (windowCount) {
-        size_t remaining = windowCount;
-        int64_t offset = currentArraySize;
-        const char *dataPtr = reinterpret_cast<const char*>(&header->ChunkOffset);
+          chunkKey.Key = *allKeys[i];
+          chunkKey.Index = xhtobe<uint64_t>(offset / ChunkSize_);
+          batch.Merge(slice(chunkKey), rocksdb::Slice(reinterpret_cast<const char*>(scratch.data()), scratch.size()));
 
-        if (currentArraySize % ChunkSize_) {
-          // Extend the partial last chunk with an offset-patch merge operand
-          size_t writeSize = std::min(remaining, ChunkSize_ - (size_t)(currentArraySize % ChunkSize_));
-
-          CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
-          chunkKey->Key = allKeys[i];
-          chunkKey->Index = xhtobe<uint64_t>(currentChunksNum - 1);
-          header->ChunkOffset = sizeof(CItem) * (offset % ChunkSize_);
-          auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(chunkKey), sizeof(CChunkKey));
-          auto valueSlice = rocksdb::Slice(dataPtr, writeSize * sizeof(CItem) + sizeof(int64_t));
-          batch.Merge(keySlice, valueSlice);
-
-          dataPtr += writeSize * sizeof(CItem) + sizeof(int64_t);
+          taken += writeSize;
           remaining -= writeSize;
           offset += writeSize;
-        } else {
-          dataPtr += sizeof(uint64_t);
         }
 
-        for (int64_t chunkIdx = currentChunksNum; chunkIdx < newChunksNum; chunkIdx++) {
+        while (remaining) {
           size_t writeSize = std::min(remaining, ChunkSize_);
-          if (writeSize == 0)
-            break;
+          scratch.resize(writeSize * sizeof(CItem));
+          rebase(scratch.data(), tailItems + taken, writeSize, baseAggregate);
 
-          CChunkKey *chunkKey = mlog.alloc<CChunkKey>();
-          chunkKey->Key = allKeys[i];
-          chunkKey->Index = xhtobe<uint64_t>(chunkIdx);
-          auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(chunkKey), sizeof(CChunkKey));
-          auto valueSlice = rocksdb::Slice(dataPtr, writeSize * sizeof(CItem));
-          batch.Put(keySlice, valueSlice);
+          CChunkKey chunkKey;
+          chunkKey.Key = *allKeys[i];
+          chunkKey.Index = xhtobe<uint64_t>(offset / ChunkSize_);
+          batch.Put(slice(chunkKey), rocksdb::Slice(reinterpret_cast<const char*>(scratch.data()), scratch.size()));
 
-          dataPtr += writeSize * sizeof(CItem);
+          taken += writeSize;
           remaining -= writeSize;
           offset += writeSize;
         }
+      }
+
+      // Chunks entirely past the new end die whole; the last one keeps the
+      // bytes past newCount, they are unreachable through the metadata count
+      // and overwritten by the next append
+      for (int64_t chunkIdx = chunksFor(newCount); chunkIdx < chunksFor(durableCount); chunkIdx++) {
+        CChunkKey chunkKey;
+        chunkKey.Key = *allKeys[i];
+        chunkKey.Index = xhtobe<uint64_t>(chunkIdx);
+        batch.Delete(slice(chunkKey));
       }
 
       // Update metadata
       {
-        auto keySlice = rocksdb::Slice(reinterpret_cast<const char*>(&header->Key), sizeof(CKey));
-        if (newArraySize) {
-          CMetadata *meta = mlog.alloc<CMetadata>();
-          meta->Count = newArraySize;
-          meta->Aggregate = newAggregate;
-          batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(meta), sizeof(CMetadata)));
+        auto keySlice = allKeySlices[i];
+        if (newCount) {
+          CMetadata meta;
+          meta.Count = newCount;
+          meta.Aggregate = newAggregate;
+          batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(&meta), sizeof(meta)));
         } else {
           batch.Delete(keySlice);
         }
       }
     }
 
+    storage->ReleaseSnapshot(readOptions.snapshot);
+
     rocksdb::WriteOptions writeOptions;
     writeOptions.disableWAL = true;
     storage->Write(writeOptions, &batch);
     shard.reset();
+  }
+
+private:
+  int64_t chunksFor(int64_t count) const {
+    return count / static_cast<int64_t>(ChunkSize_) + (count % static_cast<int64_t>(ChunkSize_) != 0);
+  }
+
+  // Absolute copy of a piece of the Tail; the published window keeps its
+  // window-relative sums
+  static void rebase(void *dst, const CItem *items, size_t count, uint64_t base) {
+    CItem *out = static_cast<CItem*>(dst);
+    memcpy(dst, items, count * sizeof(CItem));
+    for (size_t i = 0; i < count; i++)
+      out[i].Aggregate += base;
+  }
+
+  bool aggregateAt(rocksdb::DB *storage, const rocksdb::ReadOptions &readOptions, const CKey &key, int64_t index, uint64_t &aggregate) const {
+    CChunkKey chunkKey;
+    chunkKey.Key = key;
+    chunkKey.Index = xhtobe<uint64_t>(index / static_cast<int64_t>(ChunkSize_));
+    size_t offsetInChunk = static_cast<size_t>(index % static_cast<int64_t>(ChunkSize_));
+
+    std::string chunkData;
+    if (!storage->Get(readOptions, slice(chunkKey), &chunkData).ok() ||
+        chunkData.size() < (offsetInChunk + 1) * sizeof(CItem))
+      return false;
+
+    aggregate = reinterpret_cast<const CItem*>(chunkData.data())[offsetInChunk].Aggregate;
+    return true;
   }
 
 private:
@@ -1611,7 +1319,7 @@ public:
     return true;
   }
 
-  void merge(const BC::Proto::BlockHashTy &blockId, const CKey &key, const CValue &delta) {
+  void merge(const CKey &key, const CValue &delta) {
     const size_t hash = std::hash<CKey>()(key);
     CLog<CKey> &shard = this->shard(fastrange(hash, this->BaseCfg_.ShardsNum));
 
@@ -1621,7 +1329,7 @@ public:
     header->Value = prev ? prev->Value : CValue();
     header->Value.merge(delta);
 
-    shard.update(blockId, key, hash, header);
+    shard.update(key, hash, header);
   }
 
   bool find(const CKey &key, CValue &value) const {

@@ -71,20 +71,6 @@ private:
   uint32_t version() final { return 1; }
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) override;
 
-  // The block walk itself, one per direction. withLog false is the pop path:
-  // the shard log already took the operation as a pop, only the cache is left
-  // to mirror it
-  void connectCommon(const BC::Common::BlockIndex *index,
-                     const BC::Proto::Block &block,
-                     const BC::Proto::CBlockValidationData &validationData,
-                     bool withLog);
-
-  void disconnectCommon(const BC::Common::BlockIndex *index,
-                        const BC::Proto::Block &block,
-                        const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                        const BC::Proto::CBlockValidationData &validationData,
-                        bool withLog);
-
   void connectImpl(const BC::Common::BlockIndex *index,
                    const BC::Proto::Block &block,
                    const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
@@ -98,22 +84,6 @@ private:
                       const BC::Proto::CBlockValidationData &validationData,
                       BlockInMemoryIndex &blockIndex,
                       BlockDatabase &blockDb) override;
-
-  void connectFastImpl(const BC::Common::BlockIndex *index,
-                       const BC::Proto::Block &block,
-                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                       const BC::Proto::CBlockValidationData &validationData) final;
-
-  // A block whose run pairs are still hidden: its connect never took the hidden output away, and
-  // only the full disconnect puts it back
-  bool cancelableConnect(const BC::Proto::CBlockValidationData &validationData) const override {
-    return !validationData.hidesPairs();
-  }
-
-  void disconnectFastImpl(const BC::Common::BlockIndex *index,
-                          const BC::Proto::Block &block,
-                          const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                          const BC::Proto::CBlockValidationData &validationData) final;
 
   // No-dump warmup: one streaming pass over the shards, inserting every
   // record with its true creation height; the floor eviction keeps roughly

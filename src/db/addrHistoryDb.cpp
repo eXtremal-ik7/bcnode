@@ -33,7 +33,6 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
                                 BlockDatabase&)
 {
   assert(validationData.TxIds.size() == block.vtx.size());
-  const auto blockId = index->Header.GetHash();
   if (block.vtx.empty())
     return;
 
@@ -106,17 +105,16 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
   }
 
   for (const auto &addr: historyMap)
-    this->add(blockId, addr.first, addr.second.data(), addr.second.size());
+    this->add(addr.first, addr.second.data(), addr.second.size());
 }
 
-void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index,
+void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex*,
                                    const BC::Proto::Block &block,
                                    const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                                    const BC::Proto::CBlockValidationData&,
                                    BlockInMemoryIndex&,
                                    BlockDatabase&)
 {
-  const auto blockId = index->Header.GetHash();
   if (block.vtx.empty())
     return;
 
@@ -164,7 +162,7 @@ void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex *index,
   }
 
   for (const auto &addr: txMap)
-    this->remove(blockId, addr.first, addr.second);
+    this->truncate(addr.first, addr.second);
 }
 
 }
