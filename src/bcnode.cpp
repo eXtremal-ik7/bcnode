@@ -342,6 +342,7 @@ int main(int argc, char **argv)
       pipelineParams.ReadyQueueDepth = static_cast<size_t>(cfg->lookupInt("bcnode", "readyQueueDepth", static_cast<int>(pipelineParams.ReadyQueueDepth)));
       pipelineParams.PrepLanes = static_cast<size_t>(cfg->lookupInt("bcnode", "prepLanes", static_cast<int>(pipelineParams.PrepLanes)));
       pipelineParams.RawSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "readAheadMb", static_cast<int>(pipelineParams.RawSizeLimit / 1048576))) * 1048576;
+      pipelineParams.PreparedSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "preparedMb", static_cast<int>(pipelineParams.PreparedSizeLimit / 1048576))) * 1048576;
       pipelineParams.Prefetch = cfg->lookupBoolean("bcnode", "prefetch", pipelineParams.Prefetch);
       storageBacklogSize = static_cast<size_t>(cfg->lookupInt("bcnode", "storageBacklogMb", 0)) * 1048576;
       blockCacheSize = static_cast<size_t>(cfg->lookupInt("bcnode", "blockCacheSizeMb", static_cast<int>(blockCacheSize / 1048576))) * 1048576;

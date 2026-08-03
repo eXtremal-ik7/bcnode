@@ -876,6 +876,12 @@ bool prepareSegment(BlockInMemoryIndex&,
 
   resolveSegmentInputs(segment);
 
+  // Everything the blocks of this segment will hold until they connect is built now
+  for (const CSegment::CObject &entry: segment.Objects) {
+    if (entry.Object.get())
+      entry.Object.get()->reaccount();
+  }
+
   {
     size_t completable = 0;
     while (completable < segment.Objects.size() && segment.Objects[completable].Completable)

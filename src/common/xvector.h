@@ -17,31 +17,30 @@ private:
   size_t MemorySize_;
   bool Own_;
 
-  void grow() {
-    size_t newMemorySize_ = MemorySize_ ? MemorySize_*2 : 1;
-    T *newData = static_cast<T*>(operator new(sizeof(T)*newMemorySize_));
-    for (size_t i = 0; i < MemorySize_; i++)
+  // Only Size_ elements are alive, so only they may be copied and only they will be destroyed
+  void reallocate(size_t newMemorySize) {
+    T *newData = static_cast<T*>(operator new(sizeof(T)*newMemorySize));
+    for (size_t i = 0; i < Size_; i++)
       new(&newData[i]) T(Data_[i]);
 
     free();
     Data_ = newData;
-    MemorySize_ = newMemorySize_;
+    MemorySize_ = newMemorySize;
     Own_ = true;
   }
 
+  void grow() { reallocate(MemorySize_ ? MemorySize_*2 : 1); }
+
   void grow(size_t newSize) {
+    // Own capacity that already fits: resize() shrinks Size_, so a reused vector would
+    // otherwise double its buffer every time a record comes back bigger than the last
+    if (Own_ && newSize <= MemorySize_)
+      return;
+
     size_t newMemorySize_ = MemorySize_ ? MemorySize_*2 : 1;
     while (newMemorySize_ < newSize)
       newMemorySize_ *= 2;
-
-    T *newData = static_cast<T*>(operator new(sizeof(T)*newMemorySize_));
-    for (size_t i = 0; i < MemorySize_; i++)
-      new(&newData[i]) T(Data_[i]);
-
-    free();
-    Data_ = newData;
-    MemorySize_ = newMemorySize_;
-    Own_ = true;
+    reallocate(newMemorySize_);
   }
 
   void free() {
@@ -104,6 +103,8 @@ public:
   T *data() const { return Data_; }
   size_t size() const { return Size_; }
   bool empty() const { return Size_ == 0; }
+  // Heap this vector owns; a view into someone else's buffer owns nothing
+  size_t memoryBytes() const { return Own_ ? MemorySize_ * sizeof(T) : 0; }
 
   T &operator[](size_t index) const { return Data_[index]; }
   T &front() const { return Data_[0]; }

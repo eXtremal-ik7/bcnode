@@ -39,6 +39,9 @@ class alignas(512) CIndexCacheObject {
 private:
   mutable std::atomic<uintptr_t> Refs_ = 0;
   CAllocationInfo *Info_ = nullptr;
+  // What this object currently contributes to Info_: it grows once preparation fills the
+  // validation data and the linked outputs
+  size_t Accounted_ = 0;
 
   SerializedDataObject BlockData_;
   Proto::CBlockValidationData ValidationData_;
@@ -59,13 +62,27 @@ public:
     Info_(allocationInfo),
     BlockData_(data, dataSize, memorySize, unpackedData, unpackedMemorySize)
   {
+    Accounted_ = BlockData_.memorySize();
     if (Info_)
-      Info_->add(BlockData_.memorySize());
+      Info_->add(Accounted_);
   }
 
   ~CIndexCacheObject() {
     if (Info_)
-      Info_->remove(BlockData_.memorySize());
+      Info_->remove(Accounted_);
+  }
+
+  // Called by the owner of the block once preparation is done with it; a delta update, so
+  // a segment cut and prepared again costs nothing extra
+  void reaccount() {
+    if (!Info_)
+      return;
+    size_t size = BlockData_.memorySize() + ValidationData_.memorySize() + LinkedOutputs_.memorySize();
+    if (size > Accounted_)
+      Info_->add(size - Accounted_);
+    else
+      Info_->remove(Accounted_ - size);
+    Accounted_ = size;
   }
 
   const SerializedDataObject &blockData() const { return BlockData_; }

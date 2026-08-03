@@ -257,6 +257,13 @@ struct NetworkAddress {
   struct CTxLinkedOutputs {
     xvector<xvector<uint8_t>> TxIn;
 
+    size_t memorySize() const {
+      size_t size = TxIn.memoryBytes();
+      for (const xvector<uint8_t> &txIn: TxIn)
+        size += txIn.memoryBytes();
+      return size;
+    }
+
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
       op.io(d.TxIn);
@@ -265,6 +272,14 @@ struct NetworkAddress {
 
   struct CBlockLinkedOutputs {
     xvector<CTxLinkedOutputs> Tx;
+
+    // One allocation per input, so the accounting has to walk it
+    size_t memorySize() const {
+      size_t size = Tx.memoryBytes();
+      for (const CTxLinkedOutputs &tx: Tx)
+        size += tx.memorySize();
+      return size;
+    }
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
@@ -278,6 +293,8 @@ struct NetworkAddress {
 
   struct CTxValidationData {
     xvector<CTxInValidationData> ScriptSigKnownValid;
+
+    size_t memorySize() const { return ScriptSigKnownValid.memoryBytes(); }
   };
 
   // Memory only, never serialized: per-block precomputed context. Every path
@@ -332,6 +349,17 @@ struct NetworkAddress {
     void dropPairs() {
       OutputSpentInBatch.resize(0);
       InputSpendsInBatch.resize(0);
+    }
+
+    // Built after the block is already in the block cache and outweighs it: the cache limit
+    // means nothing unless this is charged to it too
+    size_t memorySize() const {
+      size_t size = TxIds.memoryBytes() + InputLocalTx.memoryBytes() + OutputSpentLocally.memoryBytes() +
+                    TxData.memoryBytes() + OutputData.memoryBytes() + OutputDataOffset.memoryBytes() +
+                    OutputSpentInBatch.memoryBytes() + InputSpendsInBatch.memoryBytes();
+      for (const CTxValidationData &tx: TxData)
+        size += tx.memorySize();
+      return size;
     }
 
     // Parsed output record; size 0 means the output is not a utxo (OP_RETURN)

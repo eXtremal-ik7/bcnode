@@ -30,13 +30,14 @@ bool CBlockPipeline::start(BlockInMemoryIndex &blockIndex,
   blockIndex.candidateTracker().update(blockIndex.best());
 
   LOG_F(INFO,
-        "Pull pipeline: %u wave threads, %zu preparation lanes, segment %.1lfMb (%zu blocks), ready queue %zu, read ahead %.1lfMb",
+        "Pull pipeline: %u wave threads, %zu preparation lanes, segment %.1lfMb (%zu blocks), ready queue %zu, read ahead %.1lfMb, prepared %.1lfMb",
         threadsNum,
         Params_.PrepLanes,
         Params_.SegmentSizeLimit / 1048576.0,
         Params_.SegmentBlocksLimit,
         Params_.ReadyQueueDepth,
-        Params_.RawSizeLimit / 1048576.0);
+        Params_.RawSizeLimit / 1048576.0,
+        Params_.PreparedSizeLimit / 1048576.0);
 
   // One helper less than the pool width: the wave owner takes a share itself
   Runner_.start(threadsNum > 1 ? threadsNum - 1 : 0);
@@ -163,6 +164,11 @@ bool CBlockPipeline::throttled() const
   // Raw data waiting for preparation. A block whose predecessor is in an unread file waits for
   // the reader, so a reader stopped while the pipeline idles would stall the chain
   if (Counters_.RawBytes.load(std::memory_order_relaxed) >= Params_.RawSizeLimit)
+    return !starving();
+
+  // Prepared blocks the chain has not taken yet. Same escape: an idle pipeline is waiting for
+  // a block only the reader can bring, and holding the reader there deadlocks the chain
+  if (Storage_->cache().size() >= Params_.PreparedSizeLimit)
     return !starving();
 
   return false;

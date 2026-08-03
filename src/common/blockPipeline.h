@@ -188,6 +188,11 @@ public:
     size_t PrepLanes = 2;
     // Read ahead limit: raw block data attached but not prepared yet
     size_t RawSizeLimit = 768*1048576;
+    // Prepared block data waiting for a connect. Preparation turns raw bytes into objects
+    // several times their size and only a connect releases them, so without this limit a
+    // connect side that falls behind the reader eats the machine instead of slowing it down.
+    // Set above what a healthy reindex holds: a binding limit costs throughput
+    size_t PreparedSizeLimit = 4096*1048576ull;
     // Parsed data of connected but unwritten blocks. Filled by slow databases (the archive) and
     // drained by the storage thread alone, so waiting on it never holds the chain up
     size_t StorageBacklogLimit = 512*1048576;
