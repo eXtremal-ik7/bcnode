@@ -421,7 +421,7 @@ int main(int argc, char **argv)
   // Initialize storage
   if (!context.BlockDb.init(context.BlocksDir, context.IndexDir, context.ChainParams))
     return 1;
-  context.Storage.init(context.BlockDb, context.BlockIndex, context.Archive);
+  context.Storage.init(context.BlockDb, context.BlockIndex, context.ChainParams, context.Archive);
   context.Storage.utxodb().setupCache(context.UtxoDir, context.BlockIndex);
 
   // Loading index
@@ -436,13 +436,13 @@ int main(int argc, char **argv)
 
     if (!context.Storage.utxodb().initialize(context.BlockIndex, context.UtxoDir, context.Storage, cfg, &utxoBestBlock, forDisconnect))
       return 1;
-    if (!BC::DB::dbDisconnectBlocks(context.Storage.utxodb(), context.BlockIndex, context.Storage, forDisconnect))
+    if (!BC::DB::dbDisconnectBlocks(context.Storage.utxodb(), context.BlockIndex, context.ChainParams, context.Storage, forDisconnect))
       return 1;
-    if (!BC::DB::dbConnectBlocks(context.Storage.utxodb(), utxoBestBlock, {}, context.BlockIndex, context.Storage, "UTXO database"))
+    if (!BC::DB::dbConnectBlocks(context.Storage.utxodb(), utxoBestBlock, {}, context.BlockIndex, context.ChainParams, context.Storage, "UTXO database"))
       return 1;
   } else {
     // Initialize full archive
-    if (!context.Archive.init(context.BlockIndex, context.Storage, context.DataDir, context.UtxoDir, cfg))
+    if (!context.Archive.init(context.BlockIndex, context.ChainParams, context.Storage, context.DataDir, context.UtxoDir, cfg))
       return 1;
   }
 

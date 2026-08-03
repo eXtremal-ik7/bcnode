@@ -13,6 +13,7 @@ namespace DB {
 // disconnect merges it negated
 static void buildBlockDelta(const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                            bool coinbaseRepeat,
                             std::unordered_map<BC::Script::CAddress, CAddrValue> &deltaMap)
 {
   // Coinbase
@@ -23,9 +24,16 @@ static void buildBlockDelta(const BC::Proto::Block &block,
     for (const auto &txout: coinbaseTx.txOut) {
       if (BC::Script::extractAddress(txout, address)) {
         CAddrValue &delta = deltaMap[address];
-        delta.Received += txout.value;
-        delta.Mined += txout.value;
-        delta.TxOutCount++;
+        // A BIP30 repeat pays no one twice: its outputs replace the twin's coins
+        // with identical ones, and only one of the two can ever be spent. The
+        // transaction is counted, the money and the outputs are not - otherwise
+        // the balance and the utxo count of the address stay above what the utxo
+        // set holds forever
+        if (!coinbaseRepeat) {
+          delta.Received += txout.value;
+          delta.Mined += txout.value;
+          delta.TxOutCount++;
+        }
         if (affectedAddresses.insert(address).second) {
           delta.TxCount++;
           delta.MinedTxCount++;
@@ -85,7 +93,7 @@ bool AddrDb::queryTop(const std::string &index, size_t offset, size_t limit,
 void AddrDb::connectImpl(const BC::Common::BlockIndex *index,
                          const BC::Proto::Block &block,
                          const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                         const BC::Proto::CBlockValidationData&,
+                         const BC::Proto::CBlockValidationData &validationData,
                          BlockInMemoryIndex&,
                          BlockDatabase&)
 {
@@ -94,7 +102,7 @@ void AddrDb::connectImpl(const BC::Common::BlockIndex *index,
 
   const auto blockId = index->Header.GetHash();
   std::unordered_map<BC::Script::CAddress, CAddrValue> deltaMap;
-  buildBlockDelta(block, linkedOutputs, deltaMap);
+  buildBlockDelta(block, linkedOutputs, validationData.CoinbaseRepeat, deltaMap);
 
   for (const auto &addr: deltaMap)
     this->merge(blockId, addr.first, addr.second);
@@ -103,7 +111,7 @@ void AddrDb::connectImpl(const BC::Common::BlockIndex *index,
 void AddrDb::disconnectImpl(const BC::Common::BlockIndex *index,
                             const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                            const BC::Proto::CBlockValidationData&,
+                            const BC::Proto::CBlockValidationData &validationData,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
@@ -112,7 +120,7 @@ void AddrDb::disconnectImpl(const BC::Common::BlockIndex *index,
 
   const auto blockId = index->Header.GetHash();
   std::unordered_map<BC::Script::CAddress, CAddrValue> deltaMap;
-  buildBlockDelta(block, linkedOutputs, deltaMap);
+  buildBlockDelta(block, linkedOutputs, validationData.CoinbaseRepeat, deltaMap);
 
   for (auto &addr: deltaMap) {
     addr.second.negate();

@@ -124,6 +124,10 @@ public:
                       const std::string &field,
                       const std::string &reason);
 
+  // The pinned BIP30 repeat this txid belongs to, nullptr for every other
+  // transaction: the databases keyed by txid hold one of its two inclusions
+  const BTC::Common::CBIP30Repeat *bip30Repeat(const BC::Proto::TxHashTy &txid) const;
+
   void serializeBlock(xmstream &stream, const BC::Common::BlockIndex *index, const BC::Common::CIndexCacheObject *object, const BC::Proto::BlockHashTy &hash);
   void serializeTx(xmstream &stream, const BC::Proto::Transaction &tx, const BC::Proto::CTxLinkedOutputs &txOutputs, const BC::Common::BlockIndex *index, bool isCoinbase, uint64_t confirmations, const uint64_t *balanceAfter = nullptr);
 

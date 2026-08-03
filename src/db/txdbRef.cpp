@@ -78,7 +78,7 @@ bool TxDbRef::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 void TxDbRef::connectImpl(const BC::Common::BlockIndex *index,
                           const BC::Proto::Block &block,
                           const BC::Proto::CBlockLinkedOutputs&,
-                          const BC::Proto::CBlockValidationData&,
+                          const BC::Proto::CBlockValidationData &validationData,
                           BlockInMemoryIndex&,
                           BlockDatabase&)
 {
@@ -91,7 +91,8 @@ void TxDbRef::connectImpl(const BC::Common::BlockIndex *index,
     return;
   }
 
-  for (size_t i = 0, ie = block.vtx.size(); i != ie; i++) {
+  // A BIP30 repeat brings a coinbase this database already holds; see firstTx
+  for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++) {
     CLogData data;
     data.Hash = blockId;
     data.Index = i;
@@ -104,12 +105,12 @@ void TxDbRef::connectImpl(const BC::Common::BlockIndex *index,
 void TxDbRef::disconnectImpl(const BC::Common::BlockIndex *index,
                              const BC::Proto::Block &block,
                              const BC::Proto::CBlockLinkedOutputs&,
-                             const BC::Proto::CBlockValidationData&,
+                             const BC::Proto::CBlockValidationData &validationData,
                              BlockInMemoryIndex&,
                              BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
-  for (size_t i = 0, ie = block.vtx.size(); i != ie; i++)
+  for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
     this->remove(blockId, block.vtx[i].getTxId());
 }
 

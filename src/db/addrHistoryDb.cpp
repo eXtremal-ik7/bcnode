@@ -28,7 +28,7 @@ bool AddrHistoryDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
                                 const BC::Proto::Block &block,
                                 const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                                const BC::Proto::CBlockValidationData&,
+                                const BC::Proto::CBlockValidationData &validationData,
                                 BlockInMemoryIndex&,
                                 BlockDatabase&)
 {
@@ -61,8 +61,16 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
     const auto &coinbaseTx = block.vtx[0];
     BC::Script::CAddress address;
     for (const auto &txout: coinbaseTx.txOut) {
-      if (BC::Script::extractAddress(txout, address))
-        txDelta[address] += txout.value;
+      if (BC::Script::extractAddress(txout, address)) {
+        // A BIP30 repeat replaces the twin's coins with identical ones and only
+        // one of the two can ever be spent: the address gets the history element
+        // (the block did pay it) with a zero delta, so the running balance stays
+        // equal to what the utxo set holds
+        if (validationData.CoinbaseRepeat)
+          txDelta[address];
+        else
+          txDelta[address] += txout.value;
+      }
     }
 
     // TODO: check kind on txid (segwit or normal)

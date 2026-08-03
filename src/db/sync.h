@@ -16,6 +16,7 @@ struct BaseWithBest {
 
 bool dbDisconnectBlocks(BC::DB::BaseInterface &db,
                         BlockInMemoryIndex &blockIndex,
+                        BC::Common::ChainParams &chainParams,
                         BC::DB::Storage &storage,
                         std::vector<BC::Common::BlockIndex *> &forDisconnect);
 
@@ -23,6 +24,7 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
                      BC::Common::BlockIndex *utxoBestBlock,
                      std::vector<BaseWithBest> archiveDatabases,
                      BlockInMemoryIndex &blockIndex,
+                     BC::Common::ChainParams &chainParams,
                      BC::DB::Storage &storage,
                      const char *name);
 

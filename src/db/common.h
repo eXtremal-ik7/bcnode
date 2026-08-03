@@ -1908,6 +1908,15 @@ private:
   std::vector<CActiveIndex> ActiveIndexes_;
 };
 
+// Where a database keyed by txid starts its walk over a block. A BIP30 repeat
+// brings a coinbase already stored under that key - the same transaction byte
+// for byte - so rewriting it would only move the record to the newer block, and
+// the remove that undoes it would take the twin's record with it while the twin
+// is still connected. The chain params carry both inclusions for the query side
+static inline size_t firstTx(const BC::Proto::CBlockValidationData &validationData) {
+  return validationData.CoinbaseRepeat ? 1 : 0;
+}
+
 // Interfaces
 enum EInterfaceTy {
   EIQueryTransaction = 0,

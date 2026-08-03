@@ -38,13 +38,16 @@ bool TxDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 void TxDb::connectImpl(const BC::Common::BlockIndex *index,
                        const BC::Proto::Block &block,
                        const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                       const BC::Proto::CBlockValidationData&,
+                       const BC::Proto::CBlockValidationData &validationData,
                        BlockInMemoryIndex&,
                        BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
   SmallStream<4096> stream;
-  for (size_t i = 0, ie = block.vtx.size(); i != ie; i++) {
+  // A BIP30 repeat carries a coinbase this database already holds, byte for byte
+  // the same one: leaving the twin's record alone keeps the key write-once, and a
+  // query answers with both inclusions from the chain params
+  for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++) {
     auto tx = block.vtx[i];
     BC::Proto::BlockHashTy hash = tx.getTxId();
 
@@ -61,12 +64,12 @@ void TxDb::connectImpl(const BC::Common::BlockIndex *index,
 void TxDb::disconnectImpl(const BC::Common::BlockIndex *index,
                           const BC::Proto::Block &block,
                           const BC::Proto::CBlockLinkedOutputs&,
-                          const BC::Proto::CBlockValidationData&,
+                          const BC::Proto::CBlockValidationData &validationData,
                           BlockInMemoryIndex&,
                           BlockDatabase&)
 {
   const auto blockId = index->Header.GetHash();
-  for (size_t i = 0, ie = block.vtx.size(); i != ie; i++)
+  for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
     remove(blockId, block.vtx[i].getTxId());
 }
 

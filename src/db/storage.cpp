@@ -107,7 +107,7 @@ void Storage::onQueuePush()
   Task task;
   bool needFlush = false;
   while (Queue_.try_pop(task)) {
-    intrusive_ptr<BTC::Common::CIndexCacheObject> object = objectByIndex(task.Index, *BlockDb_);
+    intrusive_ptr<BTC::Common::CIndexCacheObject> object = objectByIndex(task.Index, *ChainParams_, *BlockDb_);
     assert(object.get());
     switch (task.Type) {
       case Connect :

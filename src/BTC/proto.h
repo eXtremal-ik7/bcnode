@@ -311,9 +311,13 @@ struct NetworkAddress {
     // this block, or an input taking an output that does not exist. Found where the topology is
     // built, so the linking of a segment needs no per block bookkeeping for it
     bool LocalSpendInvalid = false;
-    // This block may repeat an earlier coinbase transaction: its outputs overwrite the twin's
+    // This block repeats an earlier coinbase transaction: its outputs overwrite the twin's
     // coins, destroying them (ChainParams::BIP30Repeats). Set by the contextual check
     bool CoinbaseRepeat = false;
+    // The block sits below BIP34, where nothing forbids a coinbase from repeating an
+    // earlier one even if this particular block does not. Its coinbase outputs may land
+    // on a live coin, so the utxo db must keep them overwrite-safe. Set by the contextual check
+    bool CoinbaseMayRepeat = false;
     // txid of every transaction, parallel to block.vtx ([0] = coinbase);
     // checkBlockStandalone verifies them against the header merkle root
     xvector<TxHashTy> TxIds;
@@ -529,6 +533,47 @@ struct NetworkAddress {
 }
 
 namespace BTC {
+namespace Common {
+
+// A block valid despite repeating an earlier coinbase transaction: BIP30 was not
+// enforced when it was mined, so the repeat overwrites the earlier coin. Pinned by
+// height AND hash (Core's IsBIP30Repeat) so no other block at the same height
+// inherits the exemption; BIP34 made new ones impossible. The twin and the shared
+// txid are pinned too: the databases keyed by txid hold one inclusion of such a
+// transaction, and a query answers with both. Lives here so every chain's
+// ChainParams can carry it
+struct CBIP30Repeat {
+  uint32_t Height;
+  Proto::BlockHashTy Hash;
+  // The earlier block, whose coins the repeat destroys
+  uint32_t TwinHeight;
+  Proto::BlockHashTy TwinHash;
+  // Coinbase txid both blocks carry; the transactions are byte for byte the same
+  Proto::TxHashTy TxId;
+};
+
+// What a block's place in the chain says about its coinbase, answered from the pinned
+// list alone. The contextual check is not the only caller: a block reloaded from disk
+// for a disconnect or for a database catching up never runs one, and the databases have
+// to undo exactly what they did
+template<typename BlockIndexTy, typename ChainParamsTy, typename ValidationDataTy>
+static inline void fillBIP30Context(const BlockIndexTy &index,
+                                    const ChainParamsTy &chainParams,
+                                    ValidationDataTy &validation)
+{
+  // Height first: only the exempt blocks ever pay for the hash
+  validation.CoinbaseRepeat = false;
+  for (const auto &repeat: chainParams.BIP30Repeats) {
+    if (index.Height == repeat.Height && index.Header.GetHash() == repeat.Hash) {
+      validation.CoinbaseRepeat = true;
+      break;
+    }
+  }
+
+  validation.CoinbaseMayRepeat = index.Height < chainParams.BIP34Height;
+}
+
+}
 
 // Not part of the Io contract: the input being signed is replaced by the utxo it spends
 void serializeForSignature(xmstream &dst, const BTC::Proto::TxIn &data, const uint8_t *utxo, size_t utxoSize);

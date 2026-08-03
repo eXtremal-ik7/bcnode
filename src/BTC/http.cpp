@@ -286,7 +286,12 @@ void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request
           return;
         }
 
-        BC::Common::BlockIndex *index = BlockIndex_.indexByHash(queryResult.Block);
+        // The element itself says which block paid the address; the transaction
+        // database knows only one of the two blocks a BIP30 repeat sits in, and
+        // both of them are elements of this history
+        BC::Common::BlockIndex *index = BlockIndex_.indexByHeight(item.Height);
+        if (!index)
+          index = BlockIndex_.indexByHash(queryResult.Block);
         if (!index) {
           replyWithError("BLOCK_NOT_FOUND", "", "", queryResult.Block.getHexLE());
           return;
@@ -333,7 +338,7 @@ void BC::Network::HttpApiConnection::onBlocksByHash(rapidjson::Document &request
     return;
   }
 
-  auto object = objectByIndex(index, *BlockDb_);
+  auto object = objectByIndex(index, ChainParams_, *BlockDb_);
   if (!object.get()) {
     replyWithError("DATABASE_CORRUPTED", "", "" ,"");
     return;
@@ -370,7 +375,7 @@ void BC::Network::HttpApiConnection::onBlocksByHeight(rapidjson::Document &reque
     return;
   }
 
-  auto object = objectByIndex(index, *BlockDb_);
+  auto object = objectByIndex(index, ChainParams_, *BlockDb_);
   if (!object.get()) {
     replyWithError("DATABASE_CORRUPTED", "", "" ,"");
     return;
@@ -397,7 +402,7 @@ void BC::Network::HttpApiConnection::onBlocksLatest(rapidjson::Document&)
     return;
   }
 
-  auto object = objectByIndex(index, *BlockDb_);
+  auto object = objectByIndex(index, ChainParams_, *BlockDb_);
   if (!object.get()) {
     replyWithError("DATABASE_CORRUPTED", "", "" ,"");
     return;
@@ -469,7 +474,7 @@ void BC::Network::HttpApiConnection::onBlocksList(rapidjson::Document &request)
       JSON::Array itemsArray(stream);
       uint64_t i = 0;
       while (current && i < pagination.limit) {
-        auto object = objectByIndex(current, *BlockDb_);
+        auto object = objectByIndex(current, ChainParams_, *BlockDb_);
         if (!object.get()) {
           replyWithError("DATABASE_CORRUPTED", "", "" ,"");
           return;
@@ -536,7 +541,7 @@ void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document &request)
     return;
   }
 
-  auto object = objectByIndex(index, *BlockDb_);
+  auto object = objectByIndex(index, ChainParams_, *BlockDb_);
   if (!object.get()) {
     replyWithError("DATABASE_CORRUPTED", "", "" ,"");
     return;
@@ -774,6 +779,13 @@ void BC::Network::HttpApiConnection::onTxsByTxid(rapidjson::Document &request)
 
   const BC::Common::BlockIndex *best = BlockIndex_.best();
   BC::Common::BlockIndex *index = BlockIndex_.indexByHash(queryResult.Block);
+  // A BIP30 repeat is stored under the block that came first, but the copy that
+  // matters is the later one: its outputs are the coins that live. The bytes are
+  // the same, only the place differs; both places go into the reply
+  if (const BTC::Common::CBIP30Repeat *repeat = bip30Repeat(txid)) {
+    if (BC::Common::BlockIndex *repeatIndex = BlockIndex_.indexByHash(repeat->Hash))
+      index = repeatIndex;
+  }
   if (!index) {
     replyWithError("BLOCK_NOT_FOUND", "", "", queryResult.Block.getHexLE());
     return;
@@ -939,6 +951,17 @@ void BC::Network::HttpApiConnection::serializeBlock(xmstream &stream,
   blockObject.addBoolean("is_orphan", !index->OnChain);
 }
 
+const BTC::Common::CBIP30Repeat *BC::Network::HttpApiConnection::bip30Repeat(const BC::Proto::TxHashTy &txid) const
+{
+  // Two entries on Bitcoin, none anywhere else
+  for (const auto &repeat: ChainParams_.BIP30Repeats) {
+    if (repeat.TxId == txid)
+      return &repeat;
+  }
+
+  return nullptr;
+}
+
 void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
                                                  const BC::Proto::Transaction &tx,
                                                  const BC::Proto::CTxLinkedOutputs &txOutputs,
@@ -963,7 +986,8 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
     fee = valueIn - valueOut;
   }
 
-  txObject.addString("txid", tx.getTxId().getHexLE());
+  const BC::Proto::TxHashTy txid = tx.getTxId();
+  txObject.addString("txid", txid.getHexLE());
   txObject.addString("hash", tx.getWTxid().getHexLE());
   txObject.addString("block_hash", index->Header.GetHash().getHexLE());
   txObject.addInt("block_height", index->Height);
@@ -978,6 +1002,26 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   // Set for the addresses/txs context only: the address balance right after this tx
   if (balanceAfter)
     txObject.addString("balance_after", FormatMoney(static_cast<int64_t>(*balanceAfter), BC::Configuration::RationalPartSize));
+
+  // Only a BIP30 repeat has more than one place in the chain: the same transaction
+  // sits in two blocks, and the coins of the earlier copy are dead - the later one
+  // overwrote them with identical outputs. For everyone else block_hash is the whole
+  // answer and the field is absent
+  if (const BTC::Common::CBIP30Repeat *repeat = bip30Repeat(txid)) {
+    txObject.addField("inclusions");
+    JSON::Array inclusionsArray(stream);
+    auto inclusion = [&](const BC::Proto::BlockHashTy &hash, uint32_t height, bool superseded) {
+      inclusionsArray.addField();
+      JSON::Object inclusionObject(stream);
+      inclusionObject.addString("block_hash", hash.getHexLE());
+      inclusionObject.addInt("block_height", height);
+      inclusionObject.addBoolean("superseded", superseded);
+    };
+
+    // The repeat destroyed the outputs of the copy below it
+    inclusion(repeat->TwinHash, repeat->TwinHeight, true);
+    inclusion(repeat->Hash, repeat->Height, false);
+  }
 
   txObject.addField("inputs");
   {

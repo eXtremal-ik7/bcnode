@@ -6,11 +6,12 @@ namespace DB {
 
 bool dbDisconnectBlocks(BC::DB::BaseInterface &db,
                         BlockInMemoryIndex &blockIndex,
+                        BC::Common::ChainParams &chainParams,
                         BC::DB::Storage &storage,
                         std::vector<BC::Common::BlockIndex*> &forDisconnect)
 {
   for (BC::Common::BlockIndex *index: forDisconnect) {
-    auto object = objectByIndex(index, storage.blockDb());
+    auto object = objectByIndex(index, chainParams, storage.blockDb());
     if (!object.get())
       return false;
     db.disconnect(index, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationDataConst(), blockIndex, storage.blockDb());
@@ -23,6 +24,7 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
                      BC::Common::BlockIndex *utxoBestBlock,
                      std::vector<BaseWithBest> archiveDatabases,
                      BlockInMemoryIndex &blockIndex,
+                     BC::Common::ChainParams &chainParams,
                      BC::DB::Storage &storage,
                      const char *name)
 {
@@ -49,11 +51,14 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
   uint32_t count = best->Height - firstCommon->Height;
   LOG_F(INFO, "Update %s: connecting %u blocks", name, count);
 
-  auto handler = [&utxoDb, utxoBestHeight, &archiveDatabases, &blockIndex, &storage](BC::Common::BlockIndex *index, const BC::Proto::Block &block, const BC::Proto::CBlockLinkedOutputs &linkedOutputs) {
+  auto handler = [&utxoDb, utxoBestHeight, &archiveDatabases, &blockIndex, &chainParams, &storage](BC::Common::BlockIndex *index, const BC::Proto::Block &block, const BC::Proto::CBlockLinkedOutputs &linkedOutputs) {
     // The bulk reader hands out raw disk data; rebuild the validation context
-    // to keep the connect invariant (txids precomputed on every path)
+    // to keep the connect invariant (txids and consensus exemptions precomputed on
+    // every path). No contextual check runs here - a database catching up connects
+    // blocks the chain accepted long ago
     BC::Proto::CBlockValidationData validationData;
     BC::Common::initializeValidationContext(block, validationData);
+    BTC::Common::fillBIP30Context(*index, chainParams, validationData);
     validationData.InputsResolved = true;
 
     // Connect archive

@@ -16,6 +16,7 @@ namespace DB {
 class Archive {
 public:
   bool init(BlockInMemoryIndex &blockIndex,
+            BC::Common::ChainParams &chainParams,
             BC::DB::Storage &storage,
             const std::filesystem::path &dataDir,
             const std::filesystem::path &utxoPath,

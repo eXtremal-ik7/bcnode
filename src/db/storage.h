@@ -39,9 +39,10 @@ struct Task {
 class Storage {
 public:
   ~Storage();
-  void init(BlockDatabase &blockDb, BlockInMemoryIndex &blockIndex, Archive &archive) {
+  void init(BlockDatabase &blockDb, BlockInMemoryIndex &blockIndex, BC::Common::ChainParams &chainParams, Archive &archive) {
     BlockDb_ = &blockDb;
     BlockIndex_ = &blockIndex;
+    ChainParams_ = &chainParams;
     Archive_ = &archive;
   }
 
@@ -80,6 +81,8 @@ private:
   bool Initialized_ = false;
   BlockDatabase *BlockDb_ = nullptr;
   BlockInMemoryIndex *BlockIndex_ = nullptr;
+  // A block reloaded from disk for a task learns its consensus exemptions from here
+  BC::Common::ChainParams *ChainParams_ = nullptr;
   Archive *Archive_ = nullptr;
   asyncBase *Base_ = nullptr;
   aioUserEvent *NewTaskEvent_ = nullptr;

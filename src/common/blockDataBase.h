@@ -172,7 +172,9 @@ public:
   BC::Common::BlockIndex *add(BlockInMemoryIndex &blockIndex, const BC::Proto::BlockHashTy &hash);
 };
 
-intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockIndex *index, BlockDatabase &blockDb);
+intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockIndex *index,
+                                                           BC::Common::ChainParams &chainParams,
+                                                           BlockDatabase &blockDb);
 
 class BlockBulkReader {
 public:

@@ -74,7 +74,7 @@ namespace Common {
                             std::string &error);
   bool checkBlockContextual(const BlockIndex &index,
                             const Proto::Block &block,
-                            const Proto::CBlockValidationData &validation,
+                            Proto::CBlockValidationData &validation,
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
                             std::string &error);

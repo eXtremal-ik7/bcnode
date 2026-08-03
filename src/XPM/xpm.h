@@ -64,6 +64,8 @@ namespace Common {
     XPM::Proto::Block GenesisBlock;
 
     uint32_t BIP34Height;
+    // No BIP30 repeats on XPM; kept for the shared HTTP code
+    std::vector<BTC::Common::CBIP30Repeat> BIP30Repeats;
 
     // Prefixes
     std::vector<uint8_t> PublicKeyPrefix;
@@ -115,7 +117,7 @@ namespace Common {
                             std::string &error);
   bool checkBlockContextual(const BlockIndex &index,
                             const Proto::Block &block,
-                            const Proto::CBlockValidationData &validation,
+                            Proto::CBlockValidationData &validation,
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
                             std::string &error);

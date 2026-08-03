@@ -33,11 +33,17 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->BIP34Height = 227931;
     params->SegwitHeight = 481824;
 
-    // 91842 repeats the coinbase of 91812, 91880 that of 91722. Hashes read
-    // back from the chain itself and identical to Core's IsBIP30Repeat
+    // 91842 repeats the coinbase of 91812, 91880 that of 91722. Block hashes,
+    // twins and txids read back from the chain itself (a scan of the first
+    // 120000 blocks finds these two repeats and no others); the exempt blocks
+    // are identical to Core's IsBIP30Repeat
     params->BIP30Repeats = {
-      {91842, Proto::BlockHashTy::fromHexLE("00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")},
-      {91880, Proto::BlockHashTy::fromHexLE("00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")}
+      {91842, Proto::BlockHashTy::fromHexLE("00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec"),
+       91812, Proto::BlockHashTy::fromHexLE("00000000000af0aed4792b1acee3d966af36cf5def14935db8de83d6f9306f2f"),
+       Proto::TxHashTy::fromHexLE("d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599")},
+      {91880, Proto::BlockHashTy::fromHexLE("00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721"),
+       91722, Proto::BlockHashTy::fromHexLE("00000000000271a2dc26e7667f8419f2e15416dc6955e5a6c6cdf3f2574dd08e"),
+       Proto::TxHashTy::fromHexLE("e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468")}
     };
 
     {
@@ -284,14 +290,7 @@ bool checkBlockContextual(const BlockIndex &index,
                           const ChainParams &chainParams,
                           std::string &error)
 {
-  // Height first: only the exempt blocks ever pay for the hash
-  validation.CoinbaseRepeat = false;
-  for (const auto &repeat: chainParams.BIP30Repeats) {
-    if (index.Height == repeat.first && index.Header.GetHash() == repeat.second) {
-      validation.CoinbaseRepeat = true;
-      break;
-    }
-  }
+  BTC::Common::fillBIP30Context(index, chainParams, validation);
 
   bool isValid = true;
   isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);

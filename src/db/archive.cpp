@@ -40,6 +40,7 @@ IInterface* setupHandler(config4cpp::Configuration *cfg,
 }
 
 bool Archive::init(BlockInMemoryIndex &blockIndex,
+                   BC::Common::ChainParams &chainParams,
                    BC::DB::Storage &storage,
                    const std::filesystem::path &dataDir,
                    const std::filesystem::path &utxoPath,
@@ -98,17 +99,17 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   }
 
   // Disconnect UTXO
-  if (!dbDisconnectBlocks(storage.utxodb(), blockIndex, storage, utxoDisconnect))
+  if (!dbDisconnectBlocks(storage.utxodb(), blockIndex, chainParams, storage, utxoDisconnect))
     return false;
 
   // Disconnect archive
   for (size_t i = 0; i < AllDb_.size(); i++) {
-    if (!dbDisconnectBlocks(*AllDb_[i], blockIndex, storage, archiveDisconnect[i]))
+    if (!dbDisconnectBlocks(*AllDb_[i], blockIndex, chainParams, storage, archiveDisconnect[i]))
       return false;
   }
 
   // Connect
-  if (!dbConnectBlocks(storage.utxodb(), utxoBestBlock, archiveDatabases, blockIndex, storage, "utxo & archive databases"))
+  if (!dbConnectBlocks(storage.utxodb(), utxoBestBlock, archiveDatabases, blockIndex, chainParams, storage, "utxo & archive databases"))
     return false;
 
   return true;

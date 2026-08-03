@@ -54,11 +54,9 @@ namespace Common {
     uint32_t BIP34Height;
     uint32_t SegwitHeight;
 
-    // Blocks valid despite repeating an earlier coinbase transaction: BIP30 was
-    // not enforced when they were mined, so the repeat overwrites the earlier
-    // coin. Pinned by height AND hash (Core's IsBIP30Repeat) so no other block
-    // at the same height inherits the exemption; BIP34 made new ones impossible
-    std::vector<std::pair<uint32_t, Proto::BlockHashTy>> BIP30Repeats;
+    // Blocks that repeat an earlier coinbase transaction (see CBIP30Repeat);
+    // empty on every chain but Bitcoin
+    std::vector<CBIP30Repeat> BIP30Repeats;
 
     // Prefixes
     std::vector<uint8_t> PublicKeyPrefix;

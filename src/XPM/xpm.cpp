@@ -393,11 +393,13 @@ bool checkBlockStandalone(const XPM::Proto::Block &block,
 
 bool checkBlockContextual(const BlockIndex &index,
                           const Proto::Block &block,
-                          const Proto::CBlockValidationData&,
+                          Proto::CBlockValidationData &validation,
                           const Proto::CBlockLinkedOutputs&,
                           const ChainParams &chainParams,
                           std::string &error)
 {
+  BTC::Common::fillBIP30Context(index, chainParams, validation);
+
   bool isValid = true;
   isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
   return isValid;

@@ -278,7 +278,9 @@ static void BuildHeaderChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPa
   }
 }
 
-intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockIndex *index, BlockDatabase &blockDb)
+intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockIndex *index,
+                                                           BC::Common::ChainParams &chainParams,
+                                                           BlockDatabase &blockDb)
 {
   {
     intrusive_ptr<BC::Common::CIndexCacheObject> object(index->Serialized);
@@ -327,16 +329,21 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockInde
   }
 
   // A disk-reloaded object must satisfy the same invariant as a fresh one:
-  // validation data (txids included) is filled before any connect/disconnect
+  // validation data (txids and consensus exemptions included) is filled before any
+  // connect/disconnect. No contextual check runs here, so the exemptions are taken
+  // straight from the pinned list
   BC::Common::initializeValidationContext(*block, object.get()->validationData());
+  BTC::Common::fillBIP30Context(*index, chainParams, object.get()->validationData());
   object.get()->validationData().InputsResolved = true;
 
   return object;
 }
 
-static intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndexChecked(BC::Common::BlockIndex *index, BlockDatabase &blockDb)
+static intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndexChecked(BC::Common::BlockIndex *index,
+                                                                        BC::Common::ChainParams &chainParams,
+                                                                        BlockDatabase &blockDb)
 {
-  auto object = objectByIndex(index, blockDb);
+  auto object = objectByIndex(index, chainParams, blockDb);
   if (!object.get()) {
     LOG_F(ERROR, "Block index corrupted, failed to load block [%u]%s", index->Height, index->Header.GetHash().getHexLE().c_str());
     abort();
@@ -366,7 +373,7 @@ static bool switchTo(BC::Common::BlockIndex *newBest,
     }
     while (sb != lb) {
       newPath.push_back(lb);
-      auto object = objectByIndexChecked(sb, storage.blockDb());
+      auto object = objectByIndexChecked(sb, chainParams, storage.blockDb());
       DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), storage, sb, false);
       sb = sb->Prev;
       lb = lb->Prev;
@@ -378,14 +385,14 @@ static bool switchTo(BC::Common::BlockIndex *newBest,
     uint32_t sbHeight = sb->Height;
     while (lb->Height > sbHeight) {
       BC::Proto::Block diskBlock;
-      auto object = objectByIndexChecked(lb, storage.blockDb());
+      auto object = objectByIndexChecked(lb, chainParams, storage.blockDb());
       DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), storage, lb, false);
       lb = lb->Prev;
     }
     while (sb != lb) {
       BC::Proto::Block diskBlock;
       newPath.push_back(sb);
-      auto object = objectByIndexChecked(lb, storage.blockDb());
+      auto object = objectByIndexChecked(lb, chainParams, storage.blockDb());
       DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), storage, lb, false);
       sb = sb->Prev;
       lb = lb->Prev;
@@ -394,7 +401,7 @@ static bool switchTo(BC::Common::BlockIndex *newBest,
 
   // Connect blocks from new path
   for (auto I = newPath.rbegin(), IE = newPath.rend(); I != IE; ++I) {
-    auto object = objectByIndexChecked(*I, storage.blockDb());
+    auto object = objectByIndexChecked(*I, chainParams, storage.blockDb());
     if (!ConnectBlock(*I, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), chainParams, blockIndex, storage, false)) {
       (*I)->IndexState = BSInvalid;
       return false;
@@ -787,7 +794,7 @@ static void prepareSegmentBlocks(BC::Common::ChainParams &chainParams,
         entry.Relay = raw->Relay;
       } else {
         // Written to disk by an earlier connect and asked for again by a reorg
-        object = objectByIndexChecked(index, storage.blockDb());
+        object = objectByIndexChecked(index, chainParams, storage.blockDb());
       }
 
       BC::Proto::Block *block = object.get()->block();

@@ -226,6 +226,11 @@ void UTXODb::connectCommon(const BC::Common::BlockIndex *index,
     }
 
     const uint32_t packed = packHeight(height, isCoinbase);
+    // A coinbase below BIP34 may repeat an earlier one and land on its live coin.
+    // Such a write forfeits window annihilation: the key may already be on disk, and
+    // a later spend annihilated inside the window would leave the older value there
+    // as a live coin nobody can spend
+    const bool mayOverwrite = isCoinbase && (validationData.CoinbaseRepeat || validationData.CoinbaseMayRepeat);
     key.Tx = validationData.TxIds[i];
     for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
       if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
@@ -235,7 +240,7 @@ void UTXODb::connectCommon(const BC::Common::BlockIndex *index,
       if (infoSize) {
         key.Index = static_cast<uint32_t>(j);
         if (withLog)
-          this->add(blockId, key, info, infoSize, &packed, sizeof(packed), validationData.CoinbaseRepeat);
+          this->add(blockId, key, info, infoSize, &packed, sizeof(packed), mayOverwrite);
         cacheAdd(key, info, infoSize, height, isCoinbase);
       }
     }
