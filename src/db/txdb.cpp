@@ -30,8 +30,12 @@ bool TxDb::queryTransaction(const BC::Proto::TxHashTy &txid,
   return true;
 }
 
-bool TxDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
+bool TxDb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
 {
+  // See TxDbRef::initializeImpl
+  if (cfg->lookupBoolean(name().c_str(), "asyncFlush", true))
+    enableAsyncFlush();
+
   return true;
 }
 
@@ -42,14 +46,14 @@ void TxDb::connectImpl(const BC::Common::BlockIndex *index,
                        BlockInMemoryIndex&,
                        BlockDatabase&)
 {
+  assert(validationData.TxIds.size() == block.vtx.size());
   const auto blockId = index->Header.GetHash();
   SmallStream<4096> stream;
   // A BIP30 repeat carries a coinbase this database already holds, byte for byte
   // the same one: leaving the twin's record alone keeps the key write-once, and a
   // query answers with both inclusions from the chain params
   for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++) {
-    auto tx = block.vtx[i];
-    BC::Proto::BlockHashTy hash = tx.getTxId();
+    const auto &tx = block.vtx[i];
 
     stream.reset();
     CLogData *data = stream.reserve<CLogData>(1);
@@ -57,7 +61,7 @@ void TxDb::connectImpl(const BC::Common::BlockIndex *index,
     data->Index = i;
     BC::serialize(stream, tx);
     BC::serialize(stream, linkedOutputs.Tx[i]);
-    this->add(blockId, hash, stream.data(), stream.sizeOf());
+    this->add(blockId, validationData.TxIds[i], stream.data(), stream.sizeOf());
   }
 }
 
@@ -68,9 +72,10 @@ void TxDb::disconnectImpl(const BC::Common::BlockIndex *index,
                           BlockInMemoryIndex&,
                           BlockDatabase&)
 {
+  assert(validationData.TxIds.size() == block.vtx.size());
   const auto blockId = index->Header.GetHash();
   for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
-    remove(blockId, block.vtx[i].getTxId());
+    remove(blockId, validationData.TxIds[i]);
 }
 
 }

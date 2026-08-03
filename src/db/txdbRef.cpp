@@ -5,6 +5,7 @@
 
 #include "txdbRef.h"
 #include "common/smallStream.h"
+#include "config4cpp/Configuration.h"
 
 namespace BC {
 namespace DB {
@@ -70,8 +71,14 @@ bool TxDbRef::queryTransaction(const BC::Proto::TxHashTy &txid,
   return true;
 }
 
-bool TxDbRef::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
+bool TxDbRef::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
 {
+  // A write-once key never needs its own previous value, so a threshold flush
+  // has nothing to hand back to the connect path: it goes to a background
+  // thread. The escape hatch exists for A/B runs on the bench stand
+  if (cfg->lookupBoolean(name().c_str(), "asyncFlush", true))
+    enableAsyncFlush();
+
   return true;
 }
 
@@ -82,6 +89,7 @@ void TxDbRef::connectImpl(const BC::Common::BlockIndex *index,
                           BlockInMemoryIndex&,
                           BlockDatabase&)
 {
+  assert(validationData.TxIds.size() == block.vtx.size());
   const auto blockId = index->Header.GetHash();
   std::vector<BTC::CTxPosition> positions;
   if (!BTC::enumerateTransactions(block, index->SerializedBlockSize, positions)) {
@@ -98,7 +106,7 @@ void TxDbRef::connectImpl(const BC::Common::BlockIndex *index,
     data.Index = i;
     data.SerializedDataOffset = positions[i].Offset;
     data.SerializedDataSize = positions[i].Size;
-    this->add(blockId, block.vtx[i].getTxId(), &data, sizeof(data));
+    this->add(blockId, validationData.TxIds[i], &data, sizeof(data));
   }
 }
 
@@ -109,9 +117,10 @@ void TxDbRef::disconnectImpl(const BC::Common::BlockIndex *index,
                              BlockInMemoryIndex&,
                              BlockDatabase&)
 {
+  assert(validationData.TxIds.size() == block.vtx.size());
   const auto blockId = index->Header.GetHash();
   for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
-    this->remove(blockId, block.vtx[i].getTxId());
+    this->remove(blockId, validationData.TxIds[i]);
 }
 
 }

@@ -32,6 +32,7 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
                                 BlockInMemoryIndex&,
                                 BlockDatabase&)
 {
+  assert(validationData.TxIds.size() == block.vtx.size());
   const auto blockId = index->Header.GetHash();
   if (block.vtx.empty())
     return;
@@ -74,7 +75,7 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
     }
 
     // TODO: check kind on txid (segwit or normal)
-    flushTx(coinbaseTx.getTxId());
+    flushTx(validationData.TxIds[0]);
   }
 
   // Other transactions
@@ -101,7 +102,7 @@ void AddrHistoryDb::connectImpl(const BC::Common::BlockIndex *index,
         txDelta[address] += txout.value;
     }
 
-    flushTx(tx.getTxId());
+    flushTx(validationData.TxIds[i]);
   }
 
   for (const auto &addr: historyMap)
