@@ -815,14 +815,18 @@ void BC::Network::HttpApiConnection::onTxsRaw(rapidjson::Document&)
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onRead(AsyncOpStatus status, size_t)
+void BC::Network::HttpApiConnection::onRead(AsyncOpStatus status, size_t bytesRead)
 {
   if (status != aosSuccess) {
     HttpNode_->removeConnection(this);
     return;
   }
 
-  httpRequestSetBuffer(&ParserState, buffer + oldDataSize, sizeof(buffer) - oldDataSize);
+  // What the parser gets is what has arrived: the retained tail at the front of
+  // the buffer plus this read. Handing it the whole capacity instead makes it
+  // read past the data - a body that came in its own segment is then taken from
+  // uninitialized memory
+  httpRequestSetBuffer(&ParserState, buffer, oldDataSize + bytesRead);
 
   switch (httpRequestParse(&ParserState, nullptr, parseCb, this)) {
     case ParserResultOk : {
@@ -856,6 +860,9 @@ void BC::Network::HttpApiConnection::onWrite()
 {
   // TODO: check keep alive
   socketShutdown(aioObjectSocket(this->Socket_), SOCKET_SHUTDOWN_READWRITE);
+  // The read below lands at the head of the buffer, so nothing is retained in
+  // front of it: the tail of the request just answered is not one
+  oldDataSize = 0;
   aioRead(Socket_, buffer, sizeof(buffer), afNone, 0, readCb, this);
 }
 

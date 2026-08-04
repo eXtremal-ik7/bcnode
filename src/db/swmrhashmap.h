@@ -299,6 +299,23 @@ public:
     }
   }
 
+  // reader side: the same walk while the mutator runs. The acquire on the
+  // generation pairs with the publication release (the find() argument, per
+  // slot); the generation itself can't move under the caller, reset() is its
+  // own business. A key inserted into a table grown mid-walk is missed and a
+  // value can be one update behind: the walk is a snapshot of a moving window
+  template<typename F>
+  void forEachConcurrent(F &&fn) const {
+    const STable *t = Table_.load(std::memory_order_acquire);
+    const uint64_t gen = Gen_.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < t->Capacity; i++) {
+      const SSlot &s = t->Slots[i];
+      if (s.Gen.load(std::memory_order_acquire) != gen)
+        continue;
+      fn(static_cast<const CKey&>(s.Key), s.Ptr.load(std::memory_order_acquire));
+    }
+  }
+
   // owner-side: make sure a concurrent wave of up to n new keys never
   // needs to grow (the 3/4 load threshold stays unreachable)
   void reserve(size_t n) {

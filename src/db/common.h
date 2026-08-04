@@ -17,11 +17,13 @@
 #include <rocksdb/merge_operator.h>
 #include <rocksdb/slice_transform.h>
 #include <rocksdb/table.h>
+#include <algorithm>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
+#include <unordered_map>
 
 namespace BC {
 namespace DB {
@@ -1129,8 +1131,8 @@ private:
 //  - indexes enabled: RMW - batched MultiGet of old values, materialized Put and
 //    replacement of the rank index rows in the same atomic batch.
 // Shard key space is split into disjoint prefix regions:
-//   data rows    'd' ++ key
-//   index rows   'i' ++ indexId ++ be64(~metric) ++ key   (same shard as the data row)
+//   data rows    'd' ++ key                               -> value
+//   index rows   'i' ++ indexId ++ be64(~metric) ++ key   -> value (same shard)
 //   service keys "stamp", "basecfg", "xcfg" - outside both regions.
 // Disjointness is what makes an index droppable by a range tombstone and
 // buildable by a single scan of the data region.
@@ -1161,6 +1163,8 @@ private:
     CKey Key;
   };
 
+  // The row is covering: its value is a copy of the data row, so a head scan
+  // answers top() without going back to the data region
   struct CIndexRowKey {
     uint8_t Prefix;
     uint8_t IndexId;
@@ -1168,6 +1172,19 @@ private:
     CKey Key;
   };
 #pragma pack(pop)
+
+  // Metric-descending, ties broken by the key: the order of the index region
+  // itself, so a merged list keeps the order a plain scan would have given
+  struct CMetricOrder {
+    uint64_t (*Extract)(const CValue&);
+    bool operator()(const std::pair<CKey, CValue> &l, const std::pair<CKey, CValue> &r) const {
+      uint64_t lv = Extract(l.second);
+      uint64_t rv = Extract(r.second);
+      if (lv != rv)
+        return lv > rv;
+      return memcmp(&l.first, &r.first, sizeof(CKey)) < 0;
+    }
+  };
 
   static void makeDataRowKey(CDataRowKey &rowKey, const CKey &key) {
     rowKey.Prefix = 'd';
@@ -1421,17 +1438,20 @@ public:
           for (const auto &index: ActiveIndexes_) {
             uint64_t oldMetric = index.Def.Extract(oldValue);
             uint64_t newMetric = index.Def.Extract(newValue);
-            if (hadRow && hasRow && oldMetric == newMetric)
-              continue;
+            // The row is covering, so an unchanged metric is not an unchanged
+            // row: a tx of an address moves tx_count without moving balance.
+            // Same metric means same key though - rewrite it in place
+            bool sameKey = hadRow && hasRow && oldMetric == newMetric;
 
             CIndexRowKey rowKey;
-            if (hadRow) {
+            if (hadRow && !sameKey) {
               makeIndexRowKey(rowKey, index.Id, oldMetric, allData[i]->Key);
               batch.Delete(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)));
             }
             if (hasRow) {
               makeIndexRowKey(rowKey, index.Id, newMetric, allData[i]->Key);
-              batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)), rocksdb::Slice());
+              batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)),
+                        rocksdb::Slice(reinterpret_cast<const char*>(&newValue), sizeof(CValue)));
             }
           }
         }
@@ -1445,8 +1465,16 @@ public:
     shard.reset();
   }
 
-  // Top of a rank index: per-shard head scans merged by the metric.
-  // The result is as of the last flush, the memtable window is not indexed.
+  // Top of a rank index: per-shard head scans merged by the metric, exact as of
+  // the read - the same list a find() per key would give. Index rows hold what
+  // the last flush wrote, so the window is folded in here the way find() folds
+  // it into a point read.
+  //
+  // The scan goes deeper than the answer on purpose: the metric of the last row
+  // read from a shard bounds every key of that shard the scan missed, so a
+  // window key outside the selection can only reach the cut T if tail + delta
+  // >= T. Deeper scan, sharper threshold - and with a covering index depth
+  // costs nothing but the sequential read
   bool top(const std::string &indexName, size_t offset, size_t limit, std::vector<std::pair<CKey, CValue>> &result) const {
     const CActiveIndex *active = nullptr;
     for (const auto &index: ActiveIndexes_) {
@@ -1458,67 +1486,38 @@ public:
     if (!active)
       return false;
 
-    size_t need = offset + limit;
+    const size_t need = offset + limit;
     if (need == 0)
       return true;
 
-    std::vector<std::pair<CKey, CValue>> candidates;
-    for (size_t shardIndex = 0; shardIndex < this->BaseCfg_.ShardsNum; shardIndex++) {
-      rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
-      const uint8_t seekPrefix[2] = {'i', active->Id};
+    CMetricOrder order{active->Def.Extract};
+    size_t depth = need * 4 + 256;
 
-      std::shared_lock lock(ShardLocks_[shardIndex]);
+    for (;;) {
+      std::vector<std::pair<CKey, CValue>> candidates;
+      std::vector<uint64_t> tails;
+      for (size_t shardIndex = 0; shardIndex < this->BaseCfg_.ShardsNum; shardIndex++)
+        topFromShard(active->Id, order, shardIndex, depth, need, candidates, tails);
 
-      // Index rows are ordered by the inverted metric: iteration is metric-descending
-      std::vector<CKey> shardKeys;
-      std::unique_ptr<rocksdb::Iterator> It(storage->NewIterator(rocksdb::ReadOptions()));
-      for (It->Seek(rocksdb::Slice(reinterpret_cast<const char*>(seekPrefix), sizeof(seekPrefix)));
-           It->Valid() && shardKeys.size() < need;
-           It->Next()) {
-        rocksdb::Slice key = It->key();
-        if (key.size() < sizeof(seekPrefix) || memcmp(key.data(), seekPrefix, sizeof(seekPrefix)) != 0)
-          break;
-        // Nothing else lives under the 'i' prefix, the size check is a guard
-        if (key.size() != sizeof(CIndexRowKey))
-          continue;
-        CKey &baseKey = shardKeys.emplace_back();
-        memcpy(static_cast<void*>(&baseKey), key.data() + offsetof(CIndexRowKey, Key), sizeof(CKey));
-      }
+      std::sort(candidates.begin(), candidates.end(), order);
+      uint64_t cut = candidates.size() >= need ? order.Extract(candidates[need-1].second) : 0;
 
-      if (shardKeys.empty())
+      // Keys left unread in a shard are bounded by its tail; a tail above the
+      // cut means one of them may belong in the answer - go deeper. Normally
+      // the tail is far below (that is what depth buys), and a monotonic metric
+      // like tx_count can't push the cut down at all
+      bool deeper = false;
+      for (uint64_t tail: tails)
+        deeper |= tail > cut;
+      if (deeper) {
+        depth *= 4;
         continue;
-
-      std::vector<CDataRowKey> rowKeys;
-      rowKeys.reserve(shardKeys.size());
-      for (const auto &key: shardKeys)
-        makeDataRowKey(rowKeys.emplace_back(), key);
-      std::vector<rocksdb::Slice> keySlices;
-      keySlices.reserve(rowKeys.size());
-      for (const auto &rowKey: rowKeys)
-        keySlices.emplace_back(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
-      std::vector<std::string> values;
-      auto readResult = storage->MultiGet(rocksdb::ReadOptions(), keySlices, &values);
-      for (size_t i = 0; i < shardKeys.size(); i++) {
-        if (!readResult[i].ok() || values[i].size() != sizeof(CValue))
-          continue;
-        auto &candidate = candidates.emplace_back();
-        candidate.first = shardKeys[i];
-        memcpy(&candidate.second, values[i].data(), sizeof(CValue));
       }
+
+      for (size_t i = offset; i < candidates.size() && result.size() < limit; i++)
+        result.push_back(candidates[i]);
+      return true;
     }
-
-    auto extract = active->Def.Extract;
-    std::sort(candidates.begin(), candidates.end(), [extract](const std::pair<CKey, CValue> &l, const std::pair<CKey, CValue> &r) {
-      uint64_t lv = extract(l.second);
-      uint64_t rv = extract(r.second);
-      if (lv != rv)
-        return lv > rv;
-      return memcmp(&l.first, &r.first, sizeof(CKey)) < 0;
-    });
-
-    for (size_t i = offset; i < candidates.size() && result.size() < limit; i++)
-      result.push_back(candidates[i]);
-    return true;
   }
 
 protected:
@@ -1527,6 +1526,151 @@ protected:
   }
 
 private:
+  // One shard's part of top(): the head of its index region, the window folded
+  // into it, and the window keys from below the head that the cut still lets in.
+  // All under the shard's shared lock - pairing a disk row with a window delta
+  // is only valid while the flush that moves one into the other is kept out
+  // (the find() contract). Appends the shard's candidates; a shard with rows
+  // left unread appends its tail, the metric bound for all of them
+  void topFromShard(uint8_t indexId, const CMetricOrder &order, size_t shardIndex,
+                    size_t depth, size_t need,
+                    std::vector<std::pair<CKey, CValue>> &candidates,
+                    std::vector<uint64_t> &tails) const {
+    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+    // async flush is never enabled for merge tables, the frozen log can't exist
+    CLog<CKey> &shard = *this->activeLog(shardIndex);
+    const uint8_t seekPrefix[2] = {'i', indexId};
+
+    std::shared_lock lock(ShardLocks_[shardIndex]);
+
+    // Index rows are ordered by the inverted metric: iteration is metric-descending
+    std::vector<std::pair<CKey, CValue>> selection;
+    std::unordered_map<CKey, size_t> position;
+    uint64_t tail = 0;
+    bool exhausted = true;
+    size_t unreadable = 0;
+
+    std::unique_ptr<rocksdb::Iterator> It(storage->NewIterator(rocksdb::ReadOptions()));
+    for (It->Seek(rocksdb::Slice(reinterpret_cast<const char*>(seekPrefix), sizeof(seekPrefix)));
+         It->Valid();
+         It->Next()) {
+      rocksdb::Slice key = It->key();
+      if (key.size() < sizeof(seekPrefix) || memcmp(key.data(), seekPrefix, sizeof(seekPrefix)) != 0)
+        break;
+      // Nothing else lives under the 'i' prefix, the size check is a guard
+      if (key.size() != sizeof(CIndexRowKey))
+        continue;
+      if (selection.size() == depth) {
+        exhausted = false;
+        break;
+      }
+
+      uint64_t inverted;
+      memcpy(&inverted, key.data() + offsetof(CIndexRowKey, InvertedValue), sizeof(inverted));
+      tail = ~xbetoh<uint64_t>(inverted);
+
+      // A row without its covering value is a row of a layout that is not this
+      // one: it stays out of the selection, so the shard is not read to the end
+      // and the disk read below is back on for the window keys
+      if (It->value().size() != sizeof(CValue)) {
+        unreadable++;
+        exhausted = false;
+        continue;
+      }
+
+      auto &row = selection.emplace_back();
+      memcpy(static_cast<void*>(&row.first), key.data() + offsetof(CIndexRowKey, Key), sizeof(CKey));
+      memcpy(&row.second, It->value().data(), sizeof(CValue));
+      position.emplace(row.first, selection.size() - 1);
+    }
+
+    // The window holds the folded delta per key. Kept aside instead of merged
+    // in place: the walk may see a key twice if the map grows under it, and an
+    // overwritten delta stays right where a second merge would double-count
+    std::vector<CValue> deltas(selection.size());
+    shard.Map.forEachConcurrent([&](const CKey &key, const void *data) {
+      auto rowIt = position.find(key);
+      if (rowIt != position.end())
+        deltas[rowIt->second] = static_cast<const CHeader*>(data)->Value;
+    });
+
+    std::vector<std::pair<CKey, CValue>> merged;
+    merged.reserve(selection.size());
+    for (size_t i = 0; i < selection.size(); i++) {
+      selection[i].second.merge(deltas[i]);
+      // A key the window drove to zero is gone, the way flushImpl drops it
+      if (!selection[i].second.isNull())
+        merged.push_back(selection[i]);
+    }
+
+    // Shard-local cut. The final one is taken over all shards and can only be
+    // higher, so filtering by this one never drops a key that belongs in the top
+    uint64_t shardCut = 0;
+    if (merged.size() >= need) {
+      std::nth_element(merged.begin(), merged.begin() + (need - 1), merged.end(), order);
+      shardCut = order.Extract(merged[need-1].second);
+    }
+
+    // The rest of the window: its disk value is bounded by the tail (a shard
+    // read to the end leaves nothing on disk to bound at all), so only a delta
+    // big enough to lift that bound over the cut is worth a read
+    const uint64_t bound = exhausted ? 0 : tail;
+    std::vector<std::pair<CKey, CValue>> extras;
+    shard.Map.forEachConcurrent([&](const CKey &key, const void *data) {
+      if (position.count(key))
+        return;
+      const CValue &delta = static_cast<const CHeader*>(data)->Value;
+      int64_t metric = static_cast<int64_t>(order.Extract(delta));
+      // A delta that lowers the metric can't lift its key over the cut. A metric
+      // narrower than 64 bits reads its negatives as huge positives - that costs
+      // a read and nothing else, the value below is computed, not extrapolated
+      if (metric <= 0)
+        return;
+      if (bound <= UINT64_MAX - static_cast<uint64_t>(metric) &&
+          bound + static_cast<uint64_t>(metric) < shardCut)
+        return;
+      extras.emplace_back(key, delta);
+    });
+
+    if (!extras.empty()) {
+      // A shard read to the end has an index row for every non-null data row it
+      // holds, so a key outside the selection has no base to read - it is new in
+      // this window. Skipping the reads is what keeps a fresh database (empty
+      // index, everything still in the window) off a full-window MultiGet
+      std::vector<std::string> values;
+      std::vector<rocksdb::Status> readResult;
+      if (!exhausted) {
+        std::vector<CDataRowKey> rowKeys;
+        rowKeys.reserve(extras.size());
+        for (const auto &extra: extras)
+          makeDataRowKey(rowKeys.emplace_back(), extra.first);
+        std::vector<rocksdb::Slice> keySlices;
+        keySlices.reserve(rowKeys.size());
+        for (const auto &rowKey: rowKeys)
+          keySlices.emplace_back(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
+        readResult = storage->MultiGet(rocksdb::ReadOptions(), keySlices, &values);
+      }
+
+      for (size_t i = 0; i < extras.size(); i++) {
+        // Nothing on disk is a legal base: the key is new in this window
+        CValue value;
+        if (!readResult.empty() && readResult[i].ok() && values[i].size() == sizeof(CValue))
+          memcpy(&value, values[i].data(), sizeof(CValue));
+        value.merge(extras[i].second);
+        if (!value.isNull())
+          candidates.emplace_back(extras[i].first, value);
+      }
+    }
+
+    if (unreadable)
+      LOG_F(ERROR, "%s: index '%u' of shard %zu has %zu rows in a foreign layout, rebuild the database",
+            this->Name_.c_str(), indexId, shardIndex, unreadable);
+
+    candidates.insert(candidates.end(), merged.begin(), merged.end());
+    if (!exhausted)
+      tails.push_back(tail);
+  }
+
   // The regions are disjoint, so one index is exactly the range ['i' id, next)
   bool dropIndexRows(size_t shardIndex, uint8_t id) {
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
@@ -1591,7 +1735,8 @@ private:
       for (const CActiveIndex *index: indexes) {
         CIndexRowKey rowKey;
         makeIndexRowKey(rowKey, index->Id, index->Def.Extract(baseValue), baseKey);
-        batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)), rocksdb::Slice());
+        batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)),
+                  rocksdb::Slice(reinterpret_cast<const char*>(&baseValue), sizeof(CValue)));
         batchSize++;
       }
       if (batchSize >= 65536)
