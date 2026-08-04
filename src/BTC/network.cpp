@@ -272,28 +272,26 @@ void Peer::onMessage(AsyncOpStatus status)
     }
 
     case MessageTy::headers : {
-      if (startHeavyOperation(&heavyOperation, &heavyOperationStarted)) {
-        size_t unpackedSize = 0;
-        BC::Proto::MessageHeaders *unpacked = BC::unpack2<BC::Proto::MessageHeaders>(ReceiveStream, &unpackedSize);
-        bool hasRemainingData = ReceiveStream.remaining();
-        aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
-        if (unpacked && !hasRemainingData) {
-          onHeaders(*unpacked);
-        } else {
-          LOG_F(ERROR, "Peer %s: can't unserialize headers message", Name.c_str());
-        }
+      bool inlineProcessing = startHeavyOperation(&heavyOperation, &heavyOperationStarted);
+      size_t unpackedSize = 0;
+      BC::Proto::MessageHeaders *unpacked = BC::unpack2<BC::Proto::MessageHeaders>(ReceiveStream, &unpackedSize);
+      bool accepted = unpacked && !ReceiveStream.remaining();
 
+      // Counted before the next message can be read: last point where messages of this peer are
+      // still ordered, and the marker behind must not finish the source while this batch waits
+      HeadersMessageToken token = accepted ? HeadersMessageToken(intrusive_ptr<BlockSource>(BlockSource_)) : HeadersMessageToken();
+      aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
+
+      if (!accepted) {
+        LOG_F(ERROR, "Peer %s: can't unserialize headers message", Name.c_str());
+        operator delete(unpacked);
+      } else if (inlineProcessing) {
+        onHeaders(*unpacked, std::move(token));
         operator delete(unpacked);
       } else {
-        size_t unpackedSize = 0;
-        BC::Proto::MessageHeaders *unpacked = BC::unpack2<BC::Proto::MessageHeaders>(ReceiveStream, &unpackedSize);
-        bool hasRemainingData = ReceiveStream.remaining();
-        aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
-        if (unpacked && !hasRemainingData) {
-          MessageQueue_.push(new InternalMessage(this, MessageTy::headers, unpacked, unpackedSize, 0));
-        } else {
-          LOG_F(ERROR, "Peer %s: can't unserialize headers message", Name.c_str());
-        }
+        InternalMessage *internalMsg = new InternalMessage(this, MessageTy::headers, unpacked, unpackedSize, 0);
+        internalMsg->HeadersToken = std::move(token);
+        MessageQueue_.push(internalMsg);
       }
 
       break;
@@ -334,7 +332,7 @@ void Peer::processMessageQueue()
         break;
       }
       case MessageTy::headers :
-        peer->onHeaders(*static_cast<BC::Proto::MessageHeaders*>(internalMsg->Data));
+        peer->onHeaders(*static_cast<BC::Proto::MessageHeaders*>(internalMsg->Data), std::move(internalMsg->HeadersToken));
         break;
 
       default :
@@ -388,16 +386,17 @@ void Peer::onAddr(BC::Proto::MessageAddr &addr)
   LOG_F(WARNING, "Ignore addr message with %zu elements", addr.addr_list.size());
 }
 
-void Peer::onHeaders(BC::Proto::MessageHeaders &headers)
+void Peer::onHeaders(BC::Proto::MessageHeaders &headers, HeadersMessageToken &&token)
 {
   if (!headerChainHeight.isNull() && !headers.headers.empty() && headers.headers[0].header.hashPrevBlock != headerChainHeight) {
+    // Dropped message: the token returns its accounting to the block source
     LOG_F(INFO, "%s: invalid header sequence received", Name.c_str());
     return;
   } else {
     auto now = std::chrono::steady_clock::now();
     auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(now - HeaderDownloadingStartTime_).count();
     HeaderDownloadingStartTime_ = TimeUnknown;
-    ParentNode->Sync(this, headers.headers, static_cast<unsigned>(interval));
+    ParentNode->Sync(this, headers.headers, static_cast<unsigned>(interval), std::move(token));
   }
 }
 
@@ -602,8 +601,12 @@ void Peer::downloadHeaders(xvector<BC::Proto::BlockHashTy> &&blockLocator, const
   msg.HashStop = hashStop;
   BC::serialize(stream, msg);
 
+  // A full locator opens a new cycle: the peer picks which of its hashes to continue from, so the
+  // answer has nothing to be checked against and the previous cycle's value must go
   if (blockLocator.size() == 1)
     headerChainHeight = blockLocator[0];
+  else
+    headerChainHeight.setNull();
 
   sendMessage(MessageTy::getheaders, stream.data(), stream.sizeOf());
   HeaderDownloadingStartTime_ = std::chrono::steady_clock::now();
@@ -728,10 +731,6 @@ bool Peer::isAlive()
     result = false;
     LOG_F(WARNING, "peer %s block downloading timeout", Name.c_str());
   }
-
-  intrusive_ptr<BlockSource> blockSourcePtr(BlockSource_);
-  if (blockSourcePtr.get() && blockSourcePtr.get()->downloadFinished())
-    BlockSource_.reset();
 
   return result;
 }
@@ -892,6 +891,16 @@ void Node::Sync()
       return;
     }
 
+    // Finished source must be released, not just dropped: unreleased it keeps
+    // hasActiveBlockSource() true forever. Done before the candidate check on purpose
+    intrusive_ptr<BlockSource> blockSourcePtr(peer->BlockSource_);
+    if (blockSourcePtr.get() && blockSourcePtr.get()->downloadFinished()) {
+      if (switchBlockSource(peer, blockSourcePtr.get()))
+        peer->scheduleBlocksDownload(100*1000);
+      else
+        peer->cancelDownloadBlocks();
+    }
+
     if (peer->IsConnected) {
       hasConnectedPeers = true;
       if (!peer->BlockSource_.get() && peer->StartHeight > best->Height)
@@ -935,7 +944,7 @@ void Node::Sync(Peer *peer)
   scheduleBlocksDownload(peer);
 }
 
-void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &headers, unsigned)
+void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &headers, unsigned, HeadersMessageToken &&token)
 {
   intrusive_ptr<BlockSource> blockSourcePtr(currentPeer->BlockSource_);
   BlockSource *blockSource = blockSourcePtr.get();
@@ -946,7 +955,7 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
     std::vector<BC::Common::BlockIndex*> indexes;
     if (headers.empty()) {
       LOG_F(INFO, "%s: headers downloading finished", currentPeer->Name.c_str());
-      blockSource->setHeadersDownloadingFinished();
+      blockSource->setHeadersDownloadingFinished(token.consume(blockSource));
       return;
     }
 
@@ -987,7 +996,7 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
       firstIteration = false;
     }
 
-    blockSource->enqueue(std::move(indexes));
+    blockSource->enqueue(std::move(indexes), token.consume(blockSource));
   } else {
     if (headers.empty())
       return;

@@ -112,7 +112,9 @@ public:
   BlockIndexTy *Prev = nullptr;
   BlockIndexTy *Next = nullptr;
 
-  bool OnChain = false;
+  // On the best chain: written by connect/disconnect, read from network threads (the block source
+  // decides by it what is left to download)
+  std::atomic<bool> OnChain = false;
   // Block data went into a segment: it is the preparation frontier or below it, and the walk
   // from a candidate stops here. Cleared when the block is disconnected or its segment is
   // thrown away

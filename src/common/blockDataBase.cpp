@@ -191,6 +191,7 @@ static void applyConnect(BC::Common::BlockIndex *index,
     LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
   index->Prev->Next = index;
   index->Prepared.store(true, std::memory_order_relaxed);
+  index->OnChain.store(true, std::memory_order_relaxed);
   blockIndex.blockHeightIndex()[index->Height] = index;
   storage.add(BC::DB::Connect, index, block, linkedOutputs, validationData, blockIndex);
   blockIndex.setBest(index);
@@ -245,6 +246,7 @@ static void DisconnectBlock(BlockInMemoryIndex &blockIndex,
   index->Prev->Next = nullptr;
   // Free to be bitten into a segment again: the block is not below the frontier any more
   index->Prepared.store(false, std::memory_order_relaxed);
+  index->OnChain.store(false, std::memory_order_relaxed);
   blockIndex.blockHeightIndex()[index->Height] = nullptr;
   storage.add(BC::DB::Disconnect, index, block, linkedOutputs, validationData, blockIndex);
   // The segment this block came in is broken from here: the disconnect put the hidden outputs
@@ -1124,7 +1126,6 @@ static bool loadBlockIndexDeserializer(BlockInMemoryIndex &blockIndex, LoadingIn
       return false;
     }
 
-    index->OnChain = true;
     index->SuccessorHeaders.set(nullptr, 1);
     index->SuccessorBlocks.set(nullptr, 1);
 
@@ -1289,10 +1290,13 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
     // Below the preparation frontier from the start: a walk down from a candidate stops at the
     // connected chain, not at the genesis block
     index->Prepared.store(true, std::memory_order_relaxed);
+    // Loaded indexes hold the whole tree; on chain are those the restore walk passes
+    index->OnChain.store(true, std::memory_order_relaxed);
     index = index->Prev;
   }
 
   index->Prepared.store(true, std::memory_order_relaxed);
+  index->OnChain.store(true, std::memory_order_relaxed);
   blockIndex.blockHeightIndex()[index->Height] = index;
   if (index != blockIndex.genesis()) {
     LOG_F(ERROR, "Index for [%u]%s is broken (breaks at [%u]%s",

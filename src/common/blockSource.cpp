@@ -57,28 +57,34 @@ intrusive_ptr<BlockSource> BlockSource::getOrCreateBlockSource(atomic_intrusive_
 
 void BlockSource::processTask(Task *task)
 {
-  if (task->Indexes.empty()) {
-    HeadersLastPortion_ = true;
-    return;
-  }
-
-  BC::Common::BlockIndex *first = task->Indexes.front();
-  if ((!LastKnownIndex_ && first->Prev && first->Prev->OnChain) || LastKnownIndex_ == task->Prev) {
-    for (auto index: task->Indexes)
-      DownloadQueue_.push(index);
-    LastKnownIndex_ = task->Indexes.back();
-
-    decltype(EnqueuedTasks_)::iterator I;
-    while ( (I = EnqueuedTasks_.find(LastKnownIndex_)) != EnqueuedTasks_.end()) {
-      std::vector<BC::Common::BlockIndex*> &indexes = I->second;
-      for (auto index: indexes)
+  if (task->Type == Task::Batch && !task->Indexes.empty()) {
+    BC::Common::BlockIndex *first = task->Indexes.front();
+    if ((!LastKnownIndex_ && first->Prev && first->Prev->OnChain) || LastKnownIndex_ == task->Prev) {
+      for (auto index: task->Indexes)
         DownloadQueue_.push(index);
-      LastKnownIndex_ = indexes.back();
-      EnqueuedTasks_.erase(I);
+      LastKnownIndex_ = task->Indexes.back();
+
+      decltype(EnqueuedTasks_)::iterator I;
+      while ( (I = EnqueuedTasks_.find(LastKnownIndex_)) != EnqueuedTasks_.end()) {
+        std::vector<BC::Common::BlockIndex*> &indexes = I->second;
+        for (auto index: indexes)
+          DownloadQueue_.push(index);
+        LastKnownIndex_ = indexes.back();
+        EnqueuedTasks_.erase(I);
+      }
+    } else {
+      EnqueuedTasks_.emplace(task->Prev, std::move(task->Indexes));
     }
-  } else {
-    EnqueuedTasks_.emplace(task->Prev, std::move(task->Indexes));
+  } else if (task->Type == Task::LastPortion) {
+    HeadersLastPortion_ = true;
   }
+
+  // Headers are over when the marker is processed and nothing is left in flight. Only the combiner
+  // decrements, so whoever reaches zero sets the flag: the marker or a batch that overtook it
+  if (task->Counted)
+    HeadersInFlight_.fetch_sub(1);
+  if (HeadersLastPortion_ && HeadersInFlight_.load() == 0)
+    HeadersFinished_ = true;
 }
 
 void BlockSource::processTask(TaskHP *task)
@@ -115,14 +121,22 @@ void BlockSource::processTask(TaskHP *task)
   }
 }
 
-void BlockSource::setHeadersDownloadingFinished()
+void BlockSource::setHeadersDownloadingFinished(bool counted)
 {
   Task *task = new Task;
   task->Owner = this;
-  task->Indexes.clear();
+  task->Type = Task::LastPortion;
+  task->Counted = counted;
   Combiner_.call(task, [this](Task *task) { processTask(task); });
-  if (HeadersLastPortion_)
-    HeadersFinished_ = true;
+}
+
+void BlockSource::cancelHeadersMessage()
+{
+  Task *task = new Task;
+  task->Owner = this;
+  task->Type = Task::Cancel;
+  task->Counted = true;
+  Combiner_.call(task, [this](Task *task) { processTask(task); });
 }
 
 bool BlockSource::downloadFinished()
@@ -134,15 +148,15 @@ bool BlockSource::downloadFinished()
   return false;
 }
 
-void BlockSource::enqueue(std::vector<BC::Common::BlockIndex*> &&indexes)
+void BlockSource::enqueue(std::vector<BC::Common::BlockIndex*> &&indexes, bool counted)
 {
   Task *task = new Task;
   task->Owner = this;
-  task->Indexes = indexes;
-  task->Prev = !indexes.empty() ? task->Indexes[0]->Prev : nullptr;
+  task->Type = Task::Batch;
+  task->Counted = counted;
+  task->Indexes = std::move(indexes);
+  task->Prev = !task->Indexes.empty() ? task->Indexes[0]->Prev : nullptr;
   Combiner_.call(task, [this](Task *task) { processTask(task); });
-  if (HeadersLastPortion_)
-    HeadersFinished_ = true;
 }
 
 void BlockSource::enqueueHighPriority(std::vector<BC::Common::BlockIndex*> &&indexes)

@@ -87,6 +87,8 @@ private:
     size_t Size;
     size_t MemorySize;
     std::chrono::time_point<std::chrono::steady_clock> Time;
+    // headers only: keeps the message accounted in its block source until handled
+    HeadersMessageToken HeadersToken;
     InternalMessage() : Data(nullptr) {}
     InternalMessage(Peer *peer, MessageTy type, void *data, size_t size, size_t memorySize) : Source(peer), Type(type), Data(data), Size(size), MemorySize(memorySize) {}
     ~InternalMessage() {
@@ -135,7 +137,7 @@ private:
   void onVerAck();
   void onGetAddr();
   void onAddr(BC::Proto::MessageAddr &addr);
-  void onHeaders(BC::Proto::MessageHeaders &getheaders);
+  void onHeaders(BC::Proto::MessageHeaders &getheaders, HeadersMessageToken &&token);
   void onGetBlocks(BC::Proto::MessageGetBlocks &getblocks);
   void onGetData(BC::Proto::MessageGetData &getdata);
   void onGetHeaders(BC::Proto::MessageGetHeaders &getheaders);
@@ -394,7 +396,7 @@ public:
   // Synchronization functions
   void Sync();
   void Sync(Peer *peer);
-  void Sync(Peer *peer, const xvector<BC::Proto::BlockHeaderNet> &headers, unsigned downloadTimeInMilliSeconds);
+  void Sync(Peer *peer, const xvector<BC::Proto::BlockHeaderNet> &headers, unsigned downloadTimeInMilliSeconds, HeadersMessageToken &&token);
   // Takes ownership of the serialized block data; header and hash are parsed from it
   void Sync(Peer *peer,
             const BC::Proto::BlockHeader &header,

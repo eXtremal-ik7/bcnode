@@ -17,9 +17,19 @@ class alignas(512) BlockSource {
 public:
   struct Task {
   public:
+    enum EType {
+      Batch = 0,    // portion of headers from producer peer
+      LastPortion,  // empty headers message: peer has nothing more
+      Cancel        // accounted message dropped before it became a batch
+    };
+
+  public:
     BlockSource *Owner;
+    EType Type = Batch;
+    // Releases one message accounted by headersMessageReceived
+    bool Counted = false;
     std::vector<BC::Common::BlockIndex*> Indexes;
-    BC::Common::BlockIndex *Prev;
+    BC::Common::BlockIndex *Prev = nullptr;
     Task *Next_ = nullptr;
 
   public:
@@ -60,6 +70,7 @@ private:
   Combiner<Task> Combiner_;
   Combiner<TaskHP> CombinerHP_;
   bool HeadersLastPortion_ = false;
+  std::atomic<uint32_t> HeadersInFlight_ = 0;
   std::atomic<bool> HeadersFinished_ = false;
   std::atomic<bool> DownloadingFinished_ = false;
   BC::Common::BlockIndex *LastKnownIndex_ = nullptr;
@@ -82,11 +93,17 @@ public:
   uintptr_t ref_fetch_add(uintptr_t count) const { return Refs_.fetch_add(count); }
   uintptr_t ref_fetch_sub(uintptr_t count) const { return Refs_.fetch_sub(count); }
 
-  void setHeadersDownloadingFinished();
+  // The empty marker overtakes batches still being validated, so headers are counted from the
+  // receiving thread (last place with TCP order) until their task reaches the combiner. Every
+  // accounted message must produce exactly one task; a dropped one produces Cancel
+  void headersMessageReceived() { HeadersInFlight_.fetch_add(1); }
+  void cancelHeadersMessage();
+
+  void setHeadersDownloadingFinished(bool counted);
   bool headersDownloadingFinished() { return HeadersFinished_; }
   bool downloadFinished();
 
-  void enqueue(std::vector<BC::Common::BlockIndex*> &&indexes);
+  void enqueue(std::vector<BC::Common::BlockIndex*> &&indexes, bool counted);
   void enqueueHighPriority(std::vector<BC::Common::BlockIndex*> &&indexes);
   void processStalledBlocks();
   bool dequeue(std::vector<BC::Common::BlockIndex*> &indexes, size_t indexesNum, bool highPriorityOnly);
@@ -96,6 +113,43 @@ public:
   intrusive_ptr<BlockSource> next(unsigned threadsNum, bool createNew, bool &newSourceCreated);
 
   friend class BlockSourceList;
+};
+
+// Keeps a headers message accounted in its source until it produces a combiner task: enqueue and
+// the marker take the accounting over with consume(), any other exit posts Cancel
+class HeadersMessageToken {
+public:
+  HeadersMessageToken() {}
+  explicit HeadersMessageToken(intrusive_ptr<BlockSource> &&source) : Source_(std::move(source)) {
+    if (Source_.get())
+      Source_.get()->headersMessageReceived();
+  }
+
+  HeadersMessageToken(const HeadersMessageToken&) = delete;
+  HeadersMessageToken &operator=(const HeadersMessageToken&) = delete;
+  HeadersMessageToken(HeadersMessageToken &&token) : Source_(std::move(token.Source_)) {}
+  HeadersMessageToken &operator=(HeadersMessageToken &&token) {
+    if (Source_.get())
+      Source_.get()->cancelHeadersMessage();
+    Source_ = std::move(token.Source_);
+    return *this;
+  }
+
+  ~HeadersMessageToken() {
+    if (Source_.get())
+      Source_.get()->cancelHeadersMessage();
+  }
+
+  // Hands accounting to a task of 'source'; false if the peer switched source under the message
+  bool consume(BlockSource *source) {
+    if (!source || Source_.get() != source)
+      return false;
+    Source_ = nullptr;
+    return true;
+  }
+
+private:
+  intrusive_ptr<BlockSource> Source_;
 };
 
 class BlockSourceList {
