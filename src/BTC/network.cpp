@@ -363,7 +363,7 @@ void Peer::onVersion(BC::Proto::MessageVersion &version)
     ParentNode->OnPeerConnected(this);
   }
 
-  LOG_F(INFO, "Received version message from %s; user agent: %s, protocol: %u, start height: %u", Name.c_str(), version.user_agent.c_str(), version.version, StartHeight);
+  LOG_F(INFO, "Received version message from %s; user agent: %s, protocol: %u, start height: %u", Name.c_str(), version.user_agent.c_str(), version.version, StartHeight.load());
   sendMessage(MessageTy::verack, nullptr, 0);
 }
 
@@ -789,6 +789,11 @@ void Node::AddPeer(const HostAddress &address, const char *name, aioObject *obje
 
   PeerPtr peer = new  Peer(*BlockIndex_, *ChainParams_, *Storage_, this, Base, ThreadsNum_, WorkerThreadsNum_, address, object, name);
   if (!ptr->compare_and_exchange(nullptr, peer.get())) {
+    // Address is taken by a live peer; give the connection slot back, it was never used
+    if (object)
+      --IncomingConnections_;
+    else
+      --OutgoingConnections_;
     deleteUserEvent(peer.get()->blockDownloadEvent);
     deleteUserEvent(peer.get()->pingEvent);
     btcSocketDelete(peer.get()->Socket);
@@ -798,10 +803,40 @@ void Node::AddPeer(const HostAddress &address, const char *name, aioObject *obje
   peer.get()->start();
 }
 
+void Node::connectSeedAddresses(std::chrono::time_point<std::chrono::steady_clock> now)
+{
+  // Nothing to fill and nothing to say: AddPeer would only warn about the limit, once per address
+  if (OutgoingConnections_ >= OutgoingConnectionsLimit_)
+    return;
+
+  for (auto &seed: Seeds_) {
+    auto It = Peers.find(seed.Address);
+    if (It != Peers.end() && PeerPtr(*It->second).get()) {
+      seed.Attempts = 0;
+      continue;
+    }
+
+    if (now < seed.NextAttempt)
+      continue;
+
+    // 4, 8, 16, 32, 64 seconds: an address that never answers must not spin the connect path
+    seed.NextAttempt = now + std::chrono::seconds(4 << std::min(seed.Attempts, 4u));
+    seed.Attempts++;
+    AddPeer(seed.Address, seed.Name.c_str(), nullptr);
+  }
+}
+
 void Node::RemovePeer(Peer *peer)
 {
   if (peer->Deleted_++ == 0) {
     LOG_F(WARNING, "Peer %s: disconnecting...", peer->Name.c_str());
+    // Slot is free again: without this the limit is a ratchet and reconnects die after
+    // outgoingConnectionsLimit disconnects
+    if (peer->Incoming)
+      --IncomingConnections_;
+    else
+      --OutgoingConnections_;
+
     intrusive_ptr<BlockSource> blockSourcePtr(peer->BlockSource_);
     if (blockSourcePtr.get())
       disconnectPeerFromBlockSource(peer, blockSourcePtr);
@@ -882,8 +917,22 @@ void Node::Sync()
   unsigned interval = 4*1000000;
 
   BC::Common::BlockIndex *best = BlockIndex_->best();
+  auto now = std::chrono::steady_clock::now();
   bool hasConnectedPeers = false;
   std::vector<PeerPtr> candidatesForSync;
+
+  connectSeedAddresses(now);
+
+  // Released before the peer walk on purpose: peers leave the stuck source and become candidates in
+  // this same pass, so a new cycle of headers starts right away
+  {
+    bool newSourceCreated;
+    intrusive_ptr<BlockSource> activeSource = BlockSources_.head(0, false, newSourceCreated);
+    if (activeSource.get() && activeSource.get()->stalled(best->Height, now)) {
+      LOG_F(WARNING, "Block source made no progress for a minute, restarting headers download");
+      BlockSources_.releaseBlockSource(activeSource.get());
+    }
+  }
 
   enumeratePeers([this, best, &hasConnectedPeers, &candidatesForSync](Peer *peer) {
     if (!peer->isAlive()) {
@@ -897,7 +946,7 @@ void Node::Sync()
     if (blockSourcePtr.get() && blockSourcePtr.get()->downloadFinished()) {
       if (switchBlockSource(peer, blockSourcePtr.get()))
         peer->scheduleBlocksDownload(100*1000);
-      else
+      else if (!peer->BlockSource_.get())
         peer->cancelDownloadBlocks();
     }
 
@@ -996,6 +1045,7 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
       firstIteration = false;
     }
 
+    currentPeer->noteHeight(index->Height);
     blockSource->enqueue(std::move(indexes), token.consume(blockSource));
   } else {
     if (headers.empty())
@@ -1050,6 +1100,7 @@ void Node::Sync(Peer *peer,
     Pipeline_->attachFromNetwork(data, static_cast<uint32_t>(size), static_cast<uint32_t>(memorySize),
                                  header, hash, !scheduledBlock, &attached);
   if (result == CBlockPipeline::Staged) {
+    peer->noteHeight(attached->Height);
     if (downloadFinished) {
       // Best chain lags the received block here: blocks are still in the pipeline
       auto best = BlockIndex_->best();
@@ -1058,7 +1109,9 @@ void Node::Sync(Peer *peer,
             hash.getHexLE().c_str(), attached->Height,
             Storage_->cache().size() / 1048576.0f);
 
-      if (peer->startDownloadBlocks())
+      // Source checked before the flag is taken: a synced peer has none, and taking it would only
+      // mean giving it back in scheduleBlocksDownload
+      if (peer->BlockSource_.get() && peer->startDownloadBlocks())
         scheduleBlocksDownload(peer);
     }
 
@@ -1194,7 +1247,8 @@ bool Node::scheduleBlocksDownload(Peer *slave)
 {
   intrusive_ptr<BlockSource> blockSourcePtr(slave->BlockSource_);
   if (!blockSourcePtr.get()) {
-    LOG_F(ERROR, "no block source for peer %s", slave->Name.c_str());
+    // Peer without a source is the normal state of a synced node, nothing to report. The loop flag
+    // has to be dropped anyway, otherwise the next connect can't start downloading
     slave->cancelDownloadBlocks();
     return false;
   }
@@ -1205,7 +1259,8 @@ bool Node::scheduleBlocksDownload(Peer *slave)
     // All blocks downloaded, switch to other block source or stop downloading blocks
     if (switchBlockSource(slave, &blockSource))
       slave->scheduleBlocksDownload(100*1000);
-    else
+    else if (!slave->BlockSource_.get())
+      // Lost the switch to a concurrent one: that thread owns the loop now, don't reset it
       slave->cancelDownloadBlocks();
 
     return false;

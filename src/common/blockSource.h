@@ -79,6 +79,13 @@ private:
   tbb::concurrent_queue<BC::Common::BlockIndex*> HighPriorityDownloadQueue_;
   std::unique_ptr<BC::Common::BlockIndex*[]> LastDequeued_;
 
+  // Progress watchdog, touched by Node::Sync only
+  static constexpr int64_t StallTimeoutInSeconds = 60;
+  std::chrono::time_point<std::chrono::steady_clock> ProgressTime_ = std::chrono::time_point<std::chrono::steady_clock>::max();
+  BC::Common::BlockIndex *ProgressLastKnown_ = nullptr;
+  uint32_t ProgressBestHeight_ = 0;
+  size_t ProgressQueueSize_ = 0;
+
 private:
   void processTask(Task *task);
   void processTask(TaskHP *task);
@@ -102,6 +109,10 @@ public:
   void setHeadersDownloadingFinished(bool counted);
   bool headersDownloadingFinished() { return HeadersFinished_; }
   bool downloadFinished();
+
+  // Nothing times out an idle source by itself: a hole in the headers (a dropped message) or a peer
+  // that went quiet leaves it neither finished nor moving. Whoever calls this releases such a source
+  bool stalled(uint32_t bestHeight, std::chrono::time_point<std::chrono::steady_clock> now);
 
   void enqueue(std::vector<BC::Common::BlockIndex*> &&indexes, bool counted);
   void enqueueHighPriority(std::vector<BC::Common::BlockIndex*> &&indexes);

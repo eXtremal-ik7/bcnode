@@ -483,23 +483,27 @@ int main(int argc, char **argv)
       return 1;
   }
 
-  for (size_t i = 0; i < addressesForLookup.size(); i++) {
+  // Results are per lookup thread, and a thread takes every lookupThreadsNum-th address: its slot
+  // names the address it looked up only while there are no more addresses than threads
+  for (size_t i = 0; i < lookupThreadsNum; i++) {
     std::string addrEnumeration;
     for (size_t j = 0; j < seeds[i].size(); j++) {
       struct in_addr addr;
       addr.s_addr = seeds[i][j].ipv4;
+      char addressAsString[64];
+      snprintf(addressAsString, sizeof(addressAsString), "%s:%u", inet_ntoa(addr), static_cast<unsigned>(seeds[i][j].port));
       if (!addrEnumeration.empty())
         addrEnumeration.append(", ");
-      addrEnumeration.append(inet_ntoa(addr));
-      addrEnumeration.push_back(':');
-      addrEnumeration.append(std::to_string(seeds[i][j].port));
-      context.Node.AddPeer(seeds[i][j], inet_ntoa(addr), nullptr);
+      addrEnumeration.append(addressAsString);
+      // Connecting is Sync's business: it does the first attempt and every one after a drop
+      context.Node.AddSeedAddress(seeds[i][j], addressAsString);
     }
 
-    LOG_F(INFO, "%s -> %s", addressesForLookup[i], addrEnumeration.c_str());
+    if (!addrEnumeration.empty() && i < addressesForLookup.size())
+      LOG_F(INFO, "%s -> %s", addressesForLookup[i], addrEnumeration.c_str());
   }
 
-  LOG_F(INFO, "DNS seeds: found %zu peers", context.Node.PeerCount());
+  LOG_F(INFO, "DNS seeds: found %zu peers", context.Node.SeedCount());
 
   context.Node.Start();
 

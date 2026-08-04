@@ -139,6 +139,24 @@ void BlockSource::cancelHeadersMessage()
   Combiner_.call(task, [this](Task *task) { processTask(task); });
 }
 
+bool BlockSource::stalled(uint32_t bestHeight, std::chrono::time_point<std::chrono::steady_clock> now)
+{
+  // Chain moved, headers moved or blocks left the queue - all three stand still only if the source
+  // does
+  BC::Common::BlockIndex *lastKnown = LastKnownIndex_;
+  size_t queueSize = DownloadQueue_.unsafe_size();
+  if (ProgressTime_ == std::chrono::time_point<std::chrono::steady_clock>::max() ||
+      bestHeight != ProgressBestHeight_ || lastKnown != ProgressLastKnown_ || queueSize != ProgressQueueSize_) {
+    ProgressTime_ = now;
+    ProgressBestHeight_ = bestHeight;
+    ProgressLastKnown_ = lastKnown;
+    ProgressQueueSize_ = queueSize;
+    return false;
+  }
+
+  return std::chrono::duration_cast<std::chrono::seconds>(now - ProgressTime_).count() >= StallTimeoutInSeconds;
+}
+
 bool BlockSource::downloadFinished()
 {
   if (DownloadingFinished_)

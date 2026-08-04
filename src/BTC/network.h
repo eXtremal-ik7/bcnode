@@ -206,7 +206,8 @@ private:
   bool VerackReceived = false;
   bool IsConnected = false;
 
-  uint32_t StartHeight = 0;
+  // Peer height: the version message gives the value at handshake, noteHeight keeps it current
+  std::atomic<uint32_t> StartHeight = 0;
   uint32_t ProtocolVersion = 0;
   uint64_t Services = 0;
   std::string UserAgent_;
@@ -244,6 +245,17 @@ private:
   std::unique_ptr<uint64_t[]> SentCommands_;
 
   bool isAlive();
+
+  // Sync candidates are chosen by peer height, so a peer that moved on while connected must not
+  // look like it stayed at its handshake height
+  void noteHeight(uint32_t height) {
+    if (height == std::numeric_limits<uint32_t>::max())
+      return;
+    uint32_t known = StartHeight.load(std::memory_order_relaxed);
+    while (height > known && !StartHeight.compare_exchange_weak(known, height))
+      continue;
+  }
+
   unsigned averageDownloadTime() const { return avg(DownloadTimes_, DownloadTimesIdx_, 500u); }
   unsigned averagePing() const { return avg(PingTimes_, PingTimesIdx_, 100u); }
 
@@ -343,9 +355,18 @@ private:
   std::atomic<unsigned> OutgoingConnections_ = 0;
   std::atomic<unsigned> IncomingConnections_ = 0;
 
+  // Addresses to keep an outgoing connection to (DNS seeds, addnode, forceNode)
+  struct SeedAddress {
+    HostAddress Address;
+    std::string Name;
+    std::chrono::time_point<std::chrono::steady_clock> NextAttempt;
+    unsigned Attempts = 0;
+  };
+
   // Synchonization data
   uint64_t LocalHostNonce_;
   BlockSourceList BlockSources_;
+  std::vector<SeedAddress> Seeds_;
   aioUserEvent *SyncEvent = nullptr;
 
   static void SyncCb(aioUserEvent*, void *arg) { static_cast<Node*>(arg)->Sync(); }
@@ -383,6 +404,9 @@ public:
   }
 
   size_t PeerCount() { return Peers.size(); }
+  size_t SeedCount() { return Seeds_.size(); }
+  // Registered before Start(); connecting them is Sync's business, at start and after every drop
+  void AddSeedAddress(const HostAddress &address, const char *name) { Seeds_.push_back({address, name, std::chrono::steady_clock::now(), 0}); }
   void AddPeer(const HostAddress &address, const char *name, aioObject *object);
   void RemovePeer(Peer *peer);
   void OnPeerConnected(Peer *peer);
@@ -419,6 +443,7 @@ public:
 
 private:
   bool StartTcpServer(HostAddress, const char *name, aioObject **socket, aioAcceptCb callback);
+  void connectSeedAddresses(std::chrono::time_point<std::chrono::steady_clock> now);
   void buildBlockLocator(xvector<BC::Proto::BlockHashTy> &hashes, BC::Common::BlockIndex *start);
 
   bool connectPeerToBlockSource(Peer *peer, BlockSource *current, BlockSource *next, bool isProducer);
