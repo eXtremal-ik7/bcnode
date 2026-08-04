@@ -6,6 +6,7 @@
 #include "archive.h"
 #include "addrdb.h"
 #include "addrHistoryDb.h"
+#include "spentdb.h"
 #include "txdbRef.h"
 #include "txdb.h"
 #include "storage.h"
@@ -64,6 +65,8 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
       AllDb_.emplace_back(new TxDbRef());
     } else if (strcmp(enabledDatabases[i], "txdb.full") == 0) {
       AllDb_.emplace_back(new TxDb());
+    } else if (strcmp(enabledDatabases[i], "spentdb") == 0) {
+      AllDb_.emplace_back(new SpentDb());
     } else {
       LOG_F(ERROR, "Unknown database type: %s", enabledDatabases[i]);
       return false;
@@ -74,6 +77,7 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   TransactionDb_ = setupHandler<ITransactionDb>(cfg, "tx", EIQueryTransaction, dbIndexMap, AllDb_);
   AddrHistoryDb_ = setupHandler<IAddrHistoryDb>(cfg, "addrhistory", EIQueryAddrHistory, dbIndexMap, AllDb_);
   AddrDb_ = setupHandler<IAddrDb>(cfg, "addr", EIQueryAddr, dbIndexMap, AllDb_);
+  SpentDb_ = setupHandler<ISpentDb>(cfg, "spent", EIQuerySpent, dbIndexMap, AllDb_);
 
   BC::Common::BlockIndex *utxoBestBlock;
   std::vector<BC::Common::BlockIndex*> utxoDisconnect;

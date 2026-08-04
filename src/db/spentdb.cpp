@@ -1,0 +1,110 @@
+// Copyright (c) 2020 Ivan K.
+// Copyright (c) 2020 The BCNode developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include "spentdb.h"
+#include "config4cpp/Configuration.h"
+
+namespace BC {
+namespace DB {
+
+bool SpentDb::querySpent(const BC::Proto::TxHashTy &txid, uint32_t index, CQuerySpentResult &result)
+{
+  COutpointKey key;
+  key.Tx = txid;
+  key.Index = index;
+
+  result.Found = false;
+  this->find(key, [&result](const void *data, size_t size) {
+    // A record of another width belongs to a database built by another
+    // version: report the output as unspent rather than decode garbage
+    if (size != sizeof(CSpentValue))
+      return;
+    // the record is the struct byte for byte, but a blob member makes the type
+    // non-trivially-copyable for the compiler
+    memcpy(static_cast<void*>(&result.Value), data, sizeof(CSpentValue));
+    result.Found = true;
+  });
+
+  return true;
+}
+
+bool SpentDb::querySpentOutputs(const BC::Proto::TxHashTy &txid, uint32_t count, std::vector<CQuerySpentResult> &result)
+{
+  result.clear();
+  result.resize(count);
+  for (uint32_t i = 0; i < count; i++)
+    querySpent(txid, i, result[i]);
+
+  return true;
+}
+
+bool SpentDb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
+{
+  // Nothing on the connect path reads a mark back, so a threshold flush has
+  // nothing to hand over and goes to a background thread. The escape hatch
+  // exists for A/B runs on the bench stand
+  if (cfg->lookupBoolean(name().c_str(), "asyncFlush", true))
+    enableAsyncFlush();
+
+  return true;
+}
+
+void SpentDb::connectImpl(const BC::Common::BlockIndex *index,
+                          const BC::Proto::Block &block,
+                          const BC::Proto::CBlockLinkedOutputs&,
+                          const BC::Proto::CBlockValidationData &validationData,
+                          BlockInMemoryIndex&,
+                          BlockDatabase&)
+{
+  assert(validationData.TxIds.size() == block.vtx.size());
+
+  COutpointKey key;
+  CSpentValue value;
+  value.Height = index->Height;
+
+  // vtx[0] is the coinbase and spends nothing. Same-block and same-run pairs
+  // get their mark like any other spend: the pair skip of the utxo db hides an
+  // output that was still created and still spent, and this database is the
+  // only place that says so
+  for (size_t i = 1, ie = block.vtx.size(); i != ie; i++) {
+    const auto &tx = block.vtx[i];
+    value.SpentBy = validationData.TxIds[i];
+    for (size_t j = 0, je = tx.txIn.size(); j != je; j++) {
+      key.Tx = tx.txIn[j].previousOutputHash;
+      key.Index = tx.txIn[j].previousOutputIndex;
+      value.InputIndex = static_cast<uint32_t>(j);
+      // An outpoint is spent once on the chain this database follows, so
+      // nothing below can hold a mark for it. The exception is a BIP30 twin
+      // re-spent and reorged away inside one window, which would leave the
+      // stale mark of the first spend on disk: reachable only below the BIP30
+      // activation, and not worth a read on the write path
+      this->putNew(key, &value, sizeof(value));
+    }
+  }
+}
+
+void SpentDb::disconnectImpl(const BC::Common::BlockIndex*,
+                             const BC::Proto::Block &block,
+                             const BC::Proto::CBlockLinkedOutputs&,
+                             const BC::Proto::CBlockValidationData&,
+                             BlockInMemoryIndex&,
+                             BlockDatabase&)
+{
+  COutpointKey key;
+
+  // Only the marks this block wrote go away. Its own outputs cannot be spent
+  // while it is being disconnected - whoever spent them was disconnected first
+  for (size_t i = 1, ie = block.vtx.size(); i != ie; i++) {
+    const auto &tx = block.vtx[i];
+    for (size_t j = 0, je = tx.txIn.size(); j != je; j++) {
+      key.Tx = tx.txIn[j].previousOutputHash;
+      key.Index = tx.txIn[j].previousOutputIndex;
+      this->erase(key);
+    }
+  }
+}
+
+}
+}

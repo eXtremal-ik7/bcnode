@@ -994,6 +994,13 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   }
 
   const BC::Proto::TxHashTy txid = tx.getTxId();
+
+  // "spent by" for every output at once. Without spentdb the fields below stay
+  // null: the reply keeps its shape whatever the node is configured with
+  std::vector<DB::CQuerySpentResult> spent;
+  if (Storage_->SpentDb_)
+    Storage_->SpentDb_->querySpentOutputs(txid, static_cast<uint32_t>(tx.txOut.size()), spent);
+
   txObject.addString("txid", txid.getHexLE());
   txObject.addString("hash", tx.getWTxid().getHexLE());
   txObject.addString("block_hash", index->Header.GetHash().getHexLE());
@@ -1090,9 +1097,21 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
         outputObject.addString("value", FormatMoney(txOut.value, BC::Configuration::RationalPartSize));
         outputObject.addString("script_pub_key", bin2hexLowerCase(txOut.pkScript.begin(), txOut.pkScript.size()));
 
-        // NOTE: not implemented!
-        outputObject.addNull("spent");
-        outputObject.addNull("spent_in_txid");
+        if (i < spent.size() && spent[i].Found) {
+          outputObject.addBoolean("spent", true);
+          outputObject.addString("spent_in_txid", spent[i].Value.SpentBy.getHexLE());
+          outputObject.addInt("spent_in_input", spent[i].Value.InputIndex);
+          outputObject.addInt("spent_at_height", spent[i].Value.Height);
+        } else {
+          // No spentdb: unknown, not unspent
+          if (Storage_->SpentDb_)
+            outputObject.addBoolean("spent", false);
+          else
+            outputObject.addNull("spent");
+          outputObject.addNull("spent_in_txid");
+          outputObject.addNull("spent_in_input");
+          outputObject.addNull("spent_at_height");
+        }
       }
     }
   }

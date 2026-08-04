@@ -57,6 +57,7 @@ public:
   ITransactionDb *TransactionDb_ = nullptr;
   IAddrHistoryDb *AddrHistoryDb_ = nullptr;
   IAddrDb *AddrDb_ = nullptr;
+  ISpentDb *SpentDb_ = nullptr;
 };
 
 }

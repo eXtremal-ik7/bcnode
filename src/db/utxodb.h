@@ -7,23 +7,12 @@
 
 #include "db/common.h"
 #include "db/keyHash.h"
+#include "db/outpointKey.h"
 #include "db/swmrcache.h"
 #include "BTC/script.h"
 
-struct CUnspentOutputKey {
-  BC::Proto::TxHashTy Tx;
-  uint32_t Index;
-
-  friend bool operator==(const CUnspentOutputKey& a, const CUnspentOutputKey& b) { return a.Tx == b.Tx && a.Index == b.Index; }
-};
-
-template<>
-class std::hash<CUnspentOutputKey> {
-public:
-  size_t operator()(const CUnspentOutputKey &key) const noexcept {
-    return static_cast<size_t>(hashOutpoint(key.Tx.begin(), key.Index).H1);
-  }
-};
+// The key is the outpoint shared with spentdb; the name says what it means here
+using CUnspentOutputKey = COutpointKey;
 
 namespace BC {
 namespace DB {

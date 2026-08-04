@@ -15,11 +15,6 @@ namespace DB {
 
 static const char *CacheDumpFileName = "cache.dat";
 
-// the raw on-disk key is Tx immediately followed by Index; the field-wise
-// copy in warmupFromDb() relies on it
-static_assert(sizeof(CUnspentOutputKey) == sizeof(BC::Proto::TxHashTy) + sizeof(uint32_t),
-              "unexpected padding in CUnspentOutputKey");
-
 // (creationHeight << 1) | isCoinbase, appended to every on-disk value
 static inline uint32_t packHeight(uint32_t height, bool isCoinbase)
 {

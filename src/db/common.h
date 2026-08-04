@@ -1774,7 +1774,8 @@ static inline size_t firstTx(const BC::Proto::CBlockValidationData &validationDa
 enum EInterfaceTy {
   EIQueryTransaction = 0,
   EIQueryAddrHistory,
-  EIQueryAddr
+  EIQueryAddr,
+  EIQuerySpent
 };
 
 struct CQueryTransactionResult {
@@ -1860,6 +1861,32 @@ public:
   virtual bool queryAddr(const BC::Script::CAddress &address, CAddrValue &result) = 0;
   virtual bool queryTop(const std::string &index, size_t offset, size_t limit,
                         std::vector<std::pair<BC::Script::CAddress, CAddrValue>> &result) = 0;
+};
+
+// What spentdb stores per spent outpoint: the input that took it. The height
+// bounds a walk down the spend graph without reading the spending transaction
+#pragma pack(push, 1)
+struct CSpentValue {
+  BC::Proto::TxHashTy SpentBy;  // txid of the spending transaction
+  uint32_t InputIndex;          // its input taking this output
+  uint32_t Height;              // height of the block holding the spender
+};
+#pragma pack(pop)
+
+static_assert(sizeof(CSpentValue) == sizeof(BC::Proto::TxHashTy) + 2 * sizeof(uint32_t),
+              "unexpected padding in CSpentValue");
+
+struct CQuerySpentResult {
+  CSpentValue Value;
+  bool Found = false;
+};
+
+class ISpentDb {
+public:
+  virtual bool querySpent(const BC::Proto::TxHashTy &txid, uint32_t index, CQuerySpentResult &result) = 0;
+  // Every output of one transaction, result sized to count: what a transaction
+  // page needs, one call instead of a lookup per output
+  virtual bool querySpentOutputs(const BC::Proto::TxHashTy &txid, uint32_t count, std::vector<CQuerySpentResult> &result) = 0;
 };
 
 }

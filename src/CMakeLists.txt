@@ -175,6 +175,7 @@ set(BASE_SOURCES
   db/archive.cpp
   db/addrdb.cpp
   db/addrHistoryDb.cpp
+  db/spentdb.cpp
   db/storage.cpp
   db/txdb.cpp
   db/txdbRef.cpp
