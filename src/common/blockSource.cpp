@@ -90,19 +90,22 @@ void BlockSource::processTask(Task *task)
 void BlockSource::processTask(TaskHP *task)
 {
   if (task->TaskType == TaskHP::ProcessStalledBlocks && HighPriorityDownloadQueue_.empty()) {
-    // Find last dequeued block for all threads
-    BC::Common::BlockIndex *index = nullptr;
+    // Anchor: max of the dequeue slots and the received frontier. Slots alone fail: a retry
+    // dequeue drags them below the holes, and a fresh source after a restart has none at all
+    BC::Common::BlockIndex *index = task->Frontier;
     for (unsigned i = 0; i < ThreadsNum_; i++) {
       if (LastDequeued_[i] && (!index || LastDequeued_[i]->Height > index->Height))
         index = LastDequeued_[i];
     }
 
-    // Collect stalled blocks
-    // Move from last dequeued block to first on-chain block
+    // Collect stalled blocks: anchor down to first on-chain block. A block never asked for is
+    // stalled too - its queue entry died with the old source, nobody else will ask
     auto now = std::chrono::steady_clock::now();
     std::vector<BC::Common::BlockIndex*> stalledBlocks;
     while (index && !index->OnChain) {
-      if (!haveBlockData(index->IndexState) && std::chrono::duration_cast<std::chrono::seconds>(now-index->DownloadingStartTime).count() >= 8)
+      if (!haveBlockData(index->IndexState) &&
+          (index->DownloadingStartTime == std::chrono::time_point<std::chrono::steady_clock>::max() ||
+           std::chrono::duration_cast<std::chrono::seconds>(now-index->DownloadingStartTime).count() >= 8))
         stalledBlocks.push_back(index);
       index = index->Prev;
     }
@@ -183,11 +186,12 @@ void BlockSource::enqueueHighPriority(std::vector<BC::Common::BlockIndex*> &&ind
     HighPriorityDownloadQueue_.push(index);
 }
 
-void BlockSource::processStalledBlocks()
+void BlockSource::processStalledBlocks(BC::Common::BlockIndex *frontier)
 {
   TaskHP *task = new TaskHP;
   task->TaskType = TaskHP::ProcessStalledBlocks;
   task->Owner = this;
+  task->Frontier = frontier;
   CombinerHP_.call(task, [this](TaskHP *task) { processTask(task); });
 }
 

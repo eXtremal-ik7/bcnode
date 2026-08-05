@@ -48,6 +48,8 @@ public:
   public:
     Type TaskType;
     BlockSource *Owner;
+    // Walk anchor from the node: survives source restarts, unlike LastDequeued_
+    BC::Common::BlockIndex *Frontier = nullptr;
     std::vector<BC::Common::BlockIndex*> Indexes;
     TaskHP *Next_ = nullptr;
 
@@ -116,7 +118,7 @@ public:
 
   void enqueue(std::vector<BC::Common::BlockIndex*> &&indexes, bool counted);
   void enqueueHighPriority(std::vector<BC::Common::BlockIndex*> &&indexes);
-  void processStalledBlocks();
+  void processStalledBlocks(BC::Common::BlockIndex *frontier);
   bool dequeue(std::vector<BC::Common::BlockIndex*> &indexes, size_t indexesNum, bool highPriorityOnly);
   BC::Common::BlockIndex *lastKnownIndex() { return LastKnownIndex_; }
 

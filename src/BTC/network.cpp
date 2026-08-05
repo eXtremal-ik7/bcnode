@@ -1101,20 +1101,37 @@ void Node::Sync(Peer *peer,
                                  header, hash, !scheduledBlock, &attached);
   if (result == CBlockPipeline::Staged) {
     peer->noteHeight(attached->Height);
-    if (downloadFinished) {
+
+    // Anchor for the stalled-block collector: survives source restarts, so holes below anything
+    // ever received stay requestable during cache overflow. Orphans have no height to anchor on
+    if (attached->Height != std::numeric_limits<uint32_t>::max()) {
+      BC::Common::BlockIndex *frontier = ReceivedFrontier_.load(std::memory_order_relaxed);
+      while ((!frontier || attached->Height > frontier->Height) &&
+             !ReceivedFrontier_.compare_exchange_weak(frontier, attached, std::memory_order_relaxed))
+        ;
+    }
+  } else {
+    // Already have this block
+    operator delete(data);
+  }
+
+  if (downloadFinished) {
+    if (result == CBlockPipeline::Staged) {
       // Best chain lags the received block here: blocks are still in the pipeline
       auto best = BlockIndex_->best();
       LOG_F(INFO, "Best chain: %s(%u); Last received: %s(%u); cache: %.3lfM",
             best->Header.GetHash().getHexLE().c_str(), best->Height,
             hash.getHexLE().c_str(), attached->Height,
             Storage_->cache().size() / 1048576.0f);
-
-      // Source checked before the flag is taken: a synced peer has none, and taking it would only
-      // mean giving it back in scheduleBlocksDownload
-      if (peer->BlockSource_.get() && peer->startDownloadBlocks())
-        scheduleBlocksDownload(peer);
     }
 
+    // The batch is over whatever the pipeline said about its last block: a duplicate delivered
+    // by a faster peer first must not kill the download loop. A synced peer has no source
+    if (peer->BlockSource_.get() && peer->startDownloadBlocks())
+      scheduleBlocksDownload(peer);
+  }
+
+  if (result == CBlockPipeline::Staged) {
     // Nothing of the block is known yet, its predecessor included: ask for the chain it hangs on
     if (!scheduledBlock && attached->Height == std::numeric_limits<uint32_t>::max()) {
       LOG_F(INFO, "%s: orhpan block %s received, node possible not synchronized", peer->Name.c_str(), hash.getHexLE().c_str());
@@ -1134,13 +1151,7 @@ void Node::Sync(Peer *peer,
         }
       }
     }
-
-    return;
   }
-
-  // Already have this block
-  operator delete(data);
-  return;
 }
 void Node::Sync(std::vector<BC::Proto::BlockHashTy>&)
 {
@@ -1285,7 +1296,7 @@ bool Node::scheduleBlocksDownload(Peer *slave)
     // Block source is empty at this moment
     if (blockSource.headersDownloadingFinished() || blockCacheOverflow) {
       // Collect stalled blocks
-      blockSource.processStalledBlocks();
+      blockSource.processStalledBlocks(ReceivedFrontier_.load(std::memory_order_relaxed));
       if (!blockSource.dequeue(indexes, batchSize, blockCacheOverflow)) {
         slave->scheduleBlocksDownload(1*1000000);
         return false;

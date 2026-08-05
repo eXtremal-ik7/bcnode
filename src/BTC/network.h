@@ -366,6 +366,9 @@ private:
   // Synchonization data
   uint64_t LocalHostNonce_;
   BlockSourceList BlockSources_;
+  // Highest block ever received from the network (monotone, orphans excluded). Anchors the
+  // stalled-block collector across block source restarts: holes below it must stay requestable
+  std::atomic<BC::Common::BlockIndex*> ReceivedFrontier_ = nullptr;
   std::vector<SeedAddress> Seeds_;
   aioUserEvent *SyncEvent = nullptr;
 
