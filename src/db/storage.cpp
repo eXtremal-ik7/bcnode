@@ -56,31 +56,45 @@ bool Storage::run(std::function<void()> errorHandler)
   return true;
 }
 
-void Storage::add(ActionTy type,
-                  BC::Common::BlockIndex *index,
-                  const BC::Proto::Block &block,
-                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                  const BC::Proto::CBlockValidationData &validationData,
-                  BlockInMemoryIndex &blockIndex,
-                  bool wakeUp)
+static size_t blockMemory(BC::Common::BlockIndex *index)
 {
-  switch (type) {
-    case Connect :
-      UTXODb_.connect(index, block, linkedOutputs, validationData, blockIndex, *BlockDb_);
-      break;
-    case Disconnect:
-      UTXODb_.disconnect(index, block, linkedOutputs, validationData, blockIndex, *BlockDb_);
-      break;
-    default:
-      break;
+  BC::Common::CIndexCacheObject *object = index->Serialized.get();
+  return object ? object->blockData().memorySize() : 0;
+}
+
+void Storage::connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, bool wakeUp)
+{
+  if (batch.empty())
+    return;
+
+  UTXODb_.connect(batch, blockIndex, *BlockDb_);
+
+  // The archive databases get the same unit, the mark on the last block telling the
+  // storage thread where it ends
+  for (size_t i = 0; i < batch.size(); i++) {
+    BC::Common::BlockIndex *index = batch[i].Index;
+    const size_t memory = blockMemory(index);
+    QueuedMemory_.fetch_add(memory, std::memory_order_relaxed);
+    Queue_.emplace(Connect, index, memory, i + 1 == batch.size());
   }
 
-  size_t memory = 0;
-  if (BC::Common::CIndexCacheObject *object = index->Serialized.get())
-    memory = object->blockData().memorySize();
-  QueuedMemory_.fetch_add(memory, std::memory_order_relaxed);
+  if (wakeUp)
+    userEventActivate(NewTaskEvent_);
+}
 
-  Queue_.emplace(type, index, memory);
+void Storage::disconnect(BC::Common::BlockIndex *index,
+                         const BC::Proto::Block &block,
+                         const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                         const BC::Proto::CBlockValidationData &validationData,
+                         BlockInMemoryIndex &blockIndex,
+                         bool wakeUp)
+{
+  UTXODb_.disconnect(index, block, linkedOutputs, validationData, blockIndex, *BlockDb_);
+
+  const size_t memory = blockMemory(index);
+  QueuedMemory_.fetch_add(memory, std::memory_order_relaxed);
+  Queue_.emplace(Disconnect, index, memory);
+
   if (wakeUp)
     userEventActivate(NewTaskEvent_);
 }
@@ -102,38 +116,70 @@ void Storage::onTimer()
   userEventStartTimer(TimerEvent_, 10*1000000, 1);
 }
 
+// The queue side of one connect: the archive databases take the unit whole, then the
+// block data of every block in it goes to disk
+void Storage::applyBatch()
+{
+  if (Batch_.empty())
+    return;
+
+  Archive_->connect(Batch_, *BlockIndex_, *BlockDb_);
+
+  bool needFlush = false;
+  for (const CBlockRef &ref: Batch_) {
+    if (!BlockDb_->writeBlock(ref.Index, &needFlush))
+      ErrorHandler_();
+    CachedBlocks_.push_back(ref.Index);
+  }
+
+  if (needFlush)
+    flush();
+
+  QueuedMemory_.fetch_sub(BatchMemory_, std::memory_order_relaxed);
+  BatchMemory_ = 0;
+  Batch_.clear();
+  // Only now: the refs above point into these
+  BatchObjects_.clear();
+}
+
 void Storage::onQueuePush()
 {
   Task task;
-  bool needFlush = false;
   while (Queue_.try_pop(task)) {
-    intrusive_ptr<BTC::Common::CIndexCacheObject> object = objectByIndex(task.Index, *ChainParams_, *BlockDb_);
-    assert(object.get());
-    switch (task.Type) {
-      case Connect :
-        Archive_->connect(task.Index, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationDataConst(), *BlockIndex_, *BlockDb_);
-        if (!BlockDb_->writeBlock(task.Index, &needFlush))
-          ErrorHandler_();
-        CachedBlocks_.push_back(task.Index);
-        break;
-      case Disconnect :
+    // Anything that is not a connect ends the batch being collected: the queue is the
+    // order the chain moved in
+    if (task.Type != Connect) {
+      applyBatch();
+      bool needFlush = false;
+      if (task.Type == Disconnect) {
+        intrusive_ptr<BC::Common::CIndexCacheObject> object = objectByIndex(task.Index, *ChainParams_, *BlockDb_);
+        assert(object.get());
         Archive_->disconnect(task.Index, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationDataConst(), *BlockIndex_, *BlockDb_);
-        break;
-      case WriteData :
+      } else {
         if (!BlockDb_->writeBlock(task.Index, &needFlush))
           ErrorHandler_();
         CachedBlocks_.push_back(task.Index);
-        break;
+      }
 
+      QueuedMemory_.fetch_sub(task.Memory, std::memory_order_relaxed);
+      if (needFlush)
+        flush();
+      continue;
     }
 
-    QueuedMemory_.fetch_sub(task.Memory, std::memory_order_relaxed);
+    intrusive_ptr<BC::Common::CIndexCacheObject> object = objectByIndex(task.Index, *ChainParams_, *BlockDb_);
+    assert(object.get());
+    Batch_.push_back(CBlockRef{task.Index, object.get()->block(), &object.get()->linkedOutputs(), &object.get()->validationDataConst()});
+    BatchObjects_.push_back(object);
+    BatchMemory_ += task.Memory;
 
-    if (needFlush) {
-      flush();
-      needFlush = false;
-    }
+    if (task.BatchEnd)
+      applyBatch();
   }
+
+  // Ran dry mid-batch: the mutator is still pushing, and what is here is a chain
+  // position all the same - a prefix of the unit, ending at a block boundary
+  applyBatch();
 
   // A full cache is released only by flush; the throttled loaders wait on it
   if (BlockCache.overflow())

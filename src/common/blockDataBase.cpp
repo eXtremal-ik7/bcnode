@@ -177,6 +177,16 @@ static inline void QueueNextHeaders(std::deque<BC::Common::BlockIndex*> &queue, 
   }
 }
 
+// Index bookkeeping of a connected block: the chain, the height index and the flags. The
+// databases hear about it separately - one call per batch, not per block
+static void markConnected(BC::Common::BlockIndex *index, BlockInMemoryIndex &blockIndex)
+{
+  index->Prev->Next = index;
+  index->Prepared.store(true, std::memory_order_relaxed);
+  index->OnChain.store(true, std::memory_order_relaxed);
+  blockIndex.blockHeightIndex()[index->Height] = index;
+}
+
 // Everything a connect changes; checks belong to the caller, so a segment can make them for all
 // of its blocks before the first one lands
 static void applyConnect(BC::Common::BlockIndex *index,
@@ -189,11 +199,9 @@ static void applyConnect(BC::Common::BlockIndex *index,
 {
   if (!silent)
     LOG_F(INFO, "Connect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
-  index->Prev->Next = index;
-  index->Prepared.store(true, std::memory_order_relaxed);
-  index->OnChain.store(true, std::memory_order_relaxed);
-  blockIndex.blockHeightIndex()[index->Height] = index;
-  storage.add(BC::DB::Connect, index, block, linkedOutputs, validationData, blockIndex);
+  markConnected(index, blockIndex);
+  BC::DB::CBlockRef ref{index, &block, &linkedOutputs, &validationData};
+  storage.connect(BC::DB::CBlockBatch(&ref, 1), blockIndex);
   blockIndex.setBest(index);
 }
 
@@ -248,7 +256,7 @@ static void DisconnectBlock(BlockInMemoryIndex &blockIndex,
   index->Prepared.store(false, std::memory_order_relaxed);
   index->OnChain.store(false, std::memory_order_relaxed);
   blockIndex.blockHeightIndex()[index->Height] = nullptr;
-  storage.add(BC::DB::Disconnect, index, block, linkedOutputs, validationData, blockIndex);
+  storage.disconnect(index, block, linkedOutputs, validationData, blockIndex);
   // The segment this block came in is broken from here: the disconnect put the hidden outputs
   // back, and every later connect of it must be plain. Only utxodb reads the marks, and it took
   // its half of the disconnect above, on this thread
@@ -952,11 +960,19 @@ bool connectSegment(BlockInMemoryIndex &blockIndex,
   }
 
   if (result) {
+    // The segment reaches the databases as one batch - the same unit it was prepared and
+    // judged as. The index bookkeeping stays per block and goes first: it is what makes
+    // these blocks the chain the databases are about to be told about
+    std::vector<BC::DB::CBlockRef> batch;
+    batch.reserve(segment.Objects.size());
     for (CSegment::CObject &entry: segment.Objects) {
       BC::Common::CIndexCacheObject *object = entry.Object.get();
-      applyConnect(entry.Index, *object->block(), object->linkedOutputs(), object->validationData(),
-                   blockIndex, storage, true);
+      markConnected(entry.Index, blockIndex);
+      batch.push_back(BC::DB::CBlockRef{entry.Index, object->block(), &object->linkedOutputs(), &object->validationData()});
     }
+
+    storage.connect(batch, blockIndex);
+    blockIndex.setBest(segment.Objects.back().Index);
   }
 
 

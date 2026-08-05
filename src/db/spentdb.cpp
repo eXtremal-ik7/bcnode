@@ -51,36 +51,35 @@ bool SpentDb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
   return true;
 }
 
-void SpentDb::connectImpl(const BC::Common::BlockIndex *index,
-                          const BC::Proto::Block &block,
-                          const BC::Proto::CBlockLinkedOutputs&,
-                          const BC::Proto::CBlockValidationData &validationData,
-                          BlockInMemoryIndex&,
-                          BlockDatabase&)
+void SpentDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
-  assert(validationData.TxIds.size() == block.vtx.size());
-
   COutpointKey key;
   CSpentValue value;
-  value.Height = index->Height;
 
-  // vtx[0] is the coinbase and spends nothing. Same-block and same-run pairs
-  // get their mark like any other spend: the pair skip of the utxo db hides an
-  // output that was still created and still spent, and this database is the
-  // only place that says so
-  for (size_t i = 1, ie = block.vtx.size(); i != ie; i++) {
-    const auto &tx = block.vtx[i];
-    value.SpentBy = validationData.TxIds[i];
-    for (size_t j = 0, je = tx.txIn.size(); j != je; j++) {
-      key.Tx = tx.txIn[j].previousOutputHash;
-      key.Index = tx.txIn[j].previousOutputIndex;
-      value.InputIndex = static_cast<uint32_t>(j);
-      // An outpoint is spent once on the chain this database follows, so
-      // nothing below can hold a mark for it. The exception is a BIP30 twin
-      // re-spent and reorged away inside one window, which would leave the
-      // stale mark of the first spend on disk: reachable only below the BIP30
-      // activation, and not worth a read on the write path
-      this->putNew(key, &value, sizeof(value));
+  for (const CBlockRef &ref: batch) {
+    const BC::Proto::Block &block = *ref.Block;
+    const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
+    assert(validationData.TxIds.size() == block.vtx.size());
+    value.Height = ref.Index->Height;
+
+    // vtx[0] is the coinbase and spends nothing. Same-block and same-run pairs
+    // get their mark like any other spend: the pair skip of the utxo db hides an
+    // output that was still created and still spent, and this database is the
+    // only place that says so
+    for (size_t i = 1, ie = block.vtx.size(); i != ie; i++) {
+      const auto &tx = block.vtx[i];
+      value.SpentBy = validationData.TxIds[i];
+      for (size_t j = 0, je = tx.txIn.size(); j != je; j++) {
+        key.Tx = tx.txIn[j].previousOutputHash;
+        key.Index = tx.txIn[j].previousOutputIndex;
+        value.InputIndex = static_cast<uint32_t>(j);
+        // An outpoint is spent once on the chain this database follows, so
+        // nothing below can hold a mark for it. The exception is a BIP30 twin
+        // re-spent and reorged away inside one window, which would leave the
+        // stale mark of the first spend on disk: reachable only below the BIP30
+        // activation, and not worth a read on the write path
+        this->putNew(key, &value, sizeof(value));
+      }
     }
   }
 }

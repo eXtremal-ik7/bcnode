@@ -174,69 +174,68 @@ void UTXODb::saveCache()
 
 // The connect walk. Honours the run pair marks: an output spent inside the
 // run is invisible outside it, so neither the log nor the cache ever sees it
-void UTXODb::connectImpl(const BC::Common::BlockIndex *index,
-                         const BC::Proto::Block &block,
-                         const BC::Proto::CBlockLinkedOutputs&,
-                         const BC::Proto::CBlockValidationData &validationData,
-                         BlockInMemoryIndex&,
-                         BlockDatabase&)
+void UTXODb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
-  assert(validationData.TxIds.size() == block.vtx.size());
-  const uint32_t height = index->Height;
+  for (const CBlockRef &ref: batch) {
+    const BC::Proto::Block &block = *ref.Block;
+    const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
+    assert(validationData.TxIds.size() == block.vtx.size());
+    const uint32_t height = ref.Index->Height;
 
-  if (Cache_.enabled())
-    Cache_.maintain();
+    if (Cache_.enabled())
+      Cache_.maintain();
 
-  CUnspentOutputKey key;
-  // An output spent by a later tx of the same block (and that input itself)
-  // is skipped entirely: the pair is invisible outside its block, so neither
-  // the log nor the cache ever sees it. A pair spanning two blocks of one run
-  // is skipped the same way - the run connects as one operation, and the
-  // disconnect that splits it puts the output back
-  size_t outOrdinal = 0;
-  size_t inOrdinal = 0;
-  for (size_t i = 0; i < block.vtx.size(); i++) {
-    const auto &tx = block.vtx[i];
-    const bool isCoinbase = i == 0;
+    CUnspentOutputKey key;
+    // An output spent by a later tx of the same block (and that input itself)
+    // is skipped entirely: the pair is invisible outside its block, so neither
+    // the log nor the cache ever sees it. A pair spanning two blocks of one run
+    // is skipped the same way - the run connects as one operation, and the
+    // disconnect that splits it puts the output back
+    size_t outOrdinal = 0;
+    size_t inOrdinal = 0;
+    for (size_t i = 0; i < block.vtx.size(); i++) {
+      const auto &tx = block.vtx[i];
+      const bool isCoinbase = i == 0;
 
-    // txin in coinbase can't spent anything
-    if (!isCoinbase) {
-      for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
-        if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx ||
-            validationData.inputSpendsInBatch(inOrdinal))
+      // txin in coinbase can't spent anything
+      if (!isCoinbase) {
+        for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+          if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx ||
+              validationData.inputSpendsInBatch(inOrdinal))
+            continue;
+          const auto &txIn = tx.txIn[j];
+          key.Tx = txIn.previousOutputHash;
+          key.Index = txIn.previousOutputIndex;
+          this->erase(key);
+          cacheRemove(key);
+        }
+      }
+
+      const uint32_t packed = packHeight(height, isCoinbase);
+      // A coinbase below BIP34 may repeat an earlier one and land on its live coin.
+      // Such a write forfeits window annihilation: the key may already exist below, and
+      // a later spend annihilated inside the window would leave the older value there
+      // as a live coin nobody can spend
+      const bool mayRepeat = isCoinbase && (validationData.CoinbaseRepeat || validationData.CoinbaseMayRepeat);
+      key.Tx = validationData.TxIds[i];
+      for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
+        if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
           continue;
-        const auto &txIn = tx.txIn[j];
-        key.Tx = txIn.previousOutputHash;
-        key.Index = txIn.previousOutputIndex;
-        this->erase(key);
-        cacheRemove(key);
+        size_t infoSize;
+        const void *info = validationData.outputData(outOrdinal, infoSize);
+        if (infoSize) {
+          key.Index = static_cast<uint32_t>(j);
+          if (mayRepeat)
+            this->putRestore(key, info, infoSize, &packed, sizeof(packed));
+          else
+            this->putNew(key, info, infoSize, &packed, sizeof(packed));
+          cacheAdd(key, info, infoSize, height, isCoinbase);
+        }
       }
     }
-
-    const uint32_t packed = packHeight(height, isCoinbase);
-    // A coinbase below BIP34 may repeat an earlier one and land on its live coin.
-    // Such a write forfeits window annihilation: the key may already exist below, and
-    // a later spend annihilated inside the window would leave the older value there
-    // as a live coin nobody can spend
-    const bool mayRepeat = isCoinbase && (validationData.CoinbaseRepeat || validationData.CoinbaseMayRepeat);
-    key.Tx = validationData.TxIds[i];
-    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
-      if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
-        continue;
-      size_t infoSize;
-      const void *info = validationData.outputData(outOrdinal, infoSize);
-      if (infoSize) {
-        key.Index = static_cast<uint32_t>(j);
-        if (mayRepeat)
-          this->putRestore(key, info, infoSize, &packed, sizeof(packed));
-        else
-          this->putNew(key, info, infoSize, &packed, sizeof(packed));
-        cacheAdd(key, info, infoSize, height, isCoinbase);
-      }
-    }
+    assert(inOrdinal == validationData.InputLocalTx.size());
+    assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
   }
-  assert(inOrdinal == validationData.InputLocalTx.size());
-  assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
 }
 
 // The disconnect walk. It does not honour the run pair marks: a same-block

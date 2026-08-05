@@ -90,21 +90,19 @@ bool AddrDb::queryTop(const std::string &index, size_t offset, size_t limit,
   return this->top(index, offset, limit, result);
 }
 
-void AddrDb::connectImpl(const BC::Common::BlockIndex*,
-                         const BC::Proto::Block &block,
-                         const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                         const BC::Proto::CBlockValidationData &validationData,
-                         BlockInMemoryIndex&,
-                         BlockDatabase&)
+void AddrDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
-  if (block.vtx.empty())
-    return;
-
   std::unordered_map<BC::Script::CAddress, CAddrValue> deltaMap;
-  buildBlockDelta(block, linkedOutputs, validationData.CoinbaseRepeat, deltaMap);
+  for (const CBlockRef &ref: batch) {
+    if (ref.Block->vtx.empty())
+      continue;
 
-  for (const auto &addr: deltaMap)
-    this->merge(addr.first, addr.second);
+    deltaMap.clear();
+    buildBlockDelta(*ref.Block, *ref.LinkedOutputs, ref.ValidationData->CoinbaseRepeat, deltaMap);
+
+    for (const auto &addr: deltaMap)
+      this->merge(addr.first, addr.second);
+  }
 }
 
 void AddrDb::disconnectImpl(const BC::Common::BlockIndex*,

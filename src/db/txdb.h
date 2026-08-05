@@ -38,10 +38,7 @@ private:
   uint32_t version() final { return 1; }
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
 
-  void connectImpl(const BC::Common::BlockIndex *index,
-                   const BC::Proto::Block &block,
-                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                   const BC::Proto::CBlockValidationData &validationData,
+  void connectImpl(CBlockBatch batch,
                    BlockInMemoryIndex &blockIndex,
                    BlockDatabase &blockDb);
 

@@ -22,6 +22,7 @@
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
+#include <span>
 #include <thread>
 #include <unordered_map>
 
@@ -77,6 +78,23 @@ struct CBaseCfg {
 };
 #pragma pack(pop)
 
+// One block as a database sees it: the index and the three parsed pieces the
+// walk reads. Pointers, because these live in an array. The index is not const
+// only because the storage queue writes back where the block landed on disk -
+// a database reads it and nothing more
+struct CBlockRef {
+  BC::Common::BlockIndex *Index = nullptr;
+  const BC::Proto::Block *Block = nullptr;
+  const BC::Proto::CBlockLinkedOutputs *LinkedOutputs = nullptr;
+  const BC::Proto::CBlockValidationData *ValidationData = nullptr;
+};
+
+// The unit of a connect: blocks in chain order, applied as one operation, so
+// the database ends up at the last of them. A block connected on its own is a
+// batch of one. A disconnect has no such unit and takes a single block: it
+// walks down a fork of unknown depth, a block at a time, off the hot path
+using CBlockBatch = std::span<const CBlockRef>;
+
 class BaseInterface {
 public:
   virtual ~BaseInterface() {}
@@ -90,10 +108,7 @@ public:
                           BC::Common::BlockIndex **forConnect,
                           std::vector<BC::Common::BlockIndex*> &forDisconnect) = 0;
 
-  virtual void connect(const BC::Common::BlockIndex *index,
-                       const BC::Proto::Block &block,
-                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                       const BC::Proto::CBlockValidationData &validationData,
+  virtual void connect(CBlockBatch batch,
                        BlockInMemoryIndex &blockIndex,
                        BlockDatabase &blockDb) = 0;
 
@@ -256,14 +271,13 @@ public:
     return initializeImpl(cfg, storage);
   }
 
-  void connect(const BC::Common::BlockIndex *index,
-               const BC::Proto::Block &block,
-               const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-               const BC::Proto::CBlockValidationData &validationData,
-               BlockInMemoryIndex &blockIndex,
-               BlockDatabase &blockDb) final {
-    connectImpl(index, block, linkedOutputs, validationData, blockIndex, blockDb);
-    finishMutation(index->Header.GetHash());
+  // One threshold check per batch, not per block: the window has to be stamped
+  // with a block the database actually stands at, and a batch ends at one
+  void connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) final {
+    if (batch.empty())
+      return;
+    connectImpl(batch, blockIndex, blockDb);
+    finishMutation(batch.back().Index->Header.GetHash());
   }
 
   void disconnect(const BC::Common::BlockIndex *index,
@@ -297,10 +311,7 @@ public:
   virtual uint32_t version() = 0;
   virtual bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) = 0;
 
-  virtual void connectImpl(const BC::Common::BlockIndex *index,
-                           const BC::Proto::Block &block,
-                           const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                           const BC::Proto::CBlockValidationData &validationData,
+  virtual void connectImpl(CBlockBatch batch,
                            BlockInMemoryIndex &blockIndex,
                            BlockDatabase &blockDb) = 0;
 

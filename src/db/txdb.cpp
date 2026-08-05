@@ -39,29 +39,29 @@ bool TxDb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
   return true;
 }
 
-void TxDb::connectImpl(const BC::Common::BlockIndex *index,
-                       const BC::Proto::Block &block,
-                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                       const BC::Proto::CBlockValidationData &validationData,
-                       BlockInMemoryIndex&,
-                       BlockDatabase&)
+void TxDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
-  assert(validationData.TxIds.size() == block.vtx.size());
-  const auto blockId = index->Header.GetHash();
   SmallStream<4096> stream;
-  // A BIP30 repeat carries a coinbase this database already holds, byte for byte
-  // the same one: leaving the twin's record alone keeps the key write-once, and a
-  // query answers with both inclusions from the chain params
-  for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++) {
-    const auto &tx = block.vtx[i];
+  for (const CBlockRef &ref: batch) {
+    const BC::Proto::Block &block = *ref.Block;
+    const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
+    assert(validationData.TxIds.size() == block.vtx.size());
+    const auto blockId = ref.Index->Header.GetHash();
 
-    stream.reset();
-    CLogData *data = stream.reserve<CLogData>(1);
-    data->Hash = blockId;
-    data->Index = i;
-    BC::serialize(stream, tx);
-    BC::serialize(stream, linkedOutputs.Tx[i]);
-    this->putNew(validationData.TxIds[i], stream.data(), stream.sizeOf());
+    // A BIP30 repeat carries a coinbase this database already holds, byte for byte
+    // the same one: leaving the twin's record alone keeps the key write-once, and a
+    // query answers with both inclusions from the chain params
+    for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++) {
+      const auto &tx = block.vtx[i];
+
+      stream.reset();
+      CLogData *data = stream.reserve<CLogData>(1);
+      data->Hash = blockId;
+      data->Index = i;
+      BC::serialize(stream, tx);
+      BC::serialize(stream, ref.LinkedOutputs->Tx[i]);
+      this->putNew(validationData.TxIds[i], stream.data(), stream.sizeOf());
+    }
   }
 }
 

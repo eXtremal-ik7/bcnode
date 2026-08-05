@@ -31,8 +31,11 @@ struct Task {
   BC::Common::BlockIndex *Index = nullptr;
   // Block data the task keeps alive until it is written; the reader throttles on the sum
   size_t Memory = 0;
+  // Last block of the batch the mutator handed over: where the storage thread cuts its own
+  bool BatchEnd = false;
   Task() {};
-  Task(ActionTy type, BC::Common::BlockIndex *index, size_t memory) : Type(type), Index(index), Memory(memory) {}
+  Task(ActionTy type, BC::Common::BlockIndex *index, size_t memory, bool batchEnd = false) :
+    Type(type), Index(index), Memory(memory), BatchEnd(batchEnd) {}
 };
 
 
@@ -48,13 +51,17 @@ public:
 
   bool run(std::function<void()> errorHandler);
 
-  void add(ActionTy type,
-           BC::Common::BlockIndex *index,
-           const BC::Proto::Block &block,
-           const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-           const BC::Proto::CBlockValidationData &validationData,
-           BlockInMemoryIndex &blockIndex,
-           bool wakeUp = false);
+  // Both take utxodb here, on the caller's thread, and reach the archive databases
+  // through the queue. A connect is a run - a block connected on its own is a batch
+  // of one; a disconnect walks a fork down and comes a block at a time
+  void connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, bool wakeUp = false);
+
+  void disconnect(BC::Common::BlockIndex *index,
+                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  const BC::Proto::CBlockValidationData &validationData,
+                  BlockInMemoryIndex &blockIndex,
+                  bool wakeUp = false);
 
   void wakeUp();
 
@@ -76,6 +83,7 @@ private:
 
   void onTimer();
   void onQueuePush();
+  void applyBatch();
 
 private:
   bool Initialized_ = false;
@@ -90,6 +98,13 @@ private:
   std::thread Thread_;
   std::function<void()> ErrorHandler_;
   tbb::concurrent_queue<Task> Queue_;
+
+  // Storage thread only: the connect batch being collected off the queue. The objects hold the
+  // parsed block data the refs point into, so both live exactly as long as the batch does
+  std::vector<CBlockRef> Batch_;
+  std::vector<intrusive_ptr<BC::Common::CIndexCacheObject>> BatchObjects_;
+  size_t BatchMemory_ = 0;
+
   std::vector<BC::Common::BlockIndex*> CachedBlocks_;
   std::chrono::time_point<std::chrono::steady_clock> LastFlushTime_ = std::chrono::steady_clock::now();
 

@@ -82,31 +82,32 @@ bool TxDbRef::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
   return true;
 }
 
-void TxDbRef::connectImpl(const BC::Common::BlockIndex *index,
-                          const BC::Proto::Block &block,
-                          const BC::Proto::CBlockLinkedOutputs&,
-                          const BC::Proto::CBlockValidationData &validationData,
-                          BlockInMemoryIndex&,
-                          BlockDatabase&)
+void TxDbRef::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
-  assert(validationData.TxIds.size() == block.vtx.size());
-  const auto blockId = index->Header.GetHash();
   std::vector<BTC::CTxPosition> positions;
-  if (!BTC::enumerateTransactions(block, index->SerializedBlockSize, positions)) {
-    LOG_F(ERROR,
-          "TxDbRef: transaction layout of block %s does not add up to its stored size",
-          blockId.getHexLE().c_str());
-    return;
-  }
+  for (const CBlockRef &ref: batch) {
+    const BC::Proto::Block &block = *ref.Block;
+    const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
+    assert(validationData.TxIds.size() == block.vtx.size());
+    const auto blockId = ref.Index->Header.GetHash();
 
-  // A BIP30 repeat brings a coinbase this database already holds; see firstTx
-  for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++) {
-    CLogData data;
-    data.Hash = blockId;
-    data.Index = i;
-    data.SerializedDataOffset = positions[i].Offset;
-    data.SerializedDataSize = positions[i].Size;
-    this->putNew(validationData.TxIds[i], &data, sizeof(data));
+    positions.clear();
+    if (!BTC::enumerateTransactions(block, ref.Index->SerializedBlockSize, positions)) {
+      LOG_F(ERROR,
+            "TxDbRef: transaction layout of block %s does not add up to its stored size",
+            blockId.getHexLE().c_str());
+      continue;
+    }
+
+    // A BIP30 repeat brings a coinbase this database already holds; see firstTx
+    for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++) {
+      CLogData data;
+      data.Hash = blockId;
+      data.Index = i;
+      data.SerializedDataOffset = positions[i].Offset;
+      data.SerializedDataSize = positions[i].Size;
+      this->putNew(validationData.TxIds[i], &data, sizeof(data));
+    }
   }
 }
 

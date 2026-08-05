@@ -24,14 +24,9 @@ public:
 
   bool purge(config4cpp::Configuration *cfg, std::filesystem::path &dataDir);
 
-  void connect(const BC::Common::BlockIndex *index,
-               const BC::Proto::Block &block,
-               const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-               const BC::Proto::CBlockValidationData &validationData,
-               BlockInMemoryIndex &blockIndex,
-               BlockDatabase &blockDb) {
+  void connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) {
     for (auto &db: AllDb_)
-      db->connect(index, block, linkedOutputs, validationData, blockIndex, blockDb);
+      db->connect(batch, blockIndex, blockDb);
   }
 
   void disconnect(const BC::Common::BlockIndex *index,

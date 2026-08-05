@@ -61,17 +61,22 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
     BTC::Common::fillBIP30Context(*index, chainParams, validationData);
     validationData.InputsResolved = true;
 
+    // A batch of one: the bulk reader hands out block by block, and the validation
+    // context above lives no longer than this call
+    CBlockRef ref{index, &block, &linkedOutputs, &validationData};
+    CBlockBatch batch(&ref, 1);
+
     // Connect archive
     for (size_t i = 0; i < archiveDatabases.size(); i++) {
       BC::Common::BlockIndex *best = archiveDatabases[i].BestBlock;
       uint32_t connectHeight = best ? best->Height : std::numeric_limits<uint32_t>::max();
       if (index->Height >= connectHeight)
-        archiveDatabases[i].Base->connect(index, block, linkedOutputs, validationData, blockIndex, storage.blockDb());
+        archiveDatabases[i].Base->connect(batch, blockIndex, storage.blockDb());
     }
 
     // Connect utxo
     if (index->Height >= utxoBestHeight)
-      utxoDb.connect(index, block, linkedOutputs, validationData, blockIndex, storage.blockDb());
+      utxoDb.connect(batch, blockIndex, storage.blockDb());
   };
 
   BC::Common::BlockIndex *index = firstCommon;
