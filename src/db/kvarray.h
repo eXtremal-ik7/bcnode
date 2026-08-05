@@ -120,30 +120,43 @@ public:
 
   rocksdb::MergeOperator *mergeOperator() final { return new MergeOperator(); }
 
-  // items carry the element delta in Aggregate; the call folds them into
-  // window-relative running sums, rebased to absolute values at flush
-  void add(CKvWriter<CKey> &writer, const CKey &key, const CItem *items, size_t count) {
-    const size_t hash = writer.hashOf(key);
-    const CHeader *prev = static_cast<const CHeader*>(writer.findOwn(key, hash));
-    const uint64_t prevCount = prev ? prev->TailCount : 0;
+  // Fill cursor of a tail: elements arrive carrying their delta in Aggregate and
+  // land folded into the window-relative running sum, rebased to absolute values
+  // at flush. Holds that sum, so the caller hands over one element at a time
+  class CTailWriter {
+  public:
+    CTailWriter() = default;
+    explicit CTailWriter(CItem *cursor) : Cursor_(cursor) {}
 
-    CHeader *header = static_cast<CHeader*>(writer.alloc(hash, sizeof(CHeader) + (prevCount + count)*sizeof(CItem)));
-    header->BaseTrim = prev ? prev->BaseTrim : 0;
-    header->TailCount = prevCount + count;
-
-    CItem *dst = tail(header);
-    if (prevCount)
-      memcpy(static_cast<void*>(dst), tail(prev), prevCount*sizeof(CItem));
-
-    CItem *newItems = dst + prevCount;
-    memcpy(static_cast<void*>(newItems), items, count*sizeof(CItem));
-    uint64_t running = prevCount ? dst[prevCount - 1].Aggregate : 0;
-    for (size_t i = 0; i < count; i++) {
-      running += newItems[i].Aggregate;
-      newItems[i].Aggregate = running;
+    void append(const CItem &item) {
+      Running_ += item.Aggregate;
+      *Cursor_ = item;
+      Cursor_->Aggregate = Running_;
+      Cursor_++;
     }
 
+  private:
+    CItem *Cursor_ = nullptr;
+    uint64_t Running_ = 0;
+  };
+
+  // The key's whole tail in this window, at its final size, written once. The
+  // caller counts its elements first and fills the cursor in chain order - which
+  // is why a unit of connect may be tens of thousands of blocks without the
+  // window growing beyond what those blocks actually add: growing a tail in
+  // place would recopy it on every append, and one connect unit is one window
+  CTailWriter allocTail(CKvWriter<CKey> &writer, const CKey &key, size_t count) {
+    const size_t hash = writer.hashOf(key);
+    // A second tail for one key would orphan the elements of the first: the map
+    // slot holds one record, and the fold below reads exactly that one
+    assert(!writer.findOwn(key, hash) && "key already has a tail in this window");
+
+    CHeader *header = static_cast<CHeader*>(writer.alloc(hash, sizeof(CHeader) + count*sizeof(CItem)));
+    header->BaseTrim = 0;
+    header->TailCount = count;
+
     writer.update(key, hash, header);
+    return CTailWriter(tail(header));
   }
 
   // Drop the last count elements. The Tail of this set goes first, only what is
