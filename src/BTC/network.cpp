@@ -1103,8 +1103,9 @@ void Node::Sync(Peer *peer,
     peer->noteHeight(attached->Height);
 
     // Anchor for the stalled-block collector: survives source restarts, so holes below anything
-    // ever received stay requestable during cache overflow. Orphans have no height to anchor on
-    if (attached->Height != std::numeric_limits<uint32_t>::max()) {
+    // ever received stay requestable during cache overflow. Scheduled blocks only: a relayed tip
+    // during catch-up sits far above the download window and would turn the walk into the whole chain
+    if (scheduledBlock && attached->Height != std::numeric_limits<uint32_t>::max()) {
       BC::Common::BlockIndex *frontier = ReceivedFrontier_.load(std::memory_order_relaxed);
       while ((!frontier || attached->Height > frontier->Height) &&
              !ReceivedFrontier_.compare_exchange_weak(frontier, attached, std::memory_order_relaxed))
@@ -1313,7 +1314,9 @@ bool Node::scheduleBlocksDownload(Peer *slave)
 
   LOG_F(WARNING, "%s: download time: %u, last batch size: %zu, new batch size: %zu; ping: %u", slave->Name.c_str(), slave->averageDownloadTime(), slave->LastBatchSize_, batchSize, slave->averagePing());
 
-  if (!slave->IsProducerPeer_) {
+  if (!slave->IsProducerPeer_ && blockSource.lastKnownIndex()) {
+    // lastKnownIndex is null until the first headers batch lands: the retry queue can feed a
+    // fresh source before that, and the probe makes no sense without a master header anyway
     if (!slave->LastKnownBlock_ || indexes.back()->Height > slave->LastKnownBlock_->Height) {
       // Master peer contains last received header, we can build block locator based on this header
       // and use getheaders message for checking slave peer chain
