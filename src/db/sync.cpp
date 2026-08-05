@@ -1,5 +1,7 @@
 #include "sync.h"
 #include "storage.h"
+#include <chrono>
+#include <thread>
 
 namespace BC {
 namespace DB {
@@ -11,6 +13,11 @@ bool dbDisconnectBlocks(BC::DB::BaseInterface &db,
                         std::vector<BC::Common::BlockIndex*> &forDisconnect)
 {
   for (BC::Common::BlockIndex *index: forDisconnect) {
+    // attach cannot refuse: hold the walk while the engine is over its
+    // admission limit, the flusher drains it on its own
+    while (db.pipelineFull())
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
     auto object = objectByIndex(index, chainParams, storage.blockDb());
     if (!object.get())
       return false;
@@ -52,6 +59,17 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
   LOG_F(INFO, "Update %s: connecting %u blocks", name, count);
 
   auto handler = [&utxoDb, utxoBestHeight, &archiveDatabases, &blockIndex, &chainParams, &storage](BC::Common::BlockIndex *index, const BC::Proto::Block &block, const BC::Proto::CBlockLinkedOutputs &linkedOutputs) {
+    // attach cannot refuse: hold the bulk reader while any engine is over its
+    // admission limit, the flushers drain them on their own
+    for (;;) {
+      bool full = utxoDb.pipelineFull();
+      for (const auto &db: archiveDatabases)
+        full |= db.Base->pipelineFull();
+      if (!full)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
     // The bulk reader hands out raw disk data; rebuild the validation context
     // to keep the connect invariant (txids and consensus exemptions precomputed on
     // every path). No contextual check runs here - a database catching up connects

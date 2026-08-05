@@ -7,6 +7,7 @@
 
 #include "db/common.h"
 #include "db/keyHash.h"
+#include "db/kvbase.h"
 #include "db/outpointKey.h"
 #include "db/swmrcache.h"
 #include "BTC/script.h"
@@ -32,9 +33,9 @@ struct CUtxoCacheValue {
 // packing (creationHeight << 1) | isCoinbase, the Core-style coin metadata
 // (coinbase maturity, BIP68, warmup scan by height). query() strips the
 // suffix: every consumer above sees pure UnspentOutputInfo bytes
-class UTXODb : public CBaseKV<CUnspentOutputKey> {
+class UTXODb : public CKvBase<CUnspentOutputKey> {
 public:
-  UTXODb() : CBaseKV<CUnspentOutputKey>("utxo") {}
+  UTXODb() : CKvBase<CUnspentOutputKey>("utxo") {}
   virtual ~UTXODb() {}
   void *interface(int) final { return nullptr; }
   // Seqlock cache probe, then shard logs and RocksDB. Concurrent loaders
@@ -61,6 +62,7 @@ private:
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) override;
 
   void connectImpl(CBlockBatch batch,
+                   CKvWriter<CUnspentOutputKey> &writer,
                    BlockInMemoryIndex &blockIndex,
                    BlockDatabase &blockDb) override;
 
@@ -68,6 +70,7 @@ private:
                       const BC::Proto::Block &block,
                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                       const BC::Proto::CBlockValidationData &validationData,
+                      CKvWriter<CUnspentOutputKey> &writer,
                       BlockInMemoryIndex &blockIndex,
                       BlockDatabase &blockDb) override;
 

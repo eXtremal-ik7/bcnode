@@ -6,6 +6,7 @@
 #pragma once
 
 #include "db/common.h"
+#include "db/kvbase.h"
 #include "db/outpointKey.h"
 
 namespace config4cpp {
@@ -20,9 +21,9 @@ namespace DB {
 // space - an output the chain created is either there (unspent) or here
 // (spent). Pure append on the write path: connect writes marks from data it
 // already holds and reads nothing back
-class SpentDb : public CBaseKV<COutpointKey>, public ISpentDb {
+class SpentDb : public CKvBase<COutpointKey>, public ISpentDb {
 public:
-  SpentDb() : CBaseKV<COutpointKey>("spentdb") {}
+  SpentDb() : CKvBase<COutpointKey>("spentdb") {}
   virtual ~SpentDb() {}
 
   void *interface(int interface) final {
@@ -40,6 +41,7 @@ private:
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) final;
 
   void connectImpl(CBlockBatch batch,
+                   CKvWriter<COutpointKey> &writer,
                    BlockInMemoryIndex &blockIndex,
                    BlockDatabase &blockDb) final;
 
@@ -47,6 +49,7 @@ private:
                       const BC::Proto::Block &block,
                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                       const BC::Proto::CBlockValidationData &validationData,
+                      CKvWriter<COutpointKey> &writer,
                       BlockInMemoryIndex &blockIndex,
                       BlockDatabase &blockDb) final;
 };

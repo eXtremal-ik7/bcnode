@@ -71,18 +71,12 @@ bool TxDbRef::queryTransaction(const BC::Proto::TxHashTy &txid,
   return true;
 }
 
-bool TxDbRef::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
+bool TxDbRef::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 {
-  // A write-once key never needs its own previous value, so a threshold flush
-  // has nothing to hand back to the connect path: it goes to a background
-  // thread. The escape hatch exists for A/B runs on the bench stand
-  if (cfg->lookupBoolean(name().c_str(), "asyncFlush", true))
-    enableAsyncFlush();
-
   return true;
 }
 
-void TxDbRef::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
+void TxDbRef::connectImpl(CBlockBatch batch, CKvWriter<BC::Proto::TxHashTy> &writer, BlockInMemoryIndex&, BlockDatabase&)
 {
   std::vector<BTC::CTxPosition> positions;
   for (const CBlockRef &ref: batch) {
@@ -106,7 +100,7 @@ void TxDbRef::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&
       data.Index = i;
       data.SerializedDataOffset = positions[i].Offset;
       data.SerializedDataSize = positions[i].Size;
-      this->putNew(validationData.TxIds[i], &data, sizeof(data));
+      writer.putNew(validationData.TxIds[i], &data, sizeof(data));
     }
   }
 }
@@ -115,12 +109,13 @@ void TxDbRef::disconnectImpl(const BC::Common::BlockIndex*,
                              const BC::Proto::Block &block,
                              const BC::Proto::CBlockLinkedOutputs&,
                              const BC::Proto::CBlockValidationData &validationData,
+                             CKvWriter<BC::Proto::TxHashTy> &writer,
                              BlockInMemoryIndex&,
                              BlockDatabase&)
 {
   assert(validationData.TxIds.size() == block.vtx.size());
   for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
-    this->erase(validationData.TxIds[i]);
+    writer.erase(validationData.TxIds[i]);
 }
 
 }

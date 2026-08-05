@@ -44,6 +44,16 @@ public:
       db->flush();
   }
 
+  // Any engine over its admission limit: the pipeline stops taking work while
+  // the storage thread keeps draining its queue and the flushers catch up
+  bool pipelineFull() const {
+    for (const auto &db: AllDb_) {
+      if (db->pipelineFull())
+        return true;
+    }
+    return false;
+  }
+
 private:
   std::vector<std::unique_ptr<BC::DB::BaseInterface>> AllDb_;
 

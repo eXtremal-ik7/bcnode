@@ -90,7 +90,7 @@ bool AddrDb::queryTop(const std::string &index, size_t offset, size_t limit,
   return this->top(index, offset, limit, result);
 }
 
-void AddrDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
+void AddrDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddress> &writer, BlockInMemoryIndex&, BlockDatabase&)
 {
   std::unordered_map<BC::Script::CAddress, CAddrValue> deltaMap;
   for (const CBlockRef &ref: batch) {
@@ -101,7 +101,7 @@ void AddrDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
     buildBlockDelta(*ref.Block, *ref.LinkedOutputs, ref.ValidationData->CoinbaseRepeat, deltaMap);
 
     for (const auto &addr: deltaMap)
-      this->merge(addr.first, addr.second);
+      this->merge(writer, addr.first, addr.second);
   }
 }
 
@@ -109,6 +109,7 @@ void AddrDb::disconnectImpl(const BC::Common::BlockIndex*,
                             const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             const BC::Proto::CBlockValidationData &validationData,
+                            CKvWriter<BC::Script::CAddress> &writer,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
@@ -120,7 +121,7 @@ void AddrDb::disconnectImpl(const BC::Common::BlockIndex*,
 
   for (auto &addr: deltaMap) {
     addr.second.negate();
-    this->merge(addr.first, addr.second);
+    this->merge(writer, addr.first, addr.second);
   }
 }
 

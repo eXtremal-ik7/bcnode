@@ -48,11 +48,6 @@ bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvecto
 
 bool UTXODb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
 {
-  // Threshold flushes leave the connect path to a background thread; the
-  // escape hatch exists for A/B runs on the bench stand
-  if (cfg->lookupBoolean("utxo", "asyncFlush", true))
-    enableAsyncFlush();
-
   int cacheSizeMb = cfg->lookupInt("utxo", "cacheSizeMb", 0);
   if (cacheSizeMb <= 0)
     return true;
@@ -174,7 +169,7 @@ void UTXODb::saveCache()
 
 // The connect walk. Honours the run pair marks: an output spent inside the
 // run is invisible outside it, so neither the log nor the cache ever sees it
-void UTXODb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
+void UTXODb::connectImpl(CBlockBatch batch, CKvWriter<CUnspentOutputKey> &writer, BlockInMemoryIndex&, BlockDatabase&)
 {
   for (const CBlockRef &ref: batch) {
     const BC::Proto::Block &block = *ref.Block;
@@ -206,7 +201,7 @@ void UTXODb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
           const auto &txIn = tx.txIn[j];
           key.Tx = txIn.previousOutputHash;
           key.Index = txIn.previousOutputIndex;
-          this->erase(key);
+          writer.erase(key);
           cacheRemove(key);
         }
       }
@@ -226,9 +221,9 @@ void UTXODb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
         if (infoSize) {
           key.Index = static_cast<uint32_t>(j);
           if (mayRepeat)
-            this->putRestore(key, info, infoSize, &packed, sizeof(packed));
+            writer.putRestore(key, info, infoSize, &packed, sizeof(packed));
           else
-            this->putNew(key, info, infoSize, &packed, sizeof(packed));
+            writer.putNew(key, info, infoSize, &packed, sizeof(packed));
           cacheAdd(key, info, infoSize, height, isCoinbase);
         }
       }
@@ -247,6 +242,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
                             const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             const BC::Proto::CBlockValidationData &validationData,
+                            CKvWriter<CUnspentOutputKey> &writer,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
@@ -285,7 +281,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
         key.Index = txIn.previousOutputIndex;
         // The coin this input spent was created by a block below and may well
         // be there on disk: a later spend of it must leave a real tombstone
-        this->putRestore(key, linkedTxin.data(), linkedTxin.size(), &packed, sizeof(packed));
+        writer.putRestore(key, linkedTxin.data(), linkedTxin.size(), &packed, sizeof(packed));
         cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height, false);
       }
     }
@@ -298,7 +294,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
       validationData.outputData(outOrdinal, infoSize);
       if (infoSize) {
         key.Index = static_cast<uint32_t>(j);
-        this->erase(key);
+        writer.erase(key);
         cacheRemove(key);
       }
     }

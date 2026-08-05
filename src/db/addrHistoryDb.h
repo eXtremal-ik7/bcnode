@@ -6,16 +6,17 @@
 #pragma once
 
 #include "db/common.h"
+#include "db/kvarray.h"
 
 namespace BC {
 namespace DB {
 
 class AddrHistoryDb :
-  public CBaseArrayAggregated<BC::Script::CAddress, CAddrHistoryItem>,
+  public CKvArrayBase<BC::Script::CAddress, CAddrHistoryItem>,
   public IAddrHistoryDb {
 
 public:
-  AddrHistoryDb() : CBaseArrayAggregated<BC::Script::CAddress, CAddrHistoryItem>("addrhistorydb", 64) {}
+  AddrHistoryDb() : CKvArrayBase<BC::Script::CAddress, CAddrHistoryItem>("addrhistorydb", 64) {}
   virtual ~AddrHistoryDb() {}
 
   void *interface(int interface) {
@@ -31,6 +32,7 @@ public:
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
 
   void connectImpl(CBlockBatch batch,
+                   CKvWriter<BC::Script::CAddress> &writer,
                    BlockInMemoryIndex &blockIndex,
                    BlockDatabase &blockDb);
 
@@ -38,6 +40,7 @@ public:
                       const BC::Proto::Block &block,
                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                       const BC::Proto::CBlockValidationData &validationData,
+                      CKvWriter<BC::Script::CAddress> &writer,
                       BlockInMemoryIndex &blockIndex,
                       BlockDatabase &blockDb);
 };

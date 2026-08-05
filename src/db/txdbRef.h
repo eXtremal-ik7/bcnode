@@ -6,6 +6,7 @@
 #pragma once
 
 #include "db/common.h"
+#include "db/kvbase.h"
 
 namespace config4cpp {
 class Configuration;
@@ -17,13 +18,13 @@ namespace DB {
 class Archive;
 
 class TxDbRef :
-  public CBaseKV<BC::Proto::TxHashTy>,
+  public CKvBase<BC::Proto::TxHashTy>,
   public ITransactionDb {
 public:
   static constexpr unsigned MinimalBatchSize = 8192;
 
 public:
-  TxDbRef() : CBaseKV<BC::Proto::TxHashTy>("txdb.ref") {}
+  TxDbRef() : CKvBase<BC::Proto::TxHashTy>("txdb.ref") {}
   virtual ~TxDbRef() {}
 
   void *interface(int interface) {
@@ -50,6 +51,7 @@ private:
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
 
   void connectImpl(CBlockBatch batch,
+                   CKvWriter<BC::Proto::TxHashTy> &writer,
                    BlockInMemoryIndex &blockIndex,
                    BlockDatabase &blockDb);
 
@@ -57,6 +59,7 @@ private:
                       const BC::Proto::Block &block,
                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                       const BC::Proto::CBlockValidationData &validationData,
+                      CKvWriter<BC::Proto::TxHashTy> &writer,
                       BlockInMemoryIndex &blockIndex,
                       BlockDatabase &blockDb);
 };

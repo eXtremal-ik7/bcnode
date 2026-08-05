@@ -1,15 +1,14 @@
 #pragma once
 
 // Single-writer / multi-reader open-addressing map for the database window
-// (the CLog layer): replaces the tbb::concurrent_hash_map + std::unordered_map
-// pair with one flat table. Generation-based reset makes clearing O(1), so
-// after a background flush the frozen map needs no drain at all - it stays
-// readable until the log is recycled, and recycling is a counter bump.
+// (kvview.h): replaces the tbb::concurrent_hash_map + std::unordered_map pair
+// with one flat table. Generation-based reset makes clearing O(1) - a retired
+// window can be recycled by a counter bump, with no drain of the map at all.
 //
-// The map stores non-owning value pointers into the log arena; a null result
-// means "not in this window, look deeper" (frozen log / disk). A delete is a
-// value like any other (the layer above stores its own marker), and keys are
-// never removed within a window, so linear-probe chains never break.
+// The map stores non-owning value pointers into the window arena; a null result
+// means "not in this window, look deeper" (an older window, or the disk). A
+// delete is a value like any other (the layer above stores its own marker), and
+// keys are never removed within a window, so linear-probe chains never break.
 //
 // Slot life cycle within one window ("gen" is the map generation, even):
 //     stale (Gen != gen)  --claim: CAS Gen -> gen+1-->  mid-insert
@@ -230,7 +229,7 @@ public:
   }
 
   // Same walk, but the value is derived from the previous one: a caller that
-  // needs "read what is there, then write something based on it" (CBaseKV
+  // needs "read what is there, then write something based on it" (the KV fold
   // picks its delete marker that way) would otherwise probe the chain twice
   template<typename F>
   void updateWith(const CKey &key, size_t hash, F &&valueOf) {

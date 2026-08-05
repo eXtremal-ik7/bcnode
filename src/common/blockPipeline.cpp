@@ -5,6 +5,7 @@
 
 #include "blockPipeline.h"
 #include "blockDataBase.h"
+#include "db/archive.h"
 #include "db/storage.h"
 #include "loguru.hpp"
 
@@ -159,6 +160,12 @@ bool CBlockPipeline::throttled() const
   // slower than the chain advance, and without this the whole block file set ended up parsed
   // in memory (6.9 GB on the LTC stand). Nothing to escape here - the storage thread drains it
   if (Storage_->queuedMemory() >= Params_.StorageBacklogLimit)
+    return true;
+
+  // Windows attached to an engine but not flushed yet: attach cannot refuse, so this is the
+  // only bound on them - the utxo engine fed by the serial thread and every archive engine
+  // fed by the storage queue. Nothing to escape either - the flushers drain them on their own
+  if (Storage_->utxodb().pipelineFull() || Storage_->archive().pipelineFull())
     return true;
 
   // Raw data waiting for preparation. A block whose predecessor is in an unread file waits for

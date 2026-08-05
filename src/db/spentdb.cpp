@@ -40,18 +40,12 @@ bool SpentDb::querySpentOutputs(const BC::Proto::TxHashTy &txid, uint32_t count,
   return true;
 }
 
-bool SpentDb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
+bool SpentDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 {
-  // Nothing on the connect path reads a mark back, so a threshold flush has
-  // nothing to hand over and goes to a background thread. The escape hatch
-  // exists for A/B runs on the bench stand
-  if (cfg->lookupBoolean(name().c_str(), "asyncFlush", true))
-    enableAsyncFlush();
-
   return true;
 }
 
-void SpentDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
+void SpentDb::connectImpl(CBlockBatch batch, CKvWriter<COutpointKey> &writer, BlockInMemoryIndex&, BlockDatabase&)
 {
   COutpointKey key;
   CSpentValue value;
@@ -78,7 +72,7 @@ void SpentDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&
         // re-spent and reorged away inside one window, which would leave the
         // stale mark of the first spend on disk: reachable only below the BIP30
         // activation, and not worth a read on the write path
-        this->putNew(key, &value, sizeof(value));
+        writer.putNew(key, &value, sizeof(value));
       }
     }
   }
@@ -88,6 +82,7 @@ void SpentDb::disconnectImpl(const BC::Common::BlockIndex*,
                              const BC::Proto::Block &block,
                              const BC::Proto::CBlockLinkedOutputs&,
                              const BC::Proto::CBlockValidationData&,
+                             CKvWriter<COutpointKey> &writer,
                              BlockInMemoryIndex&,
                              BlockDatabase&)
 {
@@ -100,7 +95,7 @@ void SpentDb::disconnectImpl(const BC::Common::BlockIndex*,
     for (size_t j = 0, je = tx.txIn.size(); j != je; j++) {
       key.Tx = tx.txIn[j].previousOutputHash;
       key.Index = tx.txIn[j].previousOutputIndex;
-      this->erase(key);
+      writer.erase(key);
     }
   }
 }

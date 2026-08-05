@@ -30,16 +30,12 @@ bool TxDb::queryTransaction(const BC::Proto::TxHashTy &txid,
   return true;
 }
 
-bool TxDb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
+bool TxDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
 {
-  // See TxDbRef::initializeImpl
-  if (cfg->lookupBoolean(name().c_str(), "asyncFlush", true))
-    enableAsyncFlush();
-
   return true;
 }
 
-void TxDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
+void TxDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Proto::TxHashTy> &writer, BlockInMemoryIndex&, BlockDatabase&)
 {
   SmallStream<4096> stream;
   for (const CBlockRef &ref: batch) {
@@ -60,7 +56,7 @@ void TxDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
       data->Index = i;
       BC::serialize(stream, tx);
       BC::serialize(stream, ref.LinkedOutputs->Tx[i]);
-      this->putNew(validationData.TxIds[i], stream.data(), stream.sizeOf());
+      writer.putNew(validationData.TxIds[i], stream.data(), stream.sizeOf());
     }
   }
 }
@@ -69,12 +65,13 @@ void TxDb::disconnectImpl(const BC::Common::BlockIndex*,
                           const BC::Proto::Block &block,
                           const BC::Proto::CBlockLinkedOutputs&,
                           const BC::Proto::CBlockValidationData &validationData,
+                          CKvWriter<BC::Proto::TxHashTy> &writer,
                           BlockInMemoryIndex&,
                           BlockDatabase&)
 {
   assert(validationData.TxIds.size() == block.vtx.size());
   for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
-    erase(validationData.TxIds[i]);
+    writer.erase(validationData.TxIds[i]);
 }
 
 }

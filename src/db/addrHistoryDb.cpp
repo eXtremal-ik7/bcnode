@@ -25,7 +25,7 @@ bool AddrHistoryDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
   return true;
 }
 
-void AddrHistoryDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
+void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddress> &writer, BlockInMemoryIndex&, BlockDatabase&)
 {
   for (const CBlockRef &ref: batch) {
     const BC::Proto::Block &block = *ref.Block;
@@ -49,7 +49,7 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDat
         item.TxId = hash;
         item.Height = height;
         item.Time = time;
-        // The delta; CBaseArrayAggregated folds it into the running balance
+        // The delta; CKvArrayBase folds it into the running balance
         item.Aggregate = d.second;
       }
       txDelta.clear();
@@ -104,7 +104,7 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, BlockInMemoryIndex&, BlockDat
     }
 
     for (const auto &addr: historyMap)
-      this->add(addr.first, addr.second.data(), addr.second.size());
+      this->add(writer, addr.first, addr.second.data(), addr.second.size());
   }
 }
 
@@ -112,6 +112,7 @@ void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex*,
                                    const BC::Proto::Block &block,
                                    const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                                    const BC::Proto::CBlockValidationData&,
+                                   CKvWriter<BC::Script::CAddress> &writer,
                                    BlockInMemoryIndex&,
                                    BlockDatabase&)
 {
@@ -162,7 +163,7 @@ void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex*,
   }
 
   for (const auto &addr: txMap)
-    this->truncate(addr.first, addr.second);
+    this->truncate(writer, addr.first, addr.second);
 }
 
 }

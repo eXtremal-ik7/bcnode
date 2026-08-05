@@ -6,16 +6,17 @@
 #pragma once
 
 #include "db/common.h"
+#include "db/kvmerge.h"
 
 namespace BC {
 namespace DB {
 
 class AddrDb :
-  public CBaseMerge<BC::Script::CAddress, CAddrValue>,
+  public CKvMergeBase<BC::Script::CAddress, CAddrValue>,
   public IAddrDb {
 
 public:
-  AddrDb() : CBaseMerge<BC::Script::CAddress, CAddrValue>("addrdb") {
+  AddrDb() : CKvMergeBase<BC::Script::CAddress, CAddrValue>("addrdb") {
     registerIndex("balance", [](const CAddrValue &value) -> uint64_t { return value.Received - value.Sent; });
     registerIndex("tx_count", [](const CAddrValue &value) -> uint64_t { return value.TxCount; });
   }
@@ -35,6 +36,7 @@ public:
   uint32_t version() final { return 1; }
 
   void connectImpl(CBlockBatch batch,
+                   CKvWriter<BC::Script::CAddress> &writer,
                    BlockInMemoryIndex &blockIndex,
                    BlockDatabase &blockDb);
 
@@ -42,6 +44,7 @@ public:
                       const BC::Proto::Block &block,
                       const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                       const BC::Proto::CBlockValidationData &validationData,
+                      CKvWriter<BC::Script::CAddress> &writer,
                       BlockInMemoryIndex &blockIndex,
                       BlockDatabase &blockDb);
 };
