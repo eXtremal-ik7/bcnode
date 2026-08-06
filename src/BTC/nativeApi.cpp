@@ -50,7 +50,9 @@ bool BC::Network::NativeApiNode::init(asyncBase *mainBase, HostAddress localAddr
   return true;
 }
 
-void BC::Network::NativeApiNode::OnAccept(HostAddress, aioObject*)
+void BC::Network::NativeApiNode::OnAccept(HostAddress, aioObject *object)
 {
+  // No protocol behind the native API yet; without this every connection leaks an fd
   LOG_F(WARNING, "New Native connection");
+  deleteAioObject(object);
 }

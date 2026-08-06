@@ -213,6 +213,8 @@ public:
              BC::DB::Storage &storage,
              const CParams &params);
   void stop();
+  // Failed-start paths in main never reach the explicit stop; joining here beats std::terminate from ~std::thread
+  ~CBlockPipeline() { stop(); }
   bool started() const { return Started_; }
   void setCallback(newBestCallback callback) { Callback_ = std::move(callback); }
 

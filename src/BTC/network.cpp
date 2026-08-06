@@ -5,6 +5,7 @@
 
 #include "network.h"
 #include "common/blockDataBase.h"
+#include "common/smallStream.h"
 #include "db/storage.h"
 #include <asyncio/socket.h>
 
@@ -79,17 +80,13 @@ Peer::Peer(BlockInMemoryIndex &blockIndex,
   ThreadsNum_(threadsNum),
   WorkerThreadsNum_(workerTimeThreadsNum)
 {
-  SendStreams.reset(new xmstream[ThreadsNum_]);
-
   unsigned numberOfMessages = static_cast<unsigned>(MessageTy::last);
   ReceivedBytes_.reset(new uint64_t[ThreadsNum_]);
-  SentBytes_.reset(new uint64_t[ThreadsNum_]);
+  SentBytes_.reset(new std::atomic<uint64_t>[ThreadsNum_]());
   ReceivedCommands_.reset(new uint64_t[ThreadsNum_ * numberOfMessages]);
-  SentCommands_.reset(new uint64_t[ThreadsNum_ * numberOfMessages]);
+  SentCommands_.reset(new std::atomic<uint64_t>[ThreadsNum_ * numberOfMessages]());
   memset(ReceivedBytes_.get(), 0, sizeof(uint64_t)*ThreadsNum_);
-  memset(SentBytes_.get(), 0, sizeof(uint64_t)*ThreadsNum_);
   memset(ReceivedCommands_.get(), 0, sizeof(uint64_t)*ThreadsNum_*numberOfMessages);
-  memset(SentCommands_.get(), 0, sizeof(uint64_t)*ThreadsNum_*numberOfMessages);
 
   aioObject *peerSocket = nullptr;
   if (!object) {
@@ -148,10 +145,11 @@ void Peer::start()
 void Peer::sendMessage(MessageTy type, void *data, size_t size)
 {
   aioBtcSend(Socket, messageName(type), data, size, afNone, 0, nullptr, nullptr);
+  // The pipeline relay callback sends from the serial thread, whose default id aliases worker0's slot
   unsigned numberOfMessages = static_cast<unsigned>(MessageTy::last);
   unsigned commandId = static_cast<unsigned>(type);
-  SentCommands_[GetWorkerThreadId()*numberOfMessages + commandId]++;
-  SentBytes_[GetWorkerThreadId()] += size + (4+12+4+4);
+  SentCommands_[GetWorkerThreadId()*numberOfMessages + commandId].fetch_add(1, std::memory_order_relaxed);
+  SentBytes_[GetWorkerThreadId()].fetch_add(size + (4+12+4+4), std::memory_order_relaxed);
 }
 
 void Peer::onConnect(AsyncOpStatus status)
@@ -177,7 +175,7 @@ void Peer::onConnect(AsyncOpStatus status)
   msg.start_height = BlockIndex_.best()->Height;
   msg.relay = 1;
 
-  xmstream &stream = LocalStream();
+  SmallStream<16384> stream;
   BC::serialize(stream, msg);
   sendMessage(MessageTy::version, stream.data(), stream.sizeOf());
   aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, ConnectTimeout, onMessageCb, this);
@@ -424,7 +422,8 @@ void Peer::onGetHeaders(BC::Proto::MessageGetHeaders &getheaders)
     }
   }
 
-  xmstream &stream = LocalStream();
+  // The first entry sizes the whole batch; per-entry drift (auxpow, prime multiplier) is covered by the slack or stream growth
+  xmstream stream(!headers.headers.empty() ? BTC::getSerializedSize(headers.headers.front()) * headers.headers.size() + 256 : 64);
   BC::serialize(stream, headers);
   sendMessage(MessageTy::headers, stream.data(), stream.sizeOf());
 }
@@ -453,7 +452,7 @@ void Peer::onGetBlocks(BC::Proto::MessageGetBlocks &getblocks)
     }
   }
 
-  xmstream &stream = LocalStream();
+  xmstream stream(inv.Inventory.size()*36 + 16);
   BC::serialize(stream, inv);
   sendMessage(MessageTy::inv, stream.data(), stream.sizeOf());
 }
@@ -477,7 +476,7 @@ void Peer::onGetData(BC::Proto::MessageGetData &getdata)
   }
 
   if (ProtocolVersion == 70001) {
-    xmstream &stream = LocalStream();
+    SmallStream<16384> stream;
     BC::Proto::MessageInv inv;
     inv.Inventory.resize(1);
     inv.Inventory[0].type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
@@ -489,7 +488,7 @@ void Peer::onGetData(BC::Proto::MessageGetData &getdata)
 
 void Peer::onPing(BC::Proto::MessagePing &ping)
 {
-  xmstream &stream = LocalStream();
+  SmallStream<16384> stream;
   BC::Proto::MessagePong outMsg;
   outMsg.nonce = ping.nonce;
   BC::serialize(stream, outMsg);
@@ -506,10 +505,13 @@ void Peer::onPong(BC::Proto::MessagePong &pong)
     if (diff > 0) {
       PingTimes_[PingTimesIdx_++ % PingTimes_.size()] = static_cast<unsigned>(diff);
 
-      if (BlockSource_.get())
-        userEventStartTimer(pingEvent, 3*1000000, 1);
-      else
-        userEventStartTimer(pingEvent, 60*1000000, 1);
+      if (enterEventScope()) {
+        if (BlockSource_.get())
+          userEventStartTimer(pingEvent, 3*1000000, 1);
+        else
+          userEventStartTimer(pingEvent, 60*1000000, 1);
+        leaveEventScope();
+      }
     }
   }
 }
@@ -593,7 +595,7 @@ void Peer::onReject(BC::Proto::MessageReject &reject)
 
 void Peer::downloadHeaders(xvector<BC::Proto::BlockHashTy> &&blockLocator, const BC::Proto::BlockHashTy &hashStop)
 {
-  xmstream &stream = LocalStream();
+  SmallStream<16384> stream;
   BC::Proto::MessageGetHeaders msg;
   // TODO: set correct version
   msg.version = 70015;
@@ -614,7 +616,7 @@ void Peer::downloadHeaders(xvector<BC::Proto::BlockHashTy> &&blockLocator, const
 
 void Peer::getData(const BC::Proto::MessageGetData &getdata)
 {
-  xmstream &stream = LocalStream();
+  xmstream stream(getdata.inventory.size()*36 + 16);
   BC::serialize(stream, getdata);
   sendMessage(MessageTy::getdata, stream.data(), stream.sizeOf());
 }
@@ -628,7 +630,7 @@ void Peer::inv(const xvector<BC::Proto::BlockHashTy> &hashes)
     inv.Inventory[i].hash = hashes[i];
   }
 
-  xmstream &stream = LocalStream();
+  SmallStream<16384> stream;
   BC::serialize(stream, inv);
   sendMessage(MessageTy::inv, stream.data(), stream.sizeOf());
 }
@@ -660,7 +662,10 @@ bool Peer::fetchQueuedBlocks(xvector<BC::Proto::BlockHashTy> &hashes)
 
 void Peer::scheduleBlocksDownload(uint64_t usTimeout)
 {
+  if (!enterEventScope())
+    return;
   userEventStartTimer(blockDownloadEvent, usTimeout, 1);
+  leaveEventScope();
 }
 
 void Peer::downloadBlocks(std::vector<BC::Proto::BlockHashTy> &hashes)
@@ -679,7 +684,7 @@ void Peer::downloadBlocks(std::vector<BC::Proto::BlockHashTy> &hashes)
   LastBatchSize_ = hashes.size();
 
   blockDownloading.fetch_add(1);
-  xmstream &stream = LocalStream();
+  xmstream stream(msg.inventory.size()*36 + 16);
   BC::serialize(stream, msg);
 
   BlockDownloadingStartTime_ = std::chrono::steady_clock::now();
@@ -693,7 +698,7 @@ void Peer::cancelDownloadBlocks()
 
 void Peer::ping()
 {
-  xmstream &stream = LocalStream();
+  SmallStream<16384> stream;
   PingLastNonce_ = static_cast<uint64_t>(rand());
 
   BC::Proto::MessagePing outMsg;
@@ -777,6 +782,7 @@ void Node::AddPeer(const HostAddress &address, const char *name, aioObject *obje
   } else if (object && ++IncomingConnections_ > IncomingConnectionsLimit_) {
     LOG_F(WARNING, "Can't connect to %s: incoming connections limit exceeded", name);
     --IncomingConnections_;
+    deleteAioObject(object);
     return;
   }
 
@@ -787,15 +793,23 @@ void Node::AddPeer(const HostAddress &address, const char *name, aioObject *obje
     ptr = It.first->second;
   }
 
-  PeerPtr peer = new  Peer(*BlockIndex_, *ChainParams_, *Storage_, this, Base, ThreadsNum_, WorkerThreadsNum_, address, object, name);
+  Peer *rawPeer = new Peer(*BlockIndex_, *ChainParams_, *Storage_, this, Base, ThreadsNum_, WorkerThreadsNum_, address, object, name);
+  if (!rawPeer->Socket) {
+    // Only the outgoing path binds a local port; without a socket the peer has nothing to unwind
+    LOG_F(ERROR, "Can't create outgoing socket for %s", name);
+    --OutgoingConnections_;
+    delete rawPeer;
+    return;
+  }
+
+  PeerPtr peer(rawPeer);
   if (!ptr->compare_and_exchange(nullptr, peer.get())) {
     // Address is taken by a live peer; give the connection slot back, it was never used
     if (object)
       --IncomingConnections_;
     else
       --OutgoingConnections_;
-    deleteUserEvent(peer.get()->blockDownloadEvent);
-    deleteUserEvent(peer.get()->pingEvent);
+    peer.get()->deleteEvents();
     btcSocketDelete(peer.get()->Socket);
     return;
   }
@@ -841,8 +855,7 @@ void Node::RemovePeer(Peer *peer)
     if (blockSourcePtr.get())
       disconnectPeerFromBlockSource(peer, blockSourcePtr);
 
-    deleteUserEvent(peer->blockDownloadEvent);
-    deleteUserEvent(peer->pingEvent);
+    peer->deleteEvents();
     btcSocketDelete(peer->Socket);
     auto ptr = Peers[peer->Address];
     if (ptr)
@@ -878,7 +891,7 @@ void Node::OnGetAddr(Peer *peer)
 
   if (!addr.addr_list.empty()) {
     LOG_F(INFO, "Peer %s: send %zu peers in addr message", peer->Name.c_str(), addr.addr_list.size());
-    xmstream &stream = peer->LocalStream();
+    xmstream stream(addr.addr_list.size()*30 + 16);
     BC::serialize(stream, addr);
     peer->sendMessage(Peer::MessageTy::addr, stream.data(), stream.sizeOf());
   }

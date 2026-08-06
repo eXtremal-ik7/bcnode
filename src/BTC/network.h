@@ -115,12 +115,6 @@ private:
       ActiveThreads_--;
   }
 
-  xmstream &LocalStream() {
-    xmstream &stream = SendStreams[GetWorkerThreadId()];
-    stream.reset();
-    return stream;
-  }
-
   static void socketDestructorCb(aioObjectRoot*, void *arg);
   static void eventDestructorCb(aioUserEvent*, void *arg);
   static void blockDownloadCb(aioUserEvent*, void *arg);
@@ -160,6 +154,34 @@ private:
   void getData(const BC::Proto::MessageGetData &getdata);
   void inv(const xvector<BC::Proto::BlockHashTy> &hashes);
 
+  // Timer events are started from worker threads while RemovePeer can run on another one; a start
+  // racing deleteUserEvent touches a freed event. Every start runs inside enter/leave and the
+  // delete request is executed by whoever leaves last (low bits: 1 = requested, 2 = done; users step 4)
+  bool enterEventScope() {
+    if (!(EventUsers_.fetch_add(4) & 1))
+      return true;
+    leaveEventScope();
+    return false;
+  }
+
+  void leaveEventScope() {
+    unsigned state = EventUsers_.fetch_sub(4) - 4;
+    // Entries after the request are possible, so "requested, no users" converts to "done" exactly once
+    while (state == 1) {
+      if (EventUsers_.compare_exchange_weak(state, 3)) {
+        deleteUserEvent(blockDownloadEvent);
+        deleteUserEvent(pingEvent);
+        return;
+      }
+    }
+  }
+
+  void deleteEvents() {
+    EventUsers_.fetch_add(4);
+    EventUsers_.fetch_or(1);
+    leaveEventScope();
+  }
+
 private:
   static constexpr unsigned AvgWindowSize = 8;
   static constexpr uint64_t ConnectTimeout = 60*1000000;
@@ -195,10 +217,9 @@ private:
   unsigned ThreadsNum_ = 0;
   unsigned WorkerThreadsNum_ = 0;
   std::atomic<unsigned> Deleted_ = 0;
+  std::atomic<unsigned> EventUsers_ = 0;
 
-  std::unique_ptr<xmstream[]> SendStreams;
   xmstream ReceiveStream;
-  xmstream UnpackedStream_;
   char Command[12];
 
   bool Incoming = false;
@@ -240,9 +261,10 @@ private:
   std::chrono::time_point<std::chrono::steady_clock> HeaderDownloadingStartTime_ = TimeUnknown;
 
   std::unique_ptr<uint64_t[]> ReceivedBytes_;
-  std::unique_ptr<uint64_t[]> SentBytes_;
+  // Sent-side slots are shared: the pipeline relay callback sends from the serial thread, which aliases worker0
+  std::unique_ptr<std::atomic<uint64_t>[]> SentBytes_;
   std::unique_ptr<uint64_t[]> ReceivedCommands_;
-  std::unique_ptr<uint64_t[]> SentCommands_;
+  std::unique_ptr<std::atomic<uint64_t>[]> SentCommands_;
 
   bool isAlive();
 
@@ -269,7 +291,7 @@ private:
   uint64_t sentBytes() const {
     uint64_t sum = 0;
     for (unsigned i = 0; i < ThreadsNum_; i++)
-      sum += SentBytes_[i];
+      sum += SentBytes_[i].load(std::memory_order_relaxed);
     return sum;
   }
 
@@ -287,7 +309,7 @@ private:
     unsigned numberOfMessages = static_cast<unsigned>(MessageTy::last);
     unsigned commandId = static_cast<unsigned>(type);
     for (unsigned i = 0; i < ThreadsNum_; i++)
-      sum += SentCommands_[i*numberOfMessages + commandId];
+      sum += SentCommands_[i*numberOfMessages + commandId].load(std::memory_order_relaxed);
     return sum;
   }
 
