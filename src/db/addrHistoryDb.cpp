@@ -2,6 +2,8 @@
 #include "storage.h"
 #include "archive.h"
 
+#include "thirdparty/ankerl/unordered_dense.h"
+
 namespace BC {
 namespace DB {
 
@@ -37,12 +39,41 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
     CAddrHistoryItem Item;
   };
 
-  // Addresses are interned into numbers: a touch carries the number, not the
-  // 33-byte key, and the second pass reaches its cursor without hashing again
-  std::unordered_map<BC::Script::CAddress, uint32_t> keyIds;
-  std::vector<const BC::Script::CAddress*> keyById;  // map nodes are stable
+  // Addresses are interned into numbers at the touch itself: everything
+  // per-address downstream is a vector indexed by id, one hash lookup total
+  ankerl::unordered_dense::map<BC::Script::CAddress, uint32_t> keyIds;
+  std::vector<BC::Script::CAddress> keyById;
   std::vector<uint32_t> counts;
   std::vector<CTouch> touches;
+
+  // Net balance delta of the transaction per affected address; a zero net
+  // change (self-send) still gives a history element. Epoch check instead of
+  // a per-tx map: ending a tx costs one clear() of its own touches
+  struct CTxTouch {
+    uint32_t KeyId;
+    uint64_t Delta;
+  };
+  std::vector<uint64_t> touchEpoch;  // per id: serial of the tx that touched it last
+  std::vector<uint32_t> txSlot;      // per id: the touch's slot within that tx
+  std::vector<CTxTouch> txTouches;   // current tx, insertion order
+  uint64_t txSerial = 0;
+
+  auto touch = [&](const BC::Script::CAddress &address, uint64_t delta) {
+    auto [it, inserted] = keyIds.try_emplace(address, static_cast<uint32_t>(keyById.size()));
+    const uint32_t id = it->second;
+    if (inserted) {
+      keyById.push_back(address);
+      counts.push_back(0);
+      touchEpoch.push_back(0);
+      txSlot.push_back(0);
+    }
+    if (touchEpoch[id] != txSerial) {
+      touchEpoch[id] = txSerial;
+      txSlot[id] = static_cast<uint32_t>(txTouches.size());
+      txTouches.push_back({id, 0});
+    }
+    txTouches[txSlot[id]].Delta += delta;
+  };
 
   for (const CBlockRef &ref: batch) {
     const BC::Proto::Block &block = *ref.Block;
@@ -55,45 +86,34 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
     const uint32_t height = ref.Index->Height;
     const uint32_t time = ref.Index->Header.nTime;
 
-    // Net balance delta of the transaction for each affected address; an address
-    // touched with a zero net change (self-send) still gets a history element
-    std::unordered_map<BC::Script::CAddress, uint64_t> txDelta;
+    // Order across addresses within one tx is free to change: a transaction
+    // gives an address exactly one element, its delta already folded
     auto flushTx = [&](const BC::Proto::TxHashTy &hash) {
-      for (const auto &d: txDelta) {
-        auto [it, inserted] = keyIds.emplace(d.first, static_cast<uint32_t>(keyById.size()));
-        if (inserted) {
-          keyById.push_back(&it->first);
-          counts.push_back(0);
-        }
-        counts[it->second]++;
-
-        // Order of the touches is the order of the chain: a transaction gives an
-        // address one element, so iterating txDelta arbitrarily changes nothing
-        CTouch &touch = touches.emplace_back();
-        touch.KeyId = it->second;
-        touch.Item.TxId = hash;
-        touch.Item.Height = height;
-        touch.Item.Time = time;
+      for (const CTxTouch &t: txTouches) {
+        counts[t.KeyId]++;
+        CTouch &out = touches.emplace_back();
+        out.KeyId = t.KeyId;
+        out.Item.TxId = hash;
+        out.Item.Height = height;
+        out.Item.Time = time;
         // The delta; CTailWriter folds it into the running balance
-        touch.Item.Aggregate = d.second;
+        out.Item.Aggregate = t.Delta;
       }
-      txDelta.clear();
+      txTouches.clear();
     };
 
     // Coinbase
     {
       const auto &coinbaseTx = block.vtx[0];
       BC::Script::CAddress address;
+      txSerial++;
       for (const auto &txout: coinbaseTx.txOut) {
         if (BC::Script::extractAddress(txout, address)) {
           // A BIP30 repeat replaces the twin's coins with identical ones and only
           // one of the two can ever be spent: the address gets the history element
           // (the block did pay it) with a zero delta, so the running balance stays
           // equal to what the utxo set holds
-          if (validationData.CoinbaseRepeat)
-            txDelta[address];
-          else
-            txDelta[address] += txout.value;
+          touch(address, validationData.CoinbaseRepeat ? 0 : txout.value);
         }
       }
 
@@ -111,18 +131,19 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
       assert(linkedTx.TxIn.size() == tx.txIn.size());
 
       BC::Script::CAddress address;
+      txSerial++;
       for (size_t j = 0; j < tx.txIn.size(); j++) {
         const auto &linkedTxin = linkedTx.TxIn[j];
         assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
 
         const BC::Script::UnspentOutputInfo *outputInfo = (const BC::Script::UnspentOutputInfo*)linkedTxin.data();
         if (BC::Script::extractAddress(*outputInfo, address))
-          txDelta[address] -= outputInfo->Value;
+          touch(address, 0ull - outputInfo->Value);
       }
 
       for (const auto &txout: tx.txOut) {
         if (BC::Script::extractAddress(txout, address))
-          txDelta[address] += txout.value;
+          touch(address, txout.value);
       }
 
       flushTx(validationData.TxIds[i]);
@@ -132,7 +153,7 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
   // Pass two: every tail at its final length, then the touches poured into them
   std::vector<CTailWriter> cursors(keyById.size());
   for (size_t i = 0; i < keyById.size(); i++)
-    cursors[i] = this->allocTail(writer, *keyById[i], counts[i]);
+    cursors[i] = this->allocTail(writer, keyById[i], counts[i]);
 
   for (const CTouch &touch: touches)
     cursors[touch.KeyId].append(touch.Item);

@@ -15,6 +15,7 @@
 #include <p2putils/coreTypes.h>
 #include <p2putils/xmstream.h>
 #include "loguru.hpp"
+#include "thirdparty/ankerl/unordered_dense.h"
 #include <deque>
 #include <future>
 #include <thread>
@@ -35,7 +36,7 @@ struct BlockPosition {
 // state is the one the block connects to
 static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::Block &block, const BC::DB::UTXODb &db)
 {
-  std::unordered_set<CUnspentOutputKey> removed;
+  ankerl::unordered_dense::set<CUnspentOutputKey> removed;
 
   assert(validationData.TxIds.size() == block.vtx.size());
   linkedOutputs.Tx.resize(block.vtx.size());

@@ -25,7 +25,7 @@
 
 #include "db/kvbase.h"
 
-#include <unordered_map>
+#include "thirdparty/ankerl/unordered_dense.h"
 
 namespace BC {
 namespace DB {
@@ -476,7 +476,7 @@ private:
 
     // Index rows are ordered by the inverted metric: iteration is metric-descending
     std::vector<std::pair<CKey, CValue>> selection;
-    std::unordered_map<CKey, size_t> position;
+    ankerl::unordered_dense::map<CKey, size_t> position;
     uint64_t tail = 0;
     bool exhausted = true;
     size_t unreadable = 0;
@@ -545,7 +545,7 @@ private:
     // shard read to the end leaves nothing on disk to bound at all), so only a
     // delta big enough to lift that bound over the cut is worth a read
     const uint64_t bound = exhausted ? 0 : tail;
-    std::unordered_map<CKey, CValue> extraDeltas;
+    ankerl::unordered_dense::map<CKey, CValue> extraDeltas;
     forEachDelta(shard, [&](const CKey &key, const CValue &delta) {
       if (position.count(key))
         return;

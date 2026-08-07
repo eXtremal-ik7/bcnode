@@ -126,6 +126,7 @@ public:
           return false;
         }
 
+        FreshAtOpen_ = false;
         BC::Proto::BlockHashTy shardStamp;
         memcpy(shardStamp.begin(), stampData.data(), sizeof(BC::Proto::BlockHashTy));
         if (i == 0) {
@@ -155,6 +156,8 @@ public:
         *forConnect = blockIndex.genesis();
       }
     }
+
+    configure(cfg);
 
     // Before the engine takes its initial snapshots: initializeImpl writes to
     // the shards directly (the merge family rebuilds index rows), and a write
@@ -198,6 +201,8 @@ public:
   void flush() final { Engine_.flushAll(CurrentBlock_); }
 
   virtual uint32_t version() = 0;
+  // Family-level knobs, read before initializeImpl - the leaves override that one
+  virtual void configure(config4cpp::Configuration*) {}
   virtual bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) = 0;
 
   // Only the families whose fold needs one (merge, array) return an operator
@@ -241,6 +246,10 @@ protected:
 protected:
   // Configuration
   CBaseCfg BaseCfg_;
+
+  // No shard carried a stamp at open: the database is being built from
+  // nothing by this very process, and what is not yet flushed is not on disk
+  bool FreshAtOpen_ = true;
 
   // Owned here, handed to the engine as raw pointers: must outlive it
   std::vector<std::unique_ptr<rocksdb::DB>> OnDiskStorage_;

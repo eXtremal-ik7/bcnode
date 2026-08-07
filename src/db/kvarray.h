@@ -25,6 +25,8 @@
 
 #include "db/kvbase.h"
 
+#include "thirdparty/ankerl/unordered_dense.h"
+
 #include <deque>
 
 namespace BC {
@@ -123,6 +125,10 @@ public:
   ~CKvArrayBase() override { this->Engine_.shutdown(); }
 
   rocksdb::MergeOperator *mergeOperator() final { return new MergeOperator(); }
+
+  void configure(config4cpp::Configuration *cfg) final {
+    MetaCacheCapBytes_ = static_cast<size_t>(cfg->lookupInt(this->Name_.c_str(), "metaCacheMb", 4096)) << 20;
+  }
 
   // Fill cursor of a tail: elements arrive carrying their delta in Aggregate and
   // land folded into the layer-relative running sum, rebased to absolute values
@@ -361,22 +367,61 @@ private:
                      const std::vector<uint64_t> &allTrims,
                      const std::vector<const CItem*> &allTails,
                      const std::vector<uint64_t> &allTailCount) {
-    std::vector<rocksdb::Slice> allKeySlices;
-    allKeySlices.reserve(allKeys.size());
-    for (size_t i = 0; i < allKeys.size(); i++)
-      allKeySlices.emplace_back((const char*)allKeys[i], sizeof(CKey));
+    // The flusher is the only writer of the metadata rows, so on a database
+    // born empty the map is exact and a miss proves absence; {0,0} ≡ NotFound.
+    // Past the cap it freezes for good: misses return to the disk, the
+    // resident keys keep serving and taking updates in place
+    const bool useCache = this->FreshAtOpen_;
+    constexpr size_t metaEntryBytes = sizeof(std::pair<CKey, CMetadata>) + 16;
+    if (useCache && !MetaCacheFrozen_ &&
+        (MetaCache_.size() + allKeys.size()) * metaEntryBytes > MetaCacheCapBytes_) {
+      LOG_F(INFO, "%s: metadata map frozen at %zu keys", this->Name_.c_str(), MetaCache_.size());
+      MetaCacheFrozen_ = true;
+    }
+    const bool complete = useCache && !MetaCacheFrozen_;
+    // No rehash mid-batch: the value pointers in durable survive the inserts
+    if (complete)
+      MetaCache_.reserve(MetaCache_.size() + allKeys.size());
+    std::vector<CMetadata*> durable(allKeys.size(), nullptr);
+    std::vector<uint32_t> missIndex;
+    std::vector<rocksdb::Slice> missSlices;
+    for (size_t i = 0; i < allKeys.size(); i++) {
+      if (complete) {
+        auto [it, inserted] = MetaCache_.try_emplace(*allKeys[i], CMetadata{0, 0});
+        durable[i] = &it->second;
+        continue;
+      }
+      if (useCache) {
+        auto it = MetaCache_.find(*allKeys[i]);
+        if (it != MetaCache_.end()) {
+          durable[i] = &it->second;
+          continue;
+        }
+      }
+      missIndex.push_back(static_cast<uint32_t>(i));
+      missSlices.emplace_back((const char*)allKeys[i], sizeof(CKey));
+    }
 
     // Metadata and the boundary chunks of trimmed keys are one consistent view.
-    // The keys leave kvSortBucket in memcmp order - the comparator's own - so
-    // sorted_input spares rocksdb its per-call sort of the whole batch
-    std::vector<rocksdb::PinnableSlice> metadata(allKeySlices.size());
-    std::vector<rocksdb::Status> metadataReadResult(allKeySlices.size());
+    // The keys leave kvSortBucket in memcmp order - the comparator's own, kept
+    // by the filtering above - so sorted_input spares rocksdb its per-call sort
+    std::vector<rocksdb::PinnableSlice> metadata(missSlices.size());
+    std::vector<rocksdb::Status> metadataReadResult(missSlices.size());
     rocksdb::ReadOptions readOptions;
     readOptions.snapshot = db->GetSnapshot();
-    if (!allKeySlices.empty())
-      db->MultiGet(readOptions, db->DefaultColumnFamily(), allKeySlices.size(),
-                   allKeySlices.data(), metadata.data(), metadataReadResult.data(),
+    if (!missSlices.empty())
+      db->MultiGet(readOptions, db->DefaultColumnFamily(), missSlices.size(),
+                   missSlices.data(), metadata.data(), metadataReadResult.data(),
                    /*sorted_input=*/true);
+
+    std::vector<CMetadata> scratchMeta(missIndex.size());
+    for (size_t m = 0; m < missIndex.size(); m++) {
+      CMetadata &slot = scratchMeta[m];
+      slot = {0, 0};
+      if (metadataReadResult[m].ok() && metadata[m].size() == sizeof(CMetadata))
+        slot = *reinterpret_cast<const CMetadata*>(metadata[m].data());
+      durable[missIndex[m]] = &slot;
+    }
 
     // Reserved once: without it the batch string of a whole layer doubles
     // its way up through a few hundred MB of memcpy
@@ -398,13 +443,8 @@ private:
       const CItem *tailItems = allTails[i];
       const uint64_t headerTailCount = allTailCount[i];
 
-      int64_t durableCount = 0;
-      uint64_t durableAggregate = 0;
-      if (metadataReadResult[i].ok() && metadata[i].size() == sizeof(CMetadata)) {
-        const CMetadata *currentMeta = reinterpret_cast<const CMetadata*>(metadata[i].data());
-        durableCount = currentMeta->Count;
-        durableAggregate = currentMeta->Aggregate;
-      }
+      const int64_t durableCount = durable[i]->Count;
+      const uint64_t durableAggregate = durable[i]->Aggregate;
 
       const int64_t baseCount = durableCount - static_cast<int64_t>(headerBaseTrim);
       const int64_t newCount = baseCount + static_cast<int64_t>(headerTailCount);
@@ -431,10 +471,25 @@ private:
         }
       }
 
-      uint64_t newAggregate = baseAggregate;
-      if (headerTailCount) {
-        newAggregate = baseAggregate + tailItems[headerTailCount - 1].Aggregate;
+      const uint64_t newAggregate = headerTailCount
+        ? baseAggregate + tailItems[headerTailCount - 1].Aggregate : baseAggregate;
 
+      // Metadata update, the resident copy in step with the batch
+      {
+        rocksdb::Slice keySlice(reinterpret_cast<const char*>(allKeys[i]), sizeof(CKey));
+        CMetadata &cached = *durable[i];
+        if (newCount) {
+          cached.Count = newCount;
+          cached.Aggregate = newAggregate;
+          batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(&cached), sizeof(cached)));
+        } else {
+          cached.Count = 0;
+          cached.Aggregate = 0;
+          batch.Delete(keySlice);
+        }
+      }
+
+      if (headerTailCount) {
         size_t remaining = headerTailCount;
         size_t taken = 0;
         int64_t offset = baseCount;
@@ -484,24 +539,12 @@ private:
         chunkKey.Index = xhtobe<uint64_t>(chunkIdx);
         batch.Delete(slice(chunkKey));
       }
-
-      // Update metadata
-      {
-        auto keySlice = allKeySlices[i];
-        if (newCount) {
-          CMetadata meta;
-          meta.Count = newCount;
-          meta.Aggregate = newAggregate;
-          batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(&meta), sizeof(meta)));
-        } else {
-          batch.Delete(keySlice);
-        }
-      }
     }
 
     db->ReleaseSnapshot(readOptions.snapshot);
     this->writeBatch(db, batch);
-    LOG_F(1, "%s: shard %zu flushed %zu keys", this->Name_.c_str(), shardIndex, allKeys.size());
+    LOG_F(1, "%s: shard %zu flushed %zu keys (%zu disk reads, %zu resident)",
+          this->Name_.c_str(), shardIndex, allKeys.size(), missSlices.size(), MetaCache_.size());
   }
   // The revision's layers for one key, oldest first, the last one - the live
   // era - cut at the revision's watermark. Each layer contributes its newest
@@ -569,6 +612,10 @@ private:
 
 private:
   size_t ChunkSize_ = 0;
+  // Resident metadata rows, flusher-private; exactness argument in flushComposed
+  ankerl::unordered_dense::map<CKey, CMetadata> MetaCache_;
+  size_t MetaCacheCapBytes_ = 0;   // metaCacheMb; crossing it freezes the map
+  bool MetaCacheFrozen_ = false;
 };
 
 }

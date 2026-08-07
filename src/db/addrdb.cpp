@@ -6,6 +6,8 @@
 #include "addrdb.h"
 #include "storage.h"
 
+#include "thirdparty/ankerl/unordered_dense.h"
+
 namespace BC {
 namespace DB {
 
@@ -14,12 +16,12 @@ namespace DB {
 static void buildBlockDelta(const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             bool coinbaseRepeat,
-                            std::unordered_map<BC::Script::CAddress, CAddrValue> &deltaMap)
+                            ankerl::unordered_dense::map<BC::Script::CAddress, CAddrValue> &deltaMap)
 {
   // Coinbase
   {
     const auto &coinbaseTx = block.vtx[0];
-    std::unordered_set<BC::Script::CAddress> affectedAddresses;
+    ankerl::unordered_dense::set<BC::Script::CAddress> affectedAddresses;
     BC::Script::CAddress address;
     for (const auto &txout: coinbaseTx.txOut) {
       if (BC::Script::extractAddress(txout, address)) {
@@ -46,7 +48,7 @@ static void buildBlockDelta(const BC::Proto::Block &block,
   assert(linkedOutputs.Tx.size() == block.vtx.size());
 
   for (size_t i = 1; i < block.vtx.size(); i++) {
-    std::unordered_set<BC::Script::CAddress> affectedAddresses;
+    ankerl::unordered_dense::set<BC::Script::CAddress> affectedAddresses;
     const auto &tx = block.vtx[i];
     const auto &linkedTx = linkedOutputs.Tx[i];
 
@@ -92,7 +94,7 @@ bool AddrDb::queryTop(const std::string &index, size_t offset, size_t limit,
 
 void AddrDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddress> &writer, BlockInMemoryIndex&, BlockDatabase&)
 {
-  std::unordered_map<BC::Script::CAddress, CAddrValue> deltaMap;
+  ankerl::unordered_dense::map<BC::Script::CAddress, CAddrValue> deltaMap;
   for (const CBlockRef &ref: batch) {
     if (ref.Block->vtx.empty())
       continue;
@@ -116,7 +118,7 @@ void AddrDb::disconnectImpl(const BC::Common::BlockIndex*,
   if (block.vtx.empty())
     return;
 
-  std::unordered_map<BC::Script::CAddress, CAddrValue> deltaMap;
+  ankerl::unordered_dense::map<BC::Script::CAddress, CAddrValue> deltaMap;
   buildBlockDelta(block, linkedOutputs, validationData.CoinbaseRepeat, deltaMap);
 
   for (auto &addr: deltaMap) {
