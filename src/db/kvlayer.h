@@ -157,6 +157,19 @@ public:
     return Arena_.alloc((size + 7) & ~static_cast<size_t>(7));
   }
 
+  // The abort path of a unit: every head its generation wrote is popped back
+  // to the committed version - out of the map when the key was born here.
+  // The records stay behind as arena garbage; the generation was never torn
+  // off, so no reader ever met them. Live era only, mutator thread
+  void discardUncommitted() {
+    Map_.replaceEach([this](void *value) -> void* {
+      const CGenRecord *rec = static_cast<const CGenRecord*>(value);
+      if (!rec || rec->Gen != Gen_)
+        return value;
+      return const_cast<void*>(static_cast<const void*>(rec->prev()));
+    });
+  }
+
   // The snapshot: the generation being filled becomes visible to whoever is
   // handed this number. In the engine the revision swap is what publishes it;
   // the release here only keeps standalone readers safe
@@ -234,6 +247,9 @@ public:
       return;
     Scattered.reserve(Map_.used());
     Map_.forEachCurrent([this](const CKey &key, void *value) {
+      // a discarded unit popped the key out of the map
+      if (!value)
+        return;
       uint64_t prefix = 0;
       memcpy(&prefix, &key, std::min(sizeof(prefix), sizeof(CKey)));
       Scattered.push_back({xhtobe(prefix), &key, value});

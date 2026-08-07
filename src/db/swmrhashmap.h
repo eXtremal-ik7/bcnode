@@ -284,6 +284,25 @@ public:
     abort();
   }
 
+  // mutator side: rewrite live values in place - the abort path of a layer
+  // pops uncommitted heads this way. fn(value) returns the replacement; null
+  // removes the entry for readers (the slot itself stays, probe chains never
+  // break). The release pairs with the readers' per-slot acquire
+  template<typename F>
+  void replaceEach(F &&fn) {
+    STable *t = Table_.load(std::memory_order_relaxed);
+    const uint64_t gen = Gen_.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < t->Capacity; i++) {
+      SSlot &s = t->Slots[i];
+      if (s.Gen.load(std::memory_order_relaxed) != gen)
+        continue;
+      void *prev = s.Ptr.load(std::memory_order_relaxed);
+      void *next = fn(prev);
+      if (next != prev)
+        s.Ptr.store(next, std::memory_order_release);
+    }
+  }
+
   // quiescent scan (frozen map in the flusher, or the owner between waves):
   // fn(key, value) for every live entry
   template<typename F>

@@ -133,9 +133,29 @@ template<typename CKey> class CKvEngine;
 template<typename CKey>
 class CKvWriter {
 public:
-  CKvWriter(CKvWriter&&) = default;
+  CKvWriter(CKvWriter &&other) :
+    Layers_(std::move(other.Layers_)),
+    Baselines_(other.Baselines_),
+    ShardsNum_(other.ShardsNum_),
+    Committed_(other.Committed_) {
+    other.ShardsNum_ = 0;
+    other.Committed_ = true;
+  }
   CKvWriter(const CKvWriter&) = delete;
   CKvWriter &operator=(const CKvWriter&) = delete;
+
+  // A writer is a transaction boundary, not a cursor: destruction without a
+  // commit is the abort path - a cut segment, failed validation, an
+  // exception - and the next unit shares this uncommitted generation, so the
+  // records must not survive to ride its commit
+  ~CKvWriter() {
+    if (Committed_)
+      return;
+    for (size_t i = 0; i < ShardsNum_; i++) {
+      if (wrote(i))
+        Layers_[i].get()->discardUncommitted();
+    }
+  }
 
   size_t shardsNum() const { return ShardsNum_; }
 
@@ -205,6 +225,9 @@ private:
   std::array<intrusive_ptr<CLayer<CKey>>, MaxShards> Layers_;
   std::array<size_t, MaxShards> Baselines_{};
   size_t ShardsNum_;
+
+  // Set by commitLive: an uncommitted writer discards on destruction
+  bool Committed_ = false;
 };
 
 // How a layer becomes rocksdb rows: the family's business, not the engine's.
@@ -341,6 +364,7 @@ public:
   void commitLive(CKvWriter<CKey> &writer, const BC::Proto::BlockHashTy &stamp) {
     assert(writer.shardsNum() == ShardsNum_);
     assert(!stopped());
+    writer.Committed_ = true;
 
     if (writer.empty())
       return;
@@ -517,6 +541,13 @@ private:
     CLayer<CKey> *era = ActiveEra_[i].get();
     if (!era)
       return;
+    // No commit ever tore it off - the era is in no view, the flusher could
+    // never meet it: frozen it would leak the admission count. liveWriter
+    // makes one for every shard, a unit may touch only some
+    if (era->watermark() == 0) {
+      ActiveEra_[i] = nullptr;
+      return;
+    }
     era->Bytes = era->bytes();
     // release: a flusher that reads this seq through an older view must see
     // every record and the metadata written above
