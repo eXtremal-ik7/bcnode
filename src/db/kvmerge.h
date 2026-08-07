@@ -351,7 +351,10 @@ private:
                    size_t shardIndex,
                    const std::vector<std::pair<const CKey*, CValue>> &folded,
                    const BC::Proto::BlockHashTy &stamp) {
-    rocksdb::WriteBatch batch;
+    // Reserved once: without it the batch string of a whole layer doubles
+    // its way up through a few hundred MB of memcpy
+    rocksdb::WriteBatch batch(64 + folded.size() * (sizeof(CDataRowKey) + sizeof(CValue) + 16
+                              + ActiveIndexes_.size() * 2 * (sizeof(CIndexRowKey) + sizeof(CValue) + 16)));
     this->putStamp(batch, stamp);
 
     std::vector<CDataRowKey> rowKeys;
@@ -372,9 +375,14 @@ private:
         batch.Merge(keySlices[i], rocksdb::Slice(reinterpret_cast<const char*>(&folded[i].second), sizeof(CValue)));
     } else if (!folded.empty()) {
       // RMW: index row replacement needs the old value anyway, so the base row
-      // is written materialized too (and deleted when it folds to the identity)
-      std::vector<std::string> oldValues;
-      auto readResult = db->MultiGet(rocksdb::ReadOptions(), keySlices, &oldValues);
+      // is written materialized too (and deleted when it folds to the identity).
+      // folded is in memcmp order and the 'd' prefix keeps it: sorted_input
+      // spares rocksdb its per-call sort of the whole batch
+      std::vector<rocksdb::PinnableSlice> oldValues(folded.size());
+      std::vector<rocksdb::Status> readResult(folded.size());
+      db->MultiGet(rocksdb::ReadOptions(), db->DefaultColumnFamily(), keySlices.size(),
+                   keySlices.data(), oldValues.data(), readResult.data(),
+                   /*sorted_input=*/true);
       for (size_t i = 0; i < folded.size(); i++) {
         CValue oldValue;
         bool hadValue = readResult[i].ok() && oldValues[i].size() == sizeof(CValue);

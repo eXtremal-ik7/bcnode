@@ -178,6 +178,10 @@ public:
     return layerFor(hash).findOwn(key, hash);
   }
 
+  // Raw era-arena bytes of the key's shard - array tail buffers live next to
+  // the descriptors that frame them and share the era's lifetime
+  void *allocRaw(size_t hash, size_t size) { return layerFor(hash).allocRaw(size); }
+
 private:
   friend class CKvEngine<CKey>;
 

@@ -151,6 +151,12 @@ public:
     });
   }
 
+  // Raw arena bytes with the layer's lifetime, for family payloads that
+  // outgrow one record (array tail buffers). 8-aligned like the records
+  void *allocRaw(size_t size) {
+    return Arena_.alloc((size + 7) & ~static_cast<size_t>(7));
+  }
+
   // The snapshot: the generation being filled becomes visible to whoever is
   // handed this number. In the engine the revision swap is what publishes it;
   // the release here only keeps standalone readers safe
