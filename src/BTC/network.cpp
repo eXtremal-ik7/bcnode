@@ -1108,6 +1108,10 @@ void Node::Sync(Peer *peer,
   // One path for everything: the data is attached to its index and the pipeline decides what to
   // connect and when. A block relayed at the tip becomes a segment of its own, so the verdict
   // takes a wave over one block instead of a single thread walking it
+  // Scheduled means a catch-up download: more blocks are right behind, so the selector may
+  // hold out for a bigger bite; the peer running dry lets the tail through
+  if (scheduledBlock)
+    Pipeline_->setBulkFeed(!downloadFinished);
   BC::Common::BlockIndex *attached = nullptr;
   CBlockPipeline::EResult result =
     Pipeline_->attachFromNetwork(data, static_cast<uint32_t>(size), static_cast<uint32_t>(memorySize),

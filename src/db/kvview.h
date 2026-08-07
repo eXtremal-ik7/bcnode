@@ -5,34 +5,26 @@
 
 #pragma once
 
-// KV window engine on published views. Rationale and proofs:
-// kv-view-migration-plan.md
+// Engine on published views. Per shard a revision is one stack of layers over
+// the disk at its snapshot: the live era last (fold at insert, consecutive
+// units annihilate in memory; tearOff() per unit hands readers a watermark,
+// records above it do not exist for them), frozen eras below, drained by the
+// flusher in freeze order, one batch per layer. Nothing refuses or waits -
+// the backpressure is admission only (isPipelineFull).
 //
-// A writer fills a window set of its own - anywhere, including prepare, off the
-// serial thread - and attaches it as one unit of connect (a batch, a run, a
-// single live block). That makes it one revision: windows plus a RocksDB
-// snapshot per shard, installed with one atomic swap. Readers pin a revision,
-// walk it newest to oldest, then read the disk at its snapshot. The flusher
-// folds unflushed windows into one batch per shard.
+// No layer is ever reset or reused, and an uncommitted era generation is
+// above every pinned watermark by construction: readers take no locks.
 //
-// No window is ever reset or reused, so a reader chasing an arena pointer can
-// no longer meet a writer rewinding that arena. Execution and validation never
-// look up an unpublished write-set; CKvWriter itself may still fold repeated
-// operations on one key inside its private map.
-//
-// The shards are not owned here: the database class keeps initialize/stamps/
-// rebaseChain and hands over opened rocksdb::DB*. So the shutdown order is the
-// owner's - stop admitting work, attach the last unit, flushAll(), stop serving
-// reads, shutdown(), close the shards - asserted here, and shutdown() waits out
-// the reads already inside a call, whose revisions still hold snapshots.
+// The shards belong to the database class, so the shutdown order is the
+// owner's: stop admitting, commit the last unit, flushAll(), stop serving
+// reads, shutdown(), close the shards. shutdown() waits out readers still
+// inside a call, whose revisions hold snapshots.
 
 #include "common/blockDataBase.h"
 #include "common/intrusive_ptr.h"
-#include "common/mlog.h"
 #include "db/keyHash.h"
-#include "swmrhashmap.h"
+#include "db/kvlayer.h"
 
-#include <p2putils/strExtras.h>
 #include <rocksdb/db.h>
 #include <rocksdb/write_batch.h>
 
@@ -48,76 +40,19 @@
 namespace BC {
 namespace DB {
 
-// Arena record of a write: payload follows the header. The key is not stored
-// here - it lives in the map slot, and the fold reads it there
-struct CKvHeader {
-  // Top bit of the length: something below this window (an older segment or the
-  // disk) may hold this key, so a later erase must tombstone instead of drop
-  static constexpr uint32_t MayExistBelowFlag = 0x80000000u;
-  uint32_t SizeAndFlag;
-
-  uint32_t size() const { return SizeAndFlag & ~MayExistBelowFlag; }
-  bool mayExistBelow() const { return (SizeAndFlag & MayExistBelowFlag) != 0; }
-};
-
-// A delete allocates no arena record: the map value is one of these markers,
-// told apart by identity. Tombstone kills a key that may lie below, BornDead a
-// key born in this same window - the fold drops that pair whole. Shared by all
-// instantiations because the fold compares markers across segments
-inline CKvHeader KvTombstoneMarker;
-inline CKvHeader KvBornDeadMarker;
-
-inline bool isKvMarker(const void *entry) {
-  return entry == &KvTombstoneMarker || entry == &KvBornDeadMarker;
-}
-
-// One window, two lives: the writer fills it, seal freezes it and fills in the
-// fields below. Never reset, never reused - it dies whole, when the last view
-// or reader lets go of it
-template<typename CKey>
-struct CWindow {
-  MLog Arena;
-  CSwmrHashMap<CKey> Map;
-
-  // Delete markers have no arena footprint, but their map slot is memory all
-  // the same: charged here so backpressure sees a delete-heavy window
-  size_t PhantomBytes = 0;
-
-  CWindow(size_t arenaBytes, size_t mapCapacity) : Arena(arenaBytes), Map(mapCapacity) {}
-
-  size_t windowSize() { return Arena.size() + PhantomBytes; }
-
-  // From seal on. intrusive_ptr contract first, then the tip this window ends
-  // at and its frozen size (MLog::size() is not const)
-  mutable std::atomic<uintptr_t> Refs_{0};
-  uintptr_t ref_fetch_add(uintptr_t n) const { return Refs_.fetch_add(n, std::memory_order_relaxed); }
-  uintptr_t ref_fetch_sub(uintptr_t n) const { return Refs_.fetch_sub(n, std::memory_order_acq_rel); }
-
-  BC::Proto::BlockHashTy Stamp;
-  size_t Bytes = 0;
-
-  // Place in the attach order, one number per unit. Durability is a watermark
-  // over these, never a flag per window - see CKvEngine::DurableThrough_
-  uint64_t Seq = 0;
-};
-
 // Shards are fixed when the database is created, so the per-revision array is
-// too. Windows per shard have no such bound on purpose: a connected unit has
-// nowhere else to go, so that limit is policy above (isPipelineFull)
+// too
 static constexpr size_t MaxShards = 16;
 
-// Beware when tuning: this floor fires before the byte one when units are
-// small, and the batch then carries too little to fold. 4 against 32 cost 10%
-// of BTC reindex (2026-08-05, /ram/bcnodebtc-bench)
-static constexpr size_t DefaultFlushSegments = 4;
+// Admission closes when a shard owes the disk this many layers: the queue
+// absorbs flusher jitter, the cap is what bounds memory
+static constexpr size_t MaxUnflushedLayers = 4;
 
-// The disk half of a revision: a snapshot and how much of the attach order is
-// inside it, published as ONE object by the flusher right after its write. That
-// is what makes the split exact - a window is either above DurableSeq, and then
-// nowhere in the snapshot, or at or below it, and then wholly in it. Two
-// separate publications cannot do that, and a window counted twice is fatal to
-// the families that fold (merge sums it, array appends it) even though KV
-// shrugs it off by shadowing the disk with the same value
+// The disk half of a revision: a snapshot and how much of the freeze order is
+// inside it, published as ONE object by the flusher right after its write - a
+// layer is either wholly above the snapshot or wholly inside it. A layer
+// counted twice is fatal to the folding families (merge sums it, array
+// appends it)
 struct alignas(512) CDiskState {
   // 512: atomic_intrusive_ptr caches references in the low 9 pointer bits
   rocksdb::DB *Db = nullptr;
@@ -143,11 +78,11 @@ struct alignas(512) CKvView {
 
   // The engine's live-revision counter: shutdown waits for it, or a snapshot
   // would be released into a shard the owner has already closed. Declared
-  // before Shards and Pending - members die in reverse order, so the death is
-  // announced only after every reference the view held is gone
-  struct SLiveTicket {
+  // before Shards - members die in reverse order, so the death is announced
+  // only after every reference the view held is gone
+  struct CLiveTicket {
     std::atomic<size_t> *Live = nullptr;
-    ~SLiveTicket() {
+    ~CLiveTicket() {
       if (Live) {
         Live->fetch_sub(1, std::memory_order_release);
         Live->notify_all();
@@ -156,19 +91,22 @@ struct alignas(512) CKvView {
   } Ticket;
 
   struct CShardView {
+    // Everything above the disk, oldest first: frozen layers - Seq set, the
+    // flusher writes them in order - and, only ever last, the live era with
+    // Seq still zero. A lookup walks the vector newest first
+    std::vector<intrusive_ptr<const CLayer<CKey>>> Layers;
+
+    // Visibility cut of the LAST layer in THIS revision: the watermark its
+    // commit tore off when that layer is the live era, UINT32_MAX when it is
+    // frozen - every generation of a frozen layer is committed
+    uint32_t Watermark = UINT32_MAX;
+
     // The disk state this revision reads, kept alive by it
     intrusive_ptr<const CDiskState> Disk;
-    // window of Pending below, oldest..newest; a lookup walks it backwards
-    size_t First = 0;
-    size_t Count = 0;
   };
 
   // Inline: a lookup reaches its shard straight from the pinned view
   std::array<CShardView, MaxShards> Shards;
-
-  // Every shard's windows, shard by shard, sized to what is there: one
-  // allocation per revision, and no cap to run into
-  std::vector<intrusive_ptr<const CWindow<CKey>>> Pending;
 };
 
 // Reader pin: one atomic on the published slot, held while the caller looks at
@@ -187,153 +125,98 @@ private:
 
 template<typename CKey> class CKvEngine;
 
-// Everything one unit of connect writes, filled anywhere - including prepare,
-// off the serial thread - and handed to the engine whole. Sizes are exact: the
-// unit knows its record count, so nothing has to grow. Writes reach the windows
-// with no engine in the way, this being the hottest path there is
+// One unit of connect writes through this: a reference to the engine's active
+// eras, borrowed for exactly one unit - each key routed to its shard's era by
+// one hash, no engine in the way on the hottest path there is. Per-shard byte
+// baselines are what "this unit wrote" means for an era that already holds
+// the units before it
 template<typename CKey>
 class CKvWriter {
 public:
-  CKvWriter(size_t shardsNum, size_t arenaBytes, size_t mapCapacity) : ShardsNum_(shardsNum) {
-    for (size_t i = 0; i < ShardsNum_; i++)
-      Windows_[i] = new CWindow<CKey>(arenaBytes, mapCapacity);
-  }
-
-  // Whatever the engine did not take: the run was cut before it connected
-  ~CKvWriter() {
-    for (CWindow<CKey> *window: Windows_)
-      delete window;
-  }
-
-  CKvWriter(CKvWriter &&other) : Windows_(other.Windows_), ShardsNum_(other.ShardsNum_) {
-    other.Windows_.fill(nullptr);
-  }
-
+  CKvWriter(CKvWriter&&) = default;
   CKvWriter(const CKvWriter&) = delete;
   CKvWriter &operator=(const CKvWriter&) = delete;
 
   size_t shardsNum() const { return ShardsNum_; }
 
-  // Nothing written yet: attach would make no revision of such a set, so the
-  // caller keeps filling this one instead of building the next
-  bool empty() { return maxWindowSize() == 0; }
-
-  // What this set turned out to need, for sizing the next one: MLog growth
-  // copies the prefix and the map rehashes, while the units of one chain are
-  // all alike
-  size_t maxWindowSize() {
-    size_t max = 0;
-    for (size_t i = 0; i < ShardsNum_; i++)
-      max = std::max(max, Windows_[i]->windowSize());
-    return max;
-  }
-
-  size_t maxUsed() const {
-    size_t max = 0;
-    for (size_t i = 0; i < ShardsNum_; i++)
-      max = std::max(max, Windows_[i]->Map.used());
-    return max;
-  }
-
   // Nothing below can hold this key: a brand new output, a transaction of a
-  // block connected for the first time
+  // block connected for the first time.
+  // One hash per operation: shard from its high bits, map slot from its low
   void putNew(const CKey &key, const void *data, size_t size, const void *suffix = nullptr, size_t suffixSize = 0) {
-    put(key, data, size, suffix, suffixSize, false);
+    const size_t hash = std::hash<CKey>()(key);
+    layerFor(hash).put(key, hash, data, size, suffix, suffixSize, false);
   }
 
   // May land on an existing value: an output restored by a disconnect, a BIP30
   // coinbase repeating an earlier one. Conservative - a false alarm costs one
   // Put plus one Delete instead of nothing
   void putRestore(const CKey &key, const void *data, size_t size, const void *suffix = nullptr, size_t suffixSize = 0) {
-    put(key, data, size, suffix, suffixSize, true);
+    const size_t hash = std::hash<CKey>()(key);
+    layerFor(hash).put(key, hash, data, size, suffix, suffixSize, true);
   }
 
   void erase(const CKey &key) {
     const size_t hash = std::hash<CKey>()(key);
-    CWindow<CKey> &window = *Windows_[fastrange(hash, ShardsNum_)];
-
-    // no arena record: charge the map slot to the window
-    window.PhantomBytes += sizeof(CKey) + 2 * sizeof(void*);
-
-    // One walk picks the marker and writes it; find() first would walk twice
-    window.Map.updateWith(key, hash, [](const void *prev) -> void* {
-      if (prev == &KvBornDeadMarker)
-        return &KvBornDeadMarker;
-      // Born in this window: the pair dies whole. A value that admits something
-      // below it forfeits that
-      const CKvHeader *header = prev && !isKvMarker(prev) ? static_cast<const CKvHeader*>(prev) : nullptr;
-      return header && !header->mayExistBelow() ? &KvBornDeadMarker : &KvTombstoneMarker;
-    });
+    layerFor(hash).erase(key, hash);
   }
 
-  // Window write for the value families the engine does not interpret: merge
-  // folds a delta into the key, array appends to its tail. One hash per
+  // Writes of the value families the engine does not interpret: merge folds a
+  // delta into the key, array appends to its tail - the fold against the
+  // unit's own previous write happens in fill(dst, prev). One hash per
   // operation, as in put/erase - the caller computes it once and passes it on
   size_t hashOf(const CKey &key) const { return std::hash<CKey>()(key); }
-  const void *findOwn(const CKey &key, size_t hash) const { return windowFor(hash).Map.find(key, hash); }
-  void *alloc(size_t hash, size_t bytes) { return windowFor(hash).Arena.alloc(bytes); }
-  void update(const CKey &key, size_t hash, void *entry) { windowFor(hash).Map.update(key, hash, entry); }
 
-  // Records with no arena footprint still occupy a map slot: charged so
-  // backpressure and the flush floors see them
-  void chargePhantom(size_t hash, size_t bytes) { windowFor(hash).PhantomBytes += bytes; }
+  template<typename F>
+  void putWith(const CKey &key, size_t hash, size_t size, F &&fill) {
+    layerFor(hash).putWith(key, hash, size, fill);
+  }
+
+  // The unit's own write for the key, if any: the era's uncommitted
+  // generation - an older head belongs to a committed unit and is not the
+  // caller's to touch
+  const CGenRecord *findOwn(const CKey &key, size_t hash) const {
+    return layerFor(hash).findOwn(key, hash);
+  }
 
 private:
   friend class CKvEngine<CKey>;
 
-  CWindow<CKey> *window(size_t i) const { return Windows_[i]; }
-  CWindow<CKey> &windowFor(size_t hash) const { return *Windows_[fastrange(hash, ShardsNum_)]; }
+  explicit CKvWriter(size_t shardsNum) : ShardsNum_(shardsNum) {}
 
-  // Handed to the engine: the writer stops owning it
-  CWindow<CKey> *release(size_t i) {
-    CWindow<CKey> *window = Windows_[i];
-    Windows_[i] = nullptr;
-    return window;
+  // Did this unit write the shard - against the baseline, so an era full of
+  // earlier units still answers for this unit alone
+  bool wrote(size_t i) const { return Layers_[i].get()->bytes() != Baselines_[i]; }
+
+  bool empty() const {
+    for (size_t i = 0; i < ShardsNum_; i++) {
+      if (wrote(i))
+        return false;
+    }
+    return true;
   }
 
-  // Two pieces glued straight in the arena: a "payload plus a few bytes of
-  // metadata" caller would otherwise stage and copy the record twice
-  void put(const CKey &key, const void *data, size_t size, const void *suffix, size_t suffixSize, bool mayExistBelow) {
-    // One hash per operation: shard from its high bits, map slot from its low
-    const size_t hash = std::hash<CKey>()(key);
-    CWindow<CKey> &window = *Windows_[fastrange(hash, ShardsNum_)];
+  CLayer<CKey> *layer(size_t i) const { return Layers_[i].get(); }
+  CLayer<CKey> &layerFor(size_t hash) const { return *Layers_[fastrange(hash, ShardsNum_)].get(); }
 
-    // record rounded up so every header lands 4-aligned in the arena
-    const size_t total = size + suffixSize;
-    CKvHeader *header = static_cast<CKvHeader*>(window.Arena.alloc((sizeof(CKvHeader) + total + 3) & ~static_cast<size_t>(3)));
-    header->SizeAndFlag = static_cast<uint32_t>(total) | (mayExistBelow ? CKvHeader::MayExistBelowFlag : 0);
-    uint8_t *value = reinterpret_cast<uint8_t*>(header + 1);
-    memcpy(value, data, size);
-    if (suffixSize)
-      memcpy(value + size, suffix, suffixSize);
-
-    // The flag is monotonic inside a window: what the replaced value knew about
-    // the layers below cannot be taken back. A tombstone knows it too - it is
-    // only ever written for a key that may exist below
-    window.Map.updateWith(key, hash, [header](const void *prev) -> void* {
-      if (prev == &KvTombstoneMarker ||
-          (prev && !isKvMarker(prev) && static_cast<const CKvHeader*>(prev)->mayExistBelow()))
-        header->SizeAndFlag |= CKvHeader::MayExistBelowFlag;
-      return header;
-    });
-  }
-
-  std::array<CWindow<CKey>*, MaxShards> Windows_{};
+  std::array<intrusive_ptr<CLayer<CKey>>, MaxShards> Layers_;
+  std::array<size_t, MaxShards> Baselines_{};
   size_t ShardsNum_;
 };
 
-// How a shard's windows become rocksdb rows: the family's business, not the
-// engine's. KV replaces the key, merge sums deltas into it, array concatenates
-// tails - all the engine knows is which windows are still owed to the disk
+// How a layer becomes rocksdb rows: the family's business, not the engine's.
+// KV replaces the key, merge sums deltas into it, array concatenates tails -
+// all the engine knows is which layers are still owed to the disk
 template<typename CKey>
 class IKvSegmentWriter {
 public:
   virtual ~IKvSegmentWriter() {}
-  virtual void writeSegments(rocksdb::DB *db,
-                             size_t shardIndex,
-                             const CWindow<CKey> *const *segments,
-                             size_t count,
-                             const BC::Proto::BlockHashTy &stamp) = 0;
+
+  // One sealed layer, one batch: a frozen era is folded at insert - there are
+  // no runs to merge across, and the flusher hands layers over one at a time
+  virtual void writeLayer(rocksdb::DB *db,
+                          size_t shardIndex,
+                          const CLayer<CKey> *layer,
+                          const BC::Proto::BlockHashTy &stamp) = 0;
 };
 
 template<typename CKey>
@@ -342,16 +225,10 @@ public:
   struct CConfig {
     std::string Name;
 
-    // Floors, per shard, heirs of flushLogSizeMb: while both are unmet the
-    // flusher waits, so short-lived keys fold in memory instead of reaching the
-    // disk (0 = write on every wakeup). Bytes bound memory, windows the lookup
-    // depth - a read walks every window of its shard before the disk.
-    //
-    // Admission stops at twice the floor, so the writer can build the next
-    // batch while the flusher writes this one. A floor of 0 throttles on
-    // nothing: that dimension is switched off, not set to zero
-    size_t FlushBytesLower = 1u << 24;
-    size_t FlushSegmentsLower = DefaultFlushSegments;
+    // Freeze threshold of a live era, bytes of its arena - the only flush
+    // policy there is: an era leaves when it fills, a checkpoint freezes it
+    // regardless
+    size_t EraBytes = 256u << 20;
   };
 
   ~CKvEngine() { shutdown(); }
@@ -365,30 +242,22 @@ public:
 
     // Reopening is a real path (rebaseChain, reindex): a leftover stop bit
     // would kill the new flusher, leftover sequences would sit above the fresh
-    // watermarks and hide every window from it
+    // watermarks and hide every layer from it
     assert(!FlushThread_.joinable());
     assert(LiveViews_.load(std::memory_order_relaxed) == 0);
     Published_.store(0, std::memory_order_relaxed);
     Flushed_.store(0, std::memory_order_relaxed);
-    DrainRequests_.store(0, std::memory_order_relaxed);
     NextSeq_ = 1;
     for (size_t i = 0; i < MaxShards; i++) {
       DurableThrough_[i].store(0, std::memory_order_relaxed);
-      PendingSegments_[i].store(0, std::memory_order_relaxed);
-      PendingBytes_[i].store(0, std::memory_order_relaxed);
+      Unflushed_[i].store(0, std::memory_order_relaxed);
+      ActiveEra_[i] = nullptr;
       Disk_[i].reset(nullptr);
     }
 
     Name_ = cfg.Name;
     ShardsNum_ = shards.size();
-    FlushBytesLower_ = cfg.FlushBytesLower;
-    FlushSegmentsLower_ = cfg.FlushSegmentsLower;
-
-    // Derived, never configured apart: a ceiling below its floor would stop
-    // admission before the flusher ever fires, and both sides would wait for
-    // each other until the storage timer
-    PendingBytesLimit_ = FlushBytesLower_ ? 2 * FlushBytesLower_ : SIZE_MAX;
-    PendingSegmentsLimit_ = FlushSegmentsLower_ ? 2 * FlushSegmentsLower_ : SIZE_MAX;
+    EraBytes_ = cfg.EraBytes;
 
     // The first view: nothing in memory, everything on the disk
     CKvView<CKey> *view = newView();
@@ -402,8 +271,8 @@ public:
     return true;
   }
 
-  // Stops the flusher and drops the published view. A writer set that was never
-  // attached is lost unless flushAll() ran first - same contract as today
+  // Stops the flusher and drops the published view. A unit committed but not
+  // flushed is lost unless flushAll() ran first - same contract as today
   void shutdown() {
     if (!FlushThread_.joinable())
       return;
@@ -415,73 +284,88 @@ public:
     // revision - not necessarily the last - and its snapshot would be released
     // through a dead DB. Ends because the empty slots hand out no more
     Current_.reset(nullptr);
-    for (size_t i = 0; i < ShardsNum_; i++)
+    for (size_t i = 0; i < ShardsNum_; i++) {
       Disk_[i].reset(nullptr);
+      ActiveEra_[i] = nullptr;
+    }
     for (size_t live = LiveViews_.load(std::memory_order_acquire); live; live = LiveViews_.load(std::memory_order_acquire))
       LiveViews_.wait(live, std::memory_order_acquire);
   }
 
   // Writer side ---------------------------------------------------------
 
-  // The only throttle, and it lives outside: the pipeline asks before starting
-  // work and stops admitting units on yes. The engine never defends itself, so
-  // a caller that does not ask grows memory here until the machine dies.
-  //
-  // Two plain loads per shard - no guard, no RMW on the slot every reader pins,
-  // no walk of the view. A probe, not a reservation: units already in
-  // preparation still attach and push both limits past themselves, which costs
-  // memory and lookup depth until the flusher catches up, nothing more
+  // The only throttle there is: the pipeline asks before starting work and
+  // stops admitting on yes; units already in preparation still commit without
+  // waiting. Plain loads - no guard, no RMW on the slot readers pin
   bool isPipelineFull() const {
     assert(!stopped());
     for (size_t i = 0; i < ShardsNum_; i++) {
-      if (PendingSegments_[i].load(std::memory_order_relaxed) >= PendingSegmentsLimit_ ||
-          PendingBytes_[i].load(std::memory_order_relaxed) >= PendingBytesLimit_)
+      if (Unflushed_[i].load(std::memory_order_relaxed) >= MaxUnflushedLayers)
         return true;
     }
 
     return false;
   }
 
-  // Sugar: a writer already matched to this database - the shard count must be
-  // the same one the lookups divide by. Not static for exactly that reason
-  CKvWriter<CKey> newWriter(size_t arenaBytes = 1u << 20, size_t mapCapacity = 4096) const {
-    return CKvWriter<CKey>(ShardsNum_, arenaBytes, mapCapacity);
-  }
-
   size_t shardsNum() const { return ShardsNum_; }
 
-  // The whole writer side. One unit of connect - a batch, a run, a single live
-  // block - arrives as the windows it filled and becomes one revision, all
-  // shards in one swap. Valid because a run is atomic already: its own
-  // preprocessing annihilates pairs only while the run connects whole, and a
-  // run that fails to connect is cut before it gets here.
-  //
-  // Never refuses, and never has to: by the time a unit is connected it is too
-  // late to say no, and a published window cannot be merged into. Pressure
-  // belongs where work is admitted - isPipelineFull() - not where it lands.
-  //
-  // NOT thread-safe: all attach() calls for one engine must be serialized by
-  // one external mutator. The writer may be built on another thread, but that
-  // work must be complete and handed off with happens-before before this call;
-  // no put/erase may overlap it. Readers and the flusher may run concurrently.
-  void attach(CKvWriter<CKey> &writer, const BC::Proto::BlockHashTy &stamp) {
+  // The writer of one unit of connect - a batch, a run, a single block.
+  // Mutator thread only; a missing era is created here and enters a view only
+  // when the unit that wrote it commits
+  CKvWriter<CKey> liveWriter() {
+    assert(!stopped());
+    CKvWriter<CKey> writer(ShardsNum_);
+    for (size_t i = 0; i < ShardsNum_; i++) {
+      CLayer<CKey> *era = ActiveEra_[i].get();
+      if (!era) {
+        // Sized once for the whole era: the arena to its freeze threshold, the
+        // map to the keys such an arena can hold (~48 bytes per record) - a
+        // growth under readers is legal but copies the table
+        era = new CLayer<CKey>(EraBytes_, EraBytes_ / 48);
+        ActiveEra_[i] = era;
+      }
+      writer.Layers_[i] = era;
+      writer.Baselines_[i] = era->bytes();
+    }
+    return writer;
+  }
+
+  // The unit's publication: tearOff per shard the unit touched, the new
+  // watermark rides the revision swap; an era at its byte threshold freezes
+  // right here. NOT thread-safe: one external mutator serializes every
+  // commitLive() - readers and the flusher may run concurrently
+  void commitLive(CKvWriter<CKey> &writer, const BC::Proto::BlockHashTy &stamp) {
     assert(writer.shardsNum() == ShardsNum_);
-    // Nothing would write this unit, and the caller would think it published
     assert(!stopped());
 
-    bool wrote = false;
-    for (size_t i = 0; i < ShardsNum_; i++)
-      wrote |= writer.window(i)->windowSize() != 0;
-
-    // A unit that wrote nothing: no revision, no snapshots, and the writer is
-    // untouched, so the caller can keep filling it
-    if (!wrote)
+    if (writer.empty())
       return;
+
+    CKvView<CKey> *next = cloneView();
+    for (size_t i = 0; i < ShardsNum_; i++) {
+      if (!writer.wrote(i))
+        continue;
+      typename CKvView<CKey>::CShardView &dst = next->Shards[i];
+
+      CLayer<CKey> *era = ActiveEra_[i].get();
+      assert(era == writer.layer(i) && "the writer outlived a freeze of its era");
+
+      // A fresh era enters the stack with the first unit that wrote it
+      if (dst.Layers.empty() || dst.Layers.back().get() != era)
+        dst.Layers.push_back(intrusive_ptr<const CLayer<CKey>>(era));
+
+      era->Stamp = stamp;
+      era->tearOff();
+      dst.Watermark = era->watermark();
+
+      if (era->bytes() >= EraBytes_)
+        freezeEra(next, i);
+    }
 
     // The linearization point: one atomic swap by a single mutator - no CAS
     // loop, no ABA, no lock. Everyone sees the new revision from here on, the
     // old one dies with the last guard holding it
-    Current_.reset(createView(writer, stamp));
+    Current_.reset(next);
 
     // The ticket after the revision, always: whoever acquires this bump sees
     // the view too, which is what keeps the flusher's wait free of lost wakeups
@@ -489,16 +373,28 @@ public:
     Published_.notify_all();
   }
 
-  // Checkpoint and shutdown: everything attached reaches the disk, then every
+  // Checkpoint and shutdown: everything committed reaches the disk, then every
   // shard - including those that never saw a write - gets the stamp, which
-  // initialize() rejects the database for if the shards disagree. A set the
-  // caller has not attached is not the engine's business and is not written
+  // initialize() rejects the database for if the shards disagree
   void flushAll(const BC::Proto::BlockHashTy &stamp) {
     assert(!stopped());
     if (stamp.isNull())
       return;
 
-    // The one place that waits, by its own contract. The flusher is idle
+    // The disk cannot be stamped over a live tail: freeze every live era
+    bool live = false;
+    for (size_t i = 0; i < ShardsNum_; i++)
+      live |= ActiveEra_[i].get() != nullptr;
+    if (live) {
+      CKvView<CKey> *next = cloneView();
+      for (size_t i = 0; i < ShardsNum_; i++)
+        freezeEra(next, i);
+      Current_.reset(next);
+      Published_.fetch_add(1, std::memory_order_release);
+      Published_.notify_all();
+    }
+
+    // The one place that waits the whole pipe out. The flusher is idle
     // afterwards, so the stamps below need no handoff
     drain();
 
@@ -521,27 +417,19 @@ public:
     return CKvGuard<CKey>(Current_);
   }
 
-  // The pinned view and nothing else: segments newest to oldest, then the disk
-  // at its snapshot. Builders are never searched - see the note at the top
+  // The pinned view and nothing else: the layer stack newest first, then the
+  // disk at its snapshot. Builders are never searched - see the note at the top
   template<typename F>
   bool find(const CKvGuard<CKey> &guard, const CKey &key, F &&callback) const {
     const size_t hash = std::hash<CKey>()(key);
     return lookup(guard, fastrange(hash, ShardsNum_), key, hash, callback);
   }
 
-  // One shard of the pinned revision: its windows oldest to newest, and the disk
-  // they sit on. KV stops at the first hit; merge and array have to fold every
-  // layer, so they walk this themselves
-  struct CLayers {
-    rocksdb::DB *Db = nullptr;
-    const rocksdb::Snapshot *Snapshot = nullptr;
-    const intrusive_ptr<const CWindow<CKey>> *Windows = nullptr;
-    size_t Count = 0;
-  };
-
-  CLayers layers(const CKvGuard<CKey> &guard, size_t shardIndex) const {
-    const auto &shard = guard.view()->Shards[shardIndex];
-    return CLayers{shard.Disk.get()->Db, shard.Disk.get()->Snapshot, guard.view()->Pending.data() + shard.First, shard.Count};
+  // One shard of the pinned revision, for the families that fold every layer
+  // themselves: oldest first, the last layer cut at the revision's Watermark,
+  // every other one read whole
+  const typename CKvView<CKey>::CShardView &shard(const CKvGuard<CKey> &guard, size_t shardIndex) const {
+    return guard.view()->Shards[shardIndex];
   }
 
   size_t shardOf(const CKey &key) const { return fastrange(std::hash<CKey>()(key), ShardsNum_); }
@@ -557,17 +445,32 @@ private:
     return view;
   }
 
+  // One layer probed for a key: 1 = delivered, -1 = deleted here, 0 = miss.
+  // Read at the given watermark - a record above it does not exist for this
+  // reader, and a miss means "nothing at or below W" exactly
+  template<typename F>
+  static int probeLayer(const CLayer<CKey> *layer, uint32_t watermark, const CKey &key, size_t hash, F &&callback) {
+    if (const CGenRecord *rec = layer->find(key, hash, watermark)) {
+      if (rec->tombstone())
+        return -1;
+      callback(rec->payload(), rec->size());
+      return 1;
+    }
+    return 0;
+  }
+
   template<typename F>
   bool lookup(const CKvGuard<CKey> &guard, size_t shardIndex, const CKey &key, size_t hash, F &&callback) const {
-    // Newest segment first, and the walk stops on the first hit including a
-    // marker: otherwise a deleted key resurrects from a layer below
-    const auto &shard = guard.view()->Shards[shardIndex];
-    for (size_t i = shard.Count; i-- > 0; ) {
-      if (const void *entry = guard.view()->Pending[shard.First + i].get()->Map.find(key, hash))
-        return deliver(entry, callback);
+    // Newest first, stopping on the first hit including a tombstone: otherwise
+    // a deleted key resurrects from below
+    const typename CKvView<CKey>::CShardView &shard = guard.view()->Shards[shardIndex];
+    for (size_t j = shard.Layers.size(); j-- > 0; ) {
+      const uint32_t watermark = j + 1 == shard.Layers.size() ? shard.Watermark : UINT32_MAX;
+      if (int rc = probeLayer(shard.Layers[j].get(), watermark, key, hash, callback))
+        return rc > 0;
     }
 
-    // The disk at the revision of this view: pending and snapshot are one pair
+    // The disk at the revision of this view: layers and snapshot are one pair
     rocksdb::ReadOptions options;
     options.snapshot = shard.Disk.get()->Snapshot;
     rocksdb::Slice keySlice(reinterpret_cast<const char*>(&key), sizeof(CKey));
@@ -580,106 +483,77 @@ private:
     return false;
   }
 
-  template<typename F>
-  static bool deliver(const void *entry, F &&callback) {
-    if (isKvMarker(entry))
-      return false;
-    const CKvHeader *header = static_cast<const CKvHeader*>(entry);
-    callback(header + 1, header->size());
-    return true;
-  }
-
-  // The next revision, built from the current one by reading it plainly: this
-  // thread is its only mutator, and the flusher never touches it
-  CKvView<CKey> *createView(CKvWriter<CKey> &writer, const BC::Proto::BlockHashTy &stamp) {
+  // The next revision, cloned from the current one by its single mutator. The
+  // disk states refresh to the newest published, and a frozen layer such a
+  // state already contains is dropped: layer and snapshot change as one pair,
+  // which is what keeps the families that fold from counting a layer twice
+  CKvView<CKey> *cloneView() {
     const CKvView<CKey> *prev = Current_.get();
     CKvView<CKey> *next = newView();
-    const uint64_t seq = NextSeq_++;
-
-    // Upper bound: everything the previous revision holds plus one window per
-    // shard. One allocation, and no reallocation while the shards are filled
-    next->Pending.reserve(prev->Pending.size() + ShardsNum_);
-
     for (size_t i = 0; i < ShardsNum_; i++) {
       typename CKvView<CKey>::CShardView &dst = next->Shards[i];
       const typename CKvView<CKey>::CShardView &src = prev->Shards[i];
-      dst.First = next->Pending.size();
-
-      // Disk and watermark in one object, one load: written windows leave the
-      // view exactly when their data enters the snapshot that replaces them.
-      // Never a flag per window - flags are observed one at a time, and
-      // dropping a newer window while keeping an older one leaves the older
-      // shadowing the value the fold just replaced (§2.3)
       dst.Disk = intrusive_ptr<const CDiskState>(Disk_[i]);
-      for (size_t k = 0; k < src.Count; k++) {
-        if (prev->Pending[src.First + k].get()->Seq > dst.Disk.get()->DurableSeq)
-          next->Pending.push_back(prev->Pending[src.First + k]);
+      dst.Watermark = src.Watermark;
+      // A durable layer is dropped with the disk state that contains it; the
+      // live era (Seq still zero) is always carried
+      for (const auto &layer: src.Layers) {
+        const uint64_t seq = layer.get()->Seq.load(std::memory_order_relaxed);
+        if (!seq || seq > dst.Disk.get()->DurableSeq)
+          dst.Layers.push_back(layer);
       }
-
-      // Then the unit's own window, frozen as it goes in. An empty one is not a
-      // revision: that shard keeps just the survivors
-      CWindow<CKey> *window = writer.release(i);
-      if (window->windowSize()) {
-        window->Stamp = stamp;
-        window->Bytes = window->windowSize();
-        window->Seq = seq;
-        // Charged before the swap below publishes it: the flusher subtracts
-        // only what it found in a view, so the counters cannot go negative
-        PendingSegments_[i].fetch_add(1, std::memory_order_relaxed);
-        PendingBytes_[i].fetch_add(window->Bytes, std::memory_order_relaxed);
-        next->Pending.push_back(intrusive_ptr<const CWindow<CKey>>(window));
-      } else {
-        delete window;
-      }
-
-      dst.Count = next->Pending.size() - dst.First;
     }
-
     return next;
+  }
+
+  // Freeze the shard's live era, if there is one: it takes its place in the
+  // freeze order and stops mutating - already last in the stack, so nothing
+  // moves, the Seq is what hands it to the flusher
+  void freezeEra(CKvView<CKey> *next, size_t i) {
+    CLayer<CKey> *era = ActiveEra_[i].get();
+    if (!era)
+      return;
+    era->Bytes = era->bytes();
+    // release: a flusher that reads this seq through an older view must see
+    // every record and the metadata written above
+    era->Seq.store(NextSeq_++, std::memory_order_release);
+    ActiveEra_[i] = nullptr;
+    next->Shards[i].Watermark = UINT32_MAX;
+    Unflushed_[i].fetch_add(1, std::memory_order_relaxed);
   }
 
   // Flusher side --------------------------------------------------------
 
-  // Does the view still owe the disk anything, floors aside. The watermark
-  // makes this one read per shard: segments carry increasing sequences, so the
-  // newest one being durable means all of them are
+  // Does the view still owe the disk anything: frozen layers only - a live
+  // era (Seq zero) is never the flusher's until frozen
   bool hasWork(const CKvView<CKey> *view) const {
     for (size_t i = 0; i < ShardsNum_; i++) {
-      const auto &shard = view->Shards[i];
-      if (shard.Count &&
-          view->Pending[shard.First + shard.Count - 1].get()->Seq > DurableThrough_[i].load(std::memory_order_acquire))
-        return true;
+      for (const auto &layer: view->Shards[i].Layers) {
+        const uint64_t seq = layer.get()->Seq.load(std::memory_order_acquire);
+        if (seq && seq > DurableThrough_[i].load(std::memory_order_acquire))
+          return true;
+      }
     }
     return false;
   }
 
   void flushLoop() {
     loguru::set_thread_name((Name_ + ".flush").c_str());
-    uint64_t drainServed = 0;
 
     for (;;) {
-      // Words before the view they announce, always: a unit this pass misses
+      // Word before the view it announces, always: a unit this pass misses
       // has already moved the word, so the wait below returns instead of
-      // blocking. The whole handshake - they say "look again", nothing more
+      // blocking. The whole handshake - "look again", nothing more
       const uint64_t published = Published_.load(std::memory_order_acquire);
-      const uint64_t drainRequested = DrainRequests_.load(std::memory_order_acquire);
-
-      // Neither a drain nor a stop may wait for data that is not coming
-      const bool forced = drainRequested != drainServed || (published & StopBit);
 
       {
         CKvGuard<CKey> guard = this->guard();
-        if (flushPending(guard.view(), forced)) {
-          drainServed = drainRequested;
+        if (flushPending(guard.view()))
           continue;
-        }
       }
 
-      // Nothing written: nothing owed, or every shard below its floor. A forced
-      // pass reaching here has written all there was
-      drainServed = drainRequested;
-
-      // stop, and everything published is on the disk
+      // stop, and every frozen layer is on the disk; promoting what is still
+      // active is flushAll's business, by the shutdown contract
       if (published & StopBit)
         return;
 
@@ -687,43 +561,37 @@ private:
     }
   }
 
-  // Take-all per shard, once the shard is worth a batch: a pass costs the same
-  // sort and the same WriteBatch whatever it carries, and a pair folded in
-  // memory is a record RocksDB never writes and never compacts. Above the floor
-  // the batch size stays emergent - as far ahead as the writer got
-  bool flushPending(const CKvView<CKey> *view, bool forced) {
+  // One layer, one batch, as soon as it is frozen: a frozen era is folded at
+  // insert, so there is nothing to wait for and nothing to merge across
+  bool flushPending(const CKvView<CKey> *view) {
     bool flushed = false;
 
     for (size_t i = 0; i < ShardsNum_; i++) {
-      // reused across passes: one thread lives here and keeps its capacity
-      Segments_.clear();
-      size_t bytes = 0;
-      const size_t count = unflushed(view, i, Segments_, bytes);
-      if (!count)
-        continue;
+      const typename CKvView<CKey>::CShardView &shard = view->Shards[i];
+      // The stack is oldest first; whatever is already on the disk waits for
+      // the next revision to drop it, a live era (Seq zero) is not owed yet
+      for (const auto &ref: shard.Layers) {
+        const CLayer<CKey> *frozen = ref.get();
+        const uint64_t seq = frozen->Seq.load(std::memory_order_acquire);
+        if (!seq || seq <= DurableThrough_[i].load(std::memory_order_acquire))
+          continue;
 
-      if (!forced && bytes < FlushBytesLower_ && count < FlushSegmentsLower_) {
-        // TODO: sort these windows instead of idling - a window is immutable
-        // from attach on, so the flush then merges k ready runs
-        continue;
+        rocksdb::DB *db = shard.Disk.get()->Db;
+        SegmentWriter_->writeLayer(db, i, frozen, frozen->Stamp);
+
+        // Only after the write returned, and as one object: whoever picks up
+        // this disk state finds the batch inside its snapshot and the layer
+        // that carried it already excluded
+        Disk_[i].reset(new CDiskState(db, seq));
+        DurableThrough_[i].store(seq, std::memory_order_release);
+        Unflushed_[i].fetch_sub(1, std::memory_order_relaxed);
+        flushed = true;
       }
-
-      rocksdb::DB *db = view->Shards[i].Disk.get()->Db;
-      SegmentWriter_->writeSegments(db, i, Segments_.data(), count, Segments_.back()->Stamp);
-
-      // Only after the write returned, and as one object: whoever picks up this
-      // disk state finds the batch inside its snapshot and the windows that
-      // carried it already excluded. The whole batch changes hands at once,
-      // with no state in between
-      Disk_[i].reset(new CDiskState(db, Segments_.back()->Seq));
-      DurableThrough_[i].store(Segments_.back()->Seq, std::memory_order_release);
-      PendingSegments_[i].fetch_sub(count, std::memory_order_relaxed);
-      PendingBytes_[i].fetch_sub(bytes, std::memory_order_relaxed);
-      flushed = true;
     }
 
     if (flushed) {
-      // After the watermarks, mirroring attach: this bump carries them
+      // After the watermarks, mirroring the commit: this bump carries them
+      // and wakes drain()
       Flushed_.fetch_add(1, std::memory_order_release);
       Flushed_.notify_all();
     }
@@ -731,31 +599,10 @@ private:
     return flushed;
   }
 
-  // The shard's unflushed tail and its weight: everything above the watermark.
-  // Sequences increase along the view, so that is always a suffix
-  size_t unflushed(const CKvView<CKey> *view, size_t shardIndex, std::vector<const CWindow<CKey>*> &out, size_t &bytes) const {
-    const uint64_t durable = DurableThrough_[shardIndex].load(std::memory_order_acquire);
-    const auto &shard = view->Shards[shardIndex];
-    size_t count = 0;
-    bytes = 0;
-    for (size_t k = 0; k < shard.Count; k++) {
-      const CWindow<CKey> *window = view->Pending[shard.First + k].get();
-      // already on the disk, waiting for the next attach to drop it
-      if (window->Seq <= durable)
-        continue;
-      out.push_back(window);
-      count++;
-      bytes += window->Bytes;
-    }
-
-    return count;
-  }
-
-  // Asks the flusher to ignore its floors, then waits it out - the request is a
-  // counter, the wake is the ticket attach uses, so the writer thread stays the
-  // only mutator of both. Word before view, mirroring flushLoop
+  // Waits the flusher out - the wake is the ticket the commit uses, the check
+  // is the view itself. No forcing: the flusher writes everything it sees, so
+  // "no work in the current revision" is exactly "drained"
   void drain() {
-    DrainRequests_.fetch_add(1, std::memory_order_release);
     Published_.fetch_add(1, std::memory_order_release);
     Published_.notify_all();
 
@@ -775,15 +622,13 @@ private:
 private:
   std::string Name_;
   size_t ShardsNum_ = 0;
-  size_t FlushBytesLower_ = 1u << 24;
-  size_t FlushSegmentsLower_ = DefaultFlushSegments;
-  size_t PendingBytesLimit_ = 2u << 24;
-  size_t PendingSegmentsLimit_ = 2 * DefaultFlushSegments;
 
-  // Flusher scratch: the shard's unflushed tail, refilled every pass
-  std::vector<const CWindow<CKey>*> Segments_;
+  // The active era per shard, mutator thread only: views hold their own
+  // references, the flusher meets an era only through a view, once frozen
+  std::array<intrusive_ptr<CLayer<CKey>>, MaxShards> ActiveEra_;
+  size_t EraBytes_ = 256u << 20;
 
-  // Whose fold turns those windows into rows - the database class
+  // Whose fold turns those layers into rows - the database class
   IKvSegmentWriter<CKey> *SegmentWriter_ = nullptr;
 
   // The published revision. Mutable: readers are const, and taking a guard
@@ -794,30 +639,26 @@ private:
   std::atomic<size_t> LiveViews_{0};
 
   // The disk state each shard reads at, published by the flusher and picked up
-  // by the next revision. Slots, not a view field: attach must not wait for it
+  // by the next revision. Slots, not a view field: the commit must not wait
+  // for it
   std::array<atomic_intrusive_ptr<const CDiskState>, MaxShards> Disk_;
 
-  // Next unit's sequence and the newest durable one per shard: together with
-  // the view, the whole state of what is still owed to the disk. One writer
-  // each - attach for the counter, the flusher for the watermarks
+  // Next frozen layer's sequence and the newest durable one per shard - what
+  // is still owed to the disk. One writer each: the mutator for the counter,
+  // the flusher for the watermarks
   uint64_t NextSeq_ = 1;
   std::array<std::atomic<uint64_t>, MaxShards> DurableThrough_{};
 
-  // The same tail counted instead of walked, for admission only: attach adds a
-  // window before publishing it, the flusher subtracts what it wrote. Never
-  // below the truth, so the probe answers early rather than late
-  std::array<std::atomic<size_t>, MaxShards> PendingSegments_{};
-  std::array<std::atomic<size_t>, MaxShards> PendingBytes_{};
+  // The admission mirror: how many layers each shard still owes the disk.
+  // ++ by the mutator at freeze, -- by the flusher once durable
+  std::array<std::atomic<size_t>, MaxShards> Unflushed_{};
 
   // Tickets, one per direction, bumped after the state they announce. They
   // count nothing - only "look at the view again" - so there is nothing to add
-  // up wrong and no mutex between the threads. The third is drain asking for
-  // the floors to be ignored; the flusher keeps the last value it served, so
-  // nothing needs clearing
+  // up wrong and no mutex between the threads
   static constexpr uint64_t StopBit = 1ull << 63;
   std::atomic<uint64_t> Published_{0};
   std::atomic<uint64_t> Flushed_{0};
-  std::atomic<uint64_t> DrainRequests_{0};
 
   std::thread FlushThread_;
 };

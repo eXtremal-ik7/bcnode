@@ -5,26 +5,21 @@
 
 #pragma once
 
-// Fixed-size element array with a running aggregate, over the window engine.
-// Besides the fact itself, every element carries in its Aggregate field the
-// fold of all elements up to and including it, so a range read returns ready
-// prefix sums (address history with the balance after each tx, balance chart).
+// Fixed-size element array with a running aggregate: every element carries in
+// its Aggregate field the fold of all elements up to and including it, so a
+// range read returns ready prefix sums (address history with the balance
+// after each tx).
 //
-// One window is normalized to "trim the durable prefix, then append":
+// One unit's record is normalized to "trim the durable prefix, then append":
 //     final = durable[0 : durableCount - BaseTrim] ++ Tail
-// BaseTrim never decreases while the window lives and the Tail holds only
-// elements born in it, so a reorg that truncates the durable end and appends an
-// alternate branch is an ordinary pair of operations with nothing special about
-// it - the append is not lost and needs no rollback of the window.
+// so a reorg that truncates the durable end and appends an alternate branch
+// is an ordinary pair of operations, no rollback needed. A key chains one
+// record per unit inside a layer; compose() replays layers and chains oldest
+// to newest into that one shape, and everything below knows nothing about how
+// many records it came from.
 //
-// What the engine adds is that several windows stand between the caller and the
-// disk, so neither a read nor a flush sees one Tail any more: compose() replays
-// them in order into the same shape, trimming what an older window appended
-// before it reaches the durable prefix. Everything below works on that one
-// composed shape and knows nothing about how many windows it came from.
-//
-// CItem requirements: trivially copyable, fixed size, public uint64_t Aggregate
-// field with the semantics above.
+// CItem requirements: trivially copyable, fixed size, public uint64_t
+// Aggregate field with the semantics above.
 
 #include "db/kvbase.h"
 
@@ -114,7 +109,7 @@ public:
   CKvArrayBase(const std::string &name, size_t chunkSize) :
     CKvDatabase<CKey>(name), ChunkSize_(chunkSize) {}
 
-  // The flusher dispatches writeSegments implemented at this level: stop it
+  // The flusher dispatches the folds implemented at this level: stop it
   // while the dispatch is still valid (~CKvDatabase's shutdown is a no-op then)
   ~CKvArrayBase() override { this->Engine_.shutdown(); }
 
@@ -140,23 +135,23 @@ public:
     uint64_t Running_ = 0;
   };
 
-  // The key's whole tail in this window, at its final size, written once. The
-  // caller counts its elements first and fills the cursor in chain order - which
-  // is why a unit of connect may be tens of thousands of blocks without the
-  // window growing beyond what those blocks actually add: growing a tail in
-  // place would recopy it on every append, and one connect unit is one window
+  // The key's whole tail in this unit, at its final size, written once -
+  // growing it in place would recopy it on every append. Filling the payload
+  // after the call is legal: the generation is uncommitted, no reader sees it
   CTailWriter allocTail(CKvWriter<CKey> &writer, const CKey &key, size_t count) {
     const size_t hash = writer.hashOf(key);
-    // A second tail for one key would orphan the elements of the first: the map
-    // slot holds one record, and the fold below reads exactly that one
-    assert(!writer.findOwn(key, hash) && "key already has a tail in this window");
-
-    CHeader *header = static_cast<CHeader*>(writer.alloc(hash, sizeof(CHeader) + count*sizeof(CItem)));
-    header->BaseTrim = 0;
-    header->TailCount = count;
-
-    writer.update(key, hash, header);
-    return CTailWriter(tail(header));
+    // A second tail for one key would orphan the elements of the first: the
+    // fold below reads one record per unit. A committed record of an earlier
+    // unit is fine - the new one chains over it
+    assert(!writer.findOwn(key, hash) && "key already has a tail in this unit");
+    CItem *cursor = nullptr;
+    writer.putWith(key, hash, sizeof(CHeader) + count*sizeof(CItem), [&cursor, count](void *dst, const CGenRecord*) {
+      CHeader *header = static_cast<CHeader*>(dst);
+      header->BaseTrim = 0;
+      header->TailCount = count;
+      cursor = tail(header);
+    });
+    return CTailWriter(cursor);
   }
 
   // Drop the last count elements. The Tail of this set goes first, only what is
@@ -164,18 +159,21 @@ public:
   // start a fresh Tail over the new end
   void truncate(CKvWriter<CKey> &writer, const CKey &key, size_t count) {
     const size_t hash = writer.hashOf(key);
-    const CHeader *prev = static_cast<const CHeader*>(writer.findOwn(key, hash));
+    // The replaced record stays whole in the arena, so its tail is read while
+    // the new one is filled
+    const CGenRecord *prevRec = writer.findOwn(key, hash);
+    const CHeader *prev = prevRec ? static_cast<const CHeader*>(prevRec->payload()) : nullptr;
     const uint64_t prevCount = prev ? prev->TailCount : 0;
     const uint64_t fromTail = std::min<uint64_t>(count, prevCount);
     const uint64_t newCount = prevCount - fromTail;
 
-    CHeader *header = static_cast<CHeader*>(writer.alloc(hash, sizeof(CHeader) + newCount*sizeof(CItem)));
-    header->BaseTrim = (prev ? prev->BaseTrim : 0) + (count - fromTail);
-    header->TailCount = newCount;
-    if (newCount)
-      memcpy(static_cast<void*>(tail(header)), tail(prev), newCount*sizeof(CItem));
-
-    writer.update(key, hash, header);
+    writer.putWith(key, hash, sizeof(CHeader) + newCount*sizeof(CItem), [&](void *dst, const CGenRecord*) {
+      CHeader *header = static_cast<CHeader*>(dst);
+      header->BaseTrim = (prev ? prev->BaseTrim : 0) + (count - fromTail);
+      header->TailCount = newCount;
+      if (newCount)
+        memcpy(static_cast<void*>(tail(header)), tail(prev), newCount*sizeof(CItem));
+    });
   }
 
   bool query(const CKey &key, size_t from, size_t count, xmstream &result, size_t *totalCount) {
@@ -184,22 +182,22 @@ public:
 
     CKvGuard<CKey> guard = this->Engine_.guard();
     const size_t hash = std::hash<CKey>()(key);
-    auto layers = this->Engine_.layers(guard, fastrange(hash, this->BaseCfg_.ShardsNum));
-    rocksdb::DB *storage = layers.Db;
+    const auto &shard = this->Engine_.shard(guard, fastrange(hash, this->BaseCfg_.ShardsNum));
+    rocksdb::DB *storage = shard.Disk.get()->Db;
 
-    // The windows of this revision, replayed into one: below them is exactly
+    // The layers of this revision, replayed into one: below them is exactly
     // what its snapshot holds
     std::vector<CItem> composedTail;
     uint64_t baseTrim = 0;
-    compose(layers, key, hash, baseTrim, composedTail);
+    compose(shard, key, hash, baseTrim, composedTail);
 
     size_t firstChunk = from / ChunkSize_;
     size_t lastChunk = (from + count - 1) / ChunkSize_;
 
     // Metadata, data chunks and the boundary chunk come from the revision's
-    // snapshot, the same one the windows above were chosen against
+    // snapshot, the same one the layers above were chosen against
     rocksdb::ReadOptions readOptions;
-    readOptions.snapshot = layers.Snapshot;
+    readOptions.snapshot = shard.Disk.get()->Snapshot;
     bool ok = true;
 
     std::vector<std::string> readResult;
@@ -293,68 +291,52 @@ public:
   }
 
 protected:
-  // Fold of the batch: the windows of every key replayed into one trim-and-
-  // append, then written the way a single window always was
-  void writeSegments(rocksdb::DB *db,
-                     size_t shardIndex,
-                     const CWindow<CKey> *const *segments,
-                     size_t count,
-                     const BC::Proto::BlockHashTy &stamp) final {
-    // Sorted references: keys of all windows in one order, so a group is a
-    // key's whole history inside this batch and the batch itself reaches
-    // rocksdb in memcmp order
-    struct CSortedRef {
-      uint64_t Prefix;
-      const CKey *Key;
-      const CHeader *Header;
-      uint32_t Order;
-    };
+  // One sealed layer, one batch: one composed trim-and-append per key in
+  // memcmp order, the key's chain of unit records replayed oldest to newest
+  void writeLayer(rocksdb::DB *db, size_t shardIndex, const CLayer<CKey> *layer, const BC::Proto::BlockHashTy &stamp) final {
+    layer->buildScattered();
 
-    size_t entries = 0;
-    for (size_t i = 0; i < count; i++)
-      entries += segments[i]->Map.used();
-
-    std::vector<CSortedRef> refs;
-    refs.reserve(entries);
-    for (uint32_t order = 0; order < count; order++) {
-      segments[order]->Map.forEachCurrent([&refs, order](const CKey &key, void *value) {
-        uint64_t prefix = 0;
-        memcpy(&prefix, &key, std::min(sizeof(prefix), sizeof(CKey)));
-        refs.push_back({xhtobe(prefix), &key, static_cast<const CHeader*>(value), order});
-      });
-    }
-
-    std::sort(refs.begin(), refs.end(), [](const CSortedRef &l, const CSortedRef &r) {
-      if (l.Prefix != r.Prefix)
-        return l.Prefix < r.Prefix;
-      const int cmp = memcmp(l.Key, r.Key, sizeof(CKey));
-      if (cmp != 0)
-        return cmp < 0;
-      return l.Order < r.Order;
-    });
-
-    // One composed operation per key, in key order
-    std::vector<const CKey*> allKeys;
-    std::vector<uint64_t> allTrims;
-    std::vector<size_t> allTailFirst;
-    std::vector<size_t> allTailCount;
+    std::vector<const CKey*> keys;
+    std::vector<uint64_t> trims;
+    std::vector<const CItem*> tails;
+    std::vector<size_t> firsts;
+    std::vector<uint64_t> counts;
     std::vector<CItem> tailPool;
-    for (size_t i = 0; i < refs.size(); ) {
-      size_t j = i;
-      uint64_t baseTrim = 0;
-      const size_t first = tailPool.size();
-      while (j != refs.size() && memcmp(refs[j].Key, refs[i].Key, sizeof(CKey)) == 0) {
-        replay(refs[j].Header, baseTrim, tailPool, first);
-        j++;
+    keys.reserve(layer->used());
+    trims.reserve(layer->used());
+    tails.reserve(layer->used());
+    counts.reserve(layer->used());
+    for (size_t b = 0; b < KvScatterBuckets && !layer->Scattered.empty(); b++) {
+      kvSortBucket(layer->Scattered, layer->Bounds, b);
+      for (uint32_t k = b ? layer->Bounds[b - 1] : 0, end = layer->Bounds[b]; k < end; k++) {
+        const CKvSortedRef<CKey> &ref = layer->Scattered[k];
+        keys.push_back(ref.Key);
+        uint64_t baseTrim = 0;
+        const size_t first = tailPool.size();
+        replayChain(static_cast<const CGenRecord*>(ref.Entry), baseTrim, tailPool, first);
+        trims.push_back(baseTrim);
+        firsts.push_back(first);
+        counts.push_back(tailPool.size() - first);
       }
-
-      allKeys.push_back(refs[i].Key);
-      allTrims.push_back(baseTrim);
-      allTailFirst.push_back(first);
-      allTailCount.push_back(tailPool.size() - first);
-      i = j;
     }
 
+    // Tails point into the pool: only after it stopped growing
+    for (size_t i = 0; i < keys.size(); i++)
+      tails.push_back(tailPool.data() + firsts[i]);
+
+    flushComposed(db, shardIndex, stamp, keys, trims, tails, counts);
+  }
+
+
+private:
+  // Disk half of the flush: one composed trim-and-append per key, in key order
+  void flushComposed(rocksdb::DB *db,
+                     size_t shardIndex,
+                     const BC::Proto::BlockHashTy &stamp,
+                     const std::vector<const CKey*> &allKeys,
+                     const std::vector<uint64_t> &allTrims,
+                     const std::vector<const CItem*> &allTails,
+                     const std::vector<uint64_t> &allTailCount) {
     std::vector<rocksdb::Slice> allKeySlices;
     allKeySlices.reserve(allKeys.size());
     for (size_t i = 0; i < allKeys.size(); i++)
@@ -375,7 +357,7 @@ protected:
 
     for (size_t i = 0; i < allKeys.size(); i++) {
       const uint64_t headerBaseTrim = allTrims[i];
-      const CItem *tailItems = tailPool.data() + allTailFirst[i];
+      const CItem *tailItems = allTails[i];
       const uint64_t headerTailCount = allTailCount[i];
 
       int64_t durableCount = 0;
@@ -481,10 +463,8 @@ protected:
 
     db->ReleaseSnapshot(readOptions.snapshot);
     this->writeBatch(db, batch);
-    LOG_F(1, "%s: shard %zu flushed %zu windows, %zu keys", this->Name_.c_str(), shardIndex, count, allKeys.size());
+    LOG_F(1, "%s: shard %zu flushed %zu keys", this->Name_.c_str(), shardIndex, allKeys.size());
   }
-
-private:
   // One window applied on top of what the older ones left: its trim eats the
   // accumulated tail first and only then reaches down, and its elements are
   // rebased onto the last survivor. The result is the same trim-and-append
@@ -506,16 +486,38 @@ private:
     }
   }
 
-  // The revision's windows for one key, replayed oldest to newest
-  void compose(const typename CKvEngine<CKey>::CLayers &layers,
-               const CKey &key,
-               size_t hash,
-               uint64_t &baseTrim,
-               std::vector<CItem> &composedTail) const {
-    for (size_t i = 0; i < layers.Count; i++) {
-      if (const void *entry = layers.Windows[i].get()->Map.find(key, hash))
-        replay(static_cast<const CHeader*>(entry), baseTrim, composedTail, 0);
+  // An era chain for one key: one record per unit, newest first through the
+  // back pointers, replayed oldest to newest like a run of windows would be
+  static void replayChain(const CGenRecord *rec, uint64_t &baseTrim, std::vector<CItem> &tailPool, size_t first) {
+    std::vector<const CHeader*> chain;
+    for (; rec; rec = rec->prev())
+      chain.push_back(static_cast<const CHeader*>(rec->payload()));
+    for (size_t i = chain.size(); i-- > 0; )
+      replay(chain[i], baseTrim, tailPool, first);
+  }
+
+  // The revision's layers for one key, replayed oldest to newest, the last
+  // one - the live era - cut at the revision's watermark
+  static void compose(const typename CKvView<CKey>::CShardView &shard,
+                      const CKey &key,
+                      size_t hash,
+                      uint64_t &baseTrim,
+                      std::vector<CItem> &composedTail) {
+    for (size_t j = 0; j < shard.Layers.size(); j++) {
+      const uint32_t watermark = j + 1 == shard.Layers.size() ? shard.Watermark : UINT32_MAX;
+      composeLayer(shard.Layers[j].get(), watermark, key, hash, baseTrim, composedTail);
     }
+  }
+
+  static void composeLayer(const CLayer<CKey> *layer,
+                           uint32_t watermark,
+                           const CKey &key,
+                           size_t hash,
+                           uint64_t &baseTrim,
+                           std::vector<CItem> &composedTail) {
+    if (!layer)
+      return;
+    replayChain(layer->find(key, hash, watermark), baseTrim, composedTail, 0);
   }
 
   int64_t chunksFor(int64_t count) const {

@@ -180,6 +180,11 @@ public:
     size_t SegmentSizeLimit = 256*1048576;
     // Second cap: a chain of tiny blocks costs per-block structures, not bytes
     size_t SegmentBlocksLimit = 262144;
+    // Floors of a bite under a bulk feed: dust segments pay the serial linking pass without
+    // feeding it, so wait for more while the pipeline chews. Either floor opens the bite;
+    // an idle pipeline takes anything
+    size_t BiteFloorSize = 32*1048576;
+    size_t BiteFloorBlocks = 32768;
     // Prepared segments waiting for the serial stage; deeper is colder data at connect
     size_t ReadyQueueDepth = 2;
     // Segments prepared at once. Neighbours are independent (a pair lives inside one segment),
@@ -239,6 +244,9 @@ public:
   bool starving() const;
   // Block file boundary: data still raw a few files later gets a buffer of its own
   void rotateFile();
+  // More data is coming right behind (file reindex, catch-up download): the selector may hold
+  // a bite below the floor. Off lets the tail through
+  void setBulkFeed(bool bulk);
   // Everything attached is connected, written or rejected
   void waitDrained();
   bool failed() const { return Counters_.FileParseErrors.load(std::memory_order_relaxed) != 0; }
@@ -255,7 +263,8 @@ private:
   // from 'frontier'
   void resetLocked(BC::Common::BlockIndex *frontier, std::vector<std::unique_ptr<CSegment>> &dropped);
   bool pipelineIdleLocked() const;
-  std::unique_ptr<CSegment> bite(BC::Common::BlockIndex *frontier);
+  // 'deferred' reports a run below the floor held back for a bulk feed
+  std::unique_ptr<CSegment> bite(BC::Common::BlockIndex *frontier, bool floorActive, bool *deferred);
   // Nothing of a segment reaches the chain: pairs go, the blocks become free to be bitten again
   void discard(CSegment &segment);
   void wakeSelector();
@@ -299,6 +308,9 @@ private:
   bool Stopped_ = false;
   bool SelectorBusy_ = false;
   bool SerialBusy_ = false;
+  // A run below the floor is held back: not drained, and an idle pipeline picks it up
+  bool FloorWait_ = false;
+  std::atomic<bool> BulkFeed_ = false;
   // Bumped by every attach; the selector sleeps until it moves past the value it found nothing at
   std::atomic<uint64_t> ArrivalGen_ = 0;
   uint64_t IdleAt_ = std::numeric_limits<uint64_t>::max();

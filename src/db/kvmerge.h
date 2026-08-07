@@ -5,25 +5,23 @@
 
 #pragma once
 
-// Additive aggregation over the window engine.
-// A window holds one folded delta per key, and the value being commutative and
-// associative is what the whole family rests on: layers are summed instead of
-// shadowed, so a read folds every window of the revision into the disk row and
-// a flush folds every window of the batch into one operand.
-//
-// No lock pairs the two-level read against the flush: the revision pairs them
-// by construction - its windows are exactly what its snapshot does not hold yet.
+// Additive aggregation: a layer record is the cumulative delta of the units
+// that touched the key, and the value being commutative and associative is
+// what the family rests on - layers are summed instead of shadowed, a read
+// folds every layer of the revision into the disk row. The revision pairs its
+// layers with its snapshot by construction, so no lock guards the two-level
+// read against the flush.
 //
 // Shard key space is split into disjoint prefix regions:
 //   data rows    'd' ++ key                               -> value
 //   index rows   'i' ++ indexId ++ be64(~metric) ++ key   -> value (same shard)
-//   service keys "stamp", "basecfg", "xcfg" - outside both regions.
-// Disjointness is what makes an index droppable by a range tombstone and
-// buildable by a single scan of the data region.
+//   service keys "stamp", "basecfg", "xcfg" - outside both.
+// Disjointness makes an index droppable by a range tombstone and buildable by
+// a single scan of the data region.
 //
-// CValue requirements: trivially copyable, default-constructed state is the
-// identity, merge() commutative/associative, negate() gives the inverse delta
-// for disconnect.
+// CValue requirements: trivially copyable, default state is the identity,
+// merge() commutative/associative, negate() gives the inverse delta for
+// disconnect.
 
 #include "db/kvbase.h"
 
@@ -41,13 +39,6 @@ protected:
   };
 
 private:
-  // Window record: the delta this unit folded for the key. The key rides along
-  // because the flush reads groups through sorted references, not through slots
-  struct CHeader {
-    CKey Key;
-    CValue Value;
-  };
-
   struct CActiveIndex {
     uint8_t Id;
     CIndexDef Def;
@@ -128,7 +119,7 @@ private:
 public:
   CKvMergeBase(const std::string &name) : CKvDatabase<CKey>(name) {}
 
-  // The flusher dispatches writeSegments implemented at this level: stop it
+  // The flusher dispatches the folds implemented at this level: stop it
   // while the dispatch is still valid (~CKvDatabase's shutdown is a no-op then)
   ~CKvMergeBase() override { this->Engine_.shutdown(); }
 
@@ -237,51 +228,46 @@ public:
   }
 
   // Write side: the unit's own delta for the key, folded into whatever it has
-  // written for it already
+  // written for it already - the fold at insert, against the record the new
+  // one replaces
   void merge(CKvWriter<CKey> &writer, const CKey &key, const CValue &delta) {
     const size_t hash = writer.hashOf(key);
-    CHeader *header = static_cast<CHeader*>(writer.alloc(hash, sizeof(CHeader)));
-    header->Key = key;
-    const CHeader *prev = static_cast<const CHeader*>(writer.findOwn(key, hash));
-    header->Value = prev ? prev->Value : CValue();
-    header->Value.merge(delta);
-    writer.update(key, hash, header);
+    writer.putWith(key, hash, sizeof(CValue), [&delta](void *dst, const CGenRecord *prev) {
+      CValue value = prev ? *static_cast<const CValue*>(prev->payload()) : CValue();
+      value.merge(delta);
+      memcpy(dst, &value, sizeof(CValue));
+    });
   }
 
-  // Disk row plus every window of the revision, in any order - that is what
+  // Disk row plus every layer of the revision, in any order - that is what
   // commutativity buys. A null result means the key has no row at all
   bool find(const CKey &key, CValue &value) const {
     CKvGuard<CKey> guard = this->Engine_.guard();
     const size_t hash = std::hash<CKey>()(key);
-    auto layers = this->Engine_.layers(guard, fastrange(hash, this->BaseCfg_.ShardsNum));
+    const auto &shard = this->Engine_.shard(guard, fastrange(hash, this->BaseCfg_.ShardsNum));
 
     value = CValue();
     CDataRowKey rowKey;
     makeDataRowKey(rowKey, key);
     rocksdb::ReadOptions readOptions;
-    readOptions.snapshot = layers.Snapshot;
+    readOptions.snapshot = shard.Disk.get()->Snapshot;
     std::string data;
-    if (layers.Db->Get(readOptions, slice(rowKey), &data).ok() && data.size() == sizeof(CValue))
+    if (shard.Disk.get()->Db->Get(readOptions, slice(rowKey), &data).ok() && data.size() == sizeof(CValue))
       memcpy(&value, data.data(), sizeof(CValue));
 
-    for (size_t i = 0; i < layers.Count; i++) {
-      if (const void *entry = layers.Windows[i].get()->Map.find(key, hash))
-        value.merge(static_cast<const CHeader*>(entry)->Value);
+    for (size_t j = 0; j < shard.Layers.size(); j++) {
+      const uint32_t watermark = j + 1 == shard.Layers.size() ? shard.Watermark : UINT32_MAX;
+      mergeLayer(shard.Layers[j].get(), watermark, key, hash, value);
     }
 
     return !value.isNull();
   }
 
-  // Top of a rank index: per-shard head scans merged by the metric, exact as of
-  // the revision - the same list a find() per key would give. Index rows hold
-  // what the last flush wrote, so the windows are folded in here the way find()
-  // folds them into a point read.
-  //
-  // The scan goes deeper than the answer on purpose: the metric of the last row
-  // read from a shard bounds every key of that shard the scan missed, so a
-  // window key outside the selection can only reach the cut T if tail + delta
-  // >= T. Deeper scan, sharper threshold - and with a covering index depth
-  // costs nothing but the sequential read
+  // Top of a rank index: per-shard head scans merged by the metric, layer
+  // deltas folded in - exact as of the revision, the same list a find() per
+  // key would give. The scan goes deeper than the answer on purpose: the last
+  // row read bounds every key the scan missed, so a layer key outside the
+  // selection can only matter if tail + delta reaches the cut
   bool top(const std::string &indexName, size_t offset, size_t limit, std::vector<std::pair<CKey, CValue>> &result) const {
     const CActiveIndex *active = nullptr;
     for (const auto &index: ActiveIndexes_) {
@@ -335,57 +321,36 @@ protected:
     RegisteredIndexes_.push_back(CIndexDef{name, extract});
   }
 
-  // Fold of the batch: every window's delta for a key summed into one operand.
-  // Two modes, as before - a merge operand when no index needs the old value,
-  // a materialized RMW when one does
-  void writeSegments(rocksdb::DB *db,
-                     size_t shardIndex,
-                     const CWindow<CKey> *const *segments,
-                     size_t count,
-                     const BC::Proto::BlockHashTy &stamp) final {
-    // Sorted references, as in the KV fold: the batch reaches rocksdb in
-    // memcmp order of keys, which is what the memtable insert hint wants
-    struct CSortedRef {
-      uint64_t Prefix;
-      const CHeader *Header;
-    };
+  // One sealed layer, one batch in memcmp order of keys: the newest record
+  // per key is the cumulative delta of the whole layer - one operand per key,
+  // the fold is just dropping the identities
+  void writeLayer(rocksdb::DB *db, size_t shardIndex, const CLayer<CKey> *layer, const BC::Proto::BlockHashTy &stamp) final {
+    layer->buildScattered();
 
-    size_t entries = 0;
-    for (size_t i = 0; i < count; i++)
-      entries += segments[i]->Map.used();
-
-    std::vector<CSortedRef> refs;
-    refs.reserve(entries);
-    for (size_t order = 0; order < count; order++) {
-      segments[order]->Map.forEachCurrent([&refs](const CKey &key, void *value) {
-        uint64_t prefix = 0;
-        memcpy(&prefix, &key, std::min(sizeof(prefix), sizeof(CKey)));
-        refs.push_back({xhtobe(prefix), static_cast<const CHeader*>(value)});
-      });
-    }
-
-    std::sort(refs.begin(), refs.end(), [](const CSortedRef &l, const CSortedRef &r) {
-      if (l.Prefix != r.Prefix)
-        return l.Prefix < r.Prefix;
-      return memcmp(&l.Header->Key, &r.Header->Key, sizeof(CKey)) < 0;
-    });
-
-    // One entry per key, the group summed. A delta that cancelled out is the
-    // identity operand and is not written at all
     std::vector<std::pair<const CKey*, CValue>> folded;
-    folded.reserve(refs.size());
-    for (size_t i = 0; i < refs.size(); ) {
-      size_t j = i;
-      CValue value;
-      while (j != refs.size() && memcmp(&refs[j].Header->Key, &refs[i].Header->Key, sizeof(CKey)) == 0) {
-        value.merge(refs[j].Header->Value);
-        j++;
+    folded.reserve(layer->used());
+    for (size_t b = 0; b < KvScatterBuckets && !layer->Scattered.empty(); b++) {
+      kvSortBucket(layer->Scattered, layer->Bounds, b);
+      for (uint32_t k = b ? layer->Bounds[b - 1] : 0, end = layer->Bounds[b]; k < end; k++) {
+        const CKvSortedRef<CKey> &ref = layer->Scattered[k];
+        const CValue &value = *static_cast<const CValue*>(static_cast<const CGenRecord*>(ref.Entry)->payload());
+        // a delta that cancelled out is the identity operand: not written
+        if (!value.isNull())
+          folded.emplace_back(ref.Key, value);
       }
-      if (!value.isNull())
-        folded.emplace_back(&refs[i].Header->Key, value);
-      i = j;
     }
 
+    flushFolded(db, shardIndex, folded, stamp);
+  }
+
+
+private:
+  // Disk half of the flush: folded deltas in key order become a merge operand
+  // each - or a materialized RMW when an index needs the old value
+  void flushFolded(rocksdb::DB *db,
+                   size_t shardIndex,
+                   const std::vector<std::pair<const CKey*, CValue>> &folded,
+                   const BC::Proto::BlockHashTy &stamp) {
     rocksdb::WriteBatch batch;
     this->putStamp(batch, stamp);
 
@@ -450,13 +415,40 @@ protected:
     }
 
     this->writeBatch(db, batch);
-    LOG_F(1, "%s: shard %zu flushed %zu windows, %zu keys", this->Name_.c_str(), shardIndex, count, folded.size());
+    LOG_F(1, "%s: shard %zu flushed %zu keys", this->Name_.c_str(), shardIndex, folded.size());
   }
 
-private:
   template<typename T>
   static rocksdb::Slice slice(const T &value) {
     return rocksdb::Slice(reinterpret_cast<const char*>(&value), sizeof(T));
+  }
+
+  // One layer's delta for the key: the record is cumulative at the watermark
+  // - it folds the layer whole, no chain walk
+  static void mergeLayer(const CLayer<CKey> *layer, uint32_t watermark, const CKey &key, size_t hash, CValue &value) {
+    if (!layer)
+      return;
+    if (const CGenRecord *rec = layer->find(key, hash, watermark))
+      value.merge(*static_cast<const CValue*>(rec->payload()));
+  }
+
+  // Every delta of the revision above the disk, oldest first - each key
+  // contributes its cumulative delta exactly once per layer
+  template<typename F>
+  static void forEachDelta(const typename CKvView<CKey>::CShardView &shard, F &&fn) {
+    for (size_t j = 0; j < shard.Layers.size(); j++) {
+      const uint32_t watermark = j + 1 == shard.Layers.size() ? shard.Watermark : UINT32_MAX;
+      layerDeltas(shard.Layers[j].get(), watermark, fn);
+    }
+  }
+
+  template<typename F>
+  static void layerDeltas(const CLayer<CKey> *layer, uint32_t watermark, F &&fn) {
+    if (!layer)
+      return;
+    layer->forEachAt(watermark, [&fn](const CKey &key, const CGenRecord &rec) {
+      fn(key, *static_cast<const CValue*>(rec.payload()));
+    });
   }
 
   // One shard's part of top(): the head of its index region, the windows folded
@@ -468,11 +460,11 @@ private:
                     size_t depth, size_t need,
                     std::vector<std::pair<CKey, CValue>> &candidates,
                     std::vector<uint64_t> &tails) const {
-    auto layers = this->Engine_.layers(guard, shardIndex);
+    const auto &shard = this->Engine_.shard(guard, shardIndex);
     const uint8_t seekPrefix[2] = {'i', indexId};
 
     rocksdb::ReadOptions readOptions;
-    readOptions.snapshot = layers.Snapshot;
+    readOptions.snapshot = shard.Disk.get()->Snapshot;
 
     // Index rows are ordered by the inverted metric: iteration is metric-descending
     std::vector<std::pair<CKey, CValue>> selection;
@@ -481,7 +473,7 @@ private:
     bool exhausted = true;
     size_t unreadable = 0;
 
-    std::unique_ptr<rocksdb::Iterator> It(layers.Db->NewIterator(readOptions));
+    std::unique_ptr<rocksdb::Iterator> It(shard.Disk.get()->Db->NewIterator(readOptions));
     for (It->Seek(rocksdb::Slice(reinterpret_cast<const char*>(seekPrefix), sizeof(seekPrefix)));
          It->Valid();
          It->Next()) {
@@ -515,16 +507,14 @@ private:
       position.emplace(row.first, selection.size() - 1);
     }
 
-    // The windows hold a folded delta per key each. Summed aside instead of in
-    // place: a sealed window is immutable, but a key can sit in several of them
+    // The layers hold a delta per key each. Summed aside instead of in place:
+    // a sealed layer is immutable, but a key can sit in several of them
     std::vector<CValue> deltas(selection.size());
-    for (size_t w = 0; w < layers.Count; w++) {
-      layers.Windows[w].get()->Map.forEachCurrent([&](const CKey &key, const void *data) {
-        auto rowIt = position.find(key);
-        if (rowIt != position.end())
-          deltas[rowIt->second].merge(static_cast<const CHeader*>(data)->Value);
-      });
-    }
+    forEachDelta(shard, [&](const CKey &key, const CValue &delta) {
+      auto rowIt = position.find(key);
+      if (rowIt != position.end())
+        deltas[rowIt->second].merge(delta);
+    });
 
     std::vector<std::pair<CKey, CValue>> merged;
     merged.reserve(selection.size());
@@ -543,30 +533,32 @@ private:
       shardCut = order.Extract(merged[need-1].second);
     }
 
-    // The rest of the windows: a key's disk value is bounded by the tail (a
+    // The rest of the layers: a key's disk value is bounded by the tail (a
     // shard read to the end leaves nothing on disk to bound at all), so only a
     // delta big enough to lift that bound over the cut is worth a read
     const uint64_t bound = exhausted ? 0 : tail;
     std::unordered_map<CKey, CValue> extraDeltas;
-    for (size_t w = 0; w < layers.Count; w++) {
-      layers.Windows[w].get()->Map.forEachCurrent([&](const CKey &key, const void *data) {
-        if (position.count(key))
-          return;
-        extraDeltas[key].merge(static_cast<const CHeader*>(data)->Value);
-      });
-    }
+    forEachDelta(shard, [&](const CKey &key, const CValue &delta) {
+      if (position.count(key))
+        return;
+      extraDeltas[key].merge(delta);
+    });
 
     std::vector<std::pair<CKey, CValue>> extras;
     for (const auto &entry: extraDeltas) {
-      int64_t metric = static_cast<int64_t>(order.Extract(entry.second));
-      // A delta that lowers the metric can't lift its key over the cut. A metric
-      // narrower than 64 bits reads its negatives as huge positives - that costs
-      // a read and nothing else, the value below is computed, not extrapolated
-      if (metric <= 0)
-        continue;
-      if (bound <= UINT64_MAX - static_cast<uint64_t>(metric) &&
-          bound + static_cast<uint64_t>(metric) < shardCut)
-        continue;
+      // Pruning is legal only under a saturated cut: with no cut the answer
+      // takes every key the layers hold - a zero-metric value is still a row,
+      // and dropping it would make the answer depend on flush timing
+      if (shardCut) {
+        // a delta lowering the metric can't lift its key over the cut, a
+        // positive one is bounded by tail + delta
+        int64_t metric = static_cast<int64_t>(order.Extract(entry.second));
+        if (metric <= 0)
+          continue;
+        if (bound <= UINT64_MAX - static_cast<uint64_t>(metric) &&
+            bound + static_cast<uint64_t>(metric) < shardCut)
+          continue;
+      }
       extras.emplace_back(entry.first, entry.second);
     }
 
@@ -586,7 +578,7 @@ private:
         keySlices.reserve(rowKeys.size());
         for (const auto &rowKey: rowKeys)
           keySlices.emplace_back(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
-        readResult = layers.Db->MultiGet(readOptions, keySlices, &values);
+        readResult = shard.Disk.get()->Db->MultiGet(readOptions, keySlices, &values);
       }
 
       for (size_t i = 0; i < extras.size(); i++) {

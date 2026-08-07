@@ -31,11 +31,13 @@ bool CBlockPipeline::start(BlockInMemoryIndex &blockIndex,
   blockIndex.candidateTracker().update(blockIndex.best());
 
   LOG_F(INFO,
-        "Pull pipeline: %u wave threads, %zu preparation lanes, segment %.1lfMb (%zu blocks), ready queue %zu, read ahead %.1lfMb, prepared %.1lfMb",
+        "Pull pipeline: %u wave threads, %zu preparation lanes, segment %.1lfMb (%zu blocks), bite floor %.1lfMb (%zu blocks), ready queue %zu, read ahead %.1lfMb, prepared %.1lfMb",
         threadsNum,
         Params_.PrepLanes,
         Params_.SegmentSizeLimit / 1048576.0,
         Params_.SegmentBlocksLimit,
+        Params_.BiteFloorSize / 1048576.0,
+        Params_.BiteFloorBlocks,
         Params_.ReadyQueueDepth,
         Params_.RawSizeLimit / 1048576.0,
         Params_.PreparedSizeLimit / 1048576.0);
@@ -201,6 +203,15 @@ void CBlockPipeline::rotateFile()
   SelectorCV_.notify_one();
 }
 
+void CBlockPipeline::setBulkFeed(bool bulk)
+{
+  if (BulkFeed_.exchange(bulk, std::memory_order_acq_rel) && !bulk) {
+    // A held-back tail is waiting for exactly this
+    std::lock_guard lock(Mutex_);
+    SelectorCV_.notify_one();
+  }
+}
+
 void CBlockPipeline::releaseStragglers()
 {
   std::vector<BC::Common::BlockIndex*> stragglers;
@@ -242,10 +253,18 @@ static bool haveBlockData(BC::Common::BlockIndex *index)
          (index->blockStored() && index->indexStored());
 }
 
+static uint32_t blockRawSize(BC::Common::BlockIndex *index)
+{
+  if (CBlockRawData *raw = index->Raw.load(std::memory_order_acquire))
+    return raw->Size;
+  return index->SerializedBlockSize != std::numeric_limits<uint32_t>::max() ? index->SerializedBlockSize : 0;
+}
+
 // Path of the best candidate down to the preparation frontier, cut to the segment limits. The
 // index is the whole topology: what the arrival order of the data was does not matter here
-std::unique_ptr<CSegment> CBlockPipeline::bite(BC::Common::BlockIndex *frontier)
+std::unique_ptr<CSegment> CBlockPipeline::bite(BC::Common::BlockIndex *frontier, bool floorActive, bool *deferred)
 {
+  *deferred = false;
   CCandidateTracker &tracker = BlockIndex_->candidateTracker();
 
   for (unsigned attempt = 0; attempt < 64; attempt++) {
@@ -297,15 +316,26 @@ std::unique_ptr<CSegment> CBlockPipeline::bite(BC::Common::BlockIndex *frontier)
     // Collected top down
     std::reverse(path.begin(), path.end());
 
+    // The bulk feed sends more right behind this run: below the floor it is dust that costs a
+    // serial pass per crumb, so leave it for a later bite
+    if (floorActive && path.size() < Params_.BiteFloorBlocks) {
+      size_t runBytes = 0;
+      for (BC::Common::BlockIndex *index: path) {
+        runBytes += blockRawSize(index);
+        if (runBytes >= Params_.BiteFloorSize)
+          break;
+      }
+      if (runBytes < Params_.BiteFloorSize) {
+        *deferred = true;
+        return nullptr;
+      }
+    }
+
     auto segment = std::make_unique<CSegment>();
     segment->Anchor = anchor;
     segment->Reanchor = (anchor != frontier);
     for (BC::Common::BlockIndex *index: path) {
-      uint32_t size = 0;
-      if (CBlockRawData *raw = index->Raw.load(std::memory_order_acquire))
-        size = raw->Size;
-      else
-        size = index->SerializedBlockSize != std::numeric_limits<uint32_t>::max() ? index->SerializedBlockSize : 0;
+      uint32_t size = blockRawSize(index);
 
       if (!segment->Objects.empty() &&
           (segment->RawBytes + size > Params_.SegmentSizeLimit ||
@@ -360,7 +390,7 @@ bool CBlockPipeline::pipelineIdleLocked() const
 
 bool CBlockPipeline::drainedLocked() const
 {
-  return pipelineIdleLocked() && !SelectorBusy_ &&
+  return pipelineIdleLocked() && !SelectorBusy_ && !FloorWait_ &&
          IdleAt_ == ArrivalGen_.load(std::memory_order_acquire);
 }
 
@@ -381,6 +411,7 @@ void CBlockPipeline::resetLocked(BC::Common::BlockIndex *frontier, std::vector<s
 {
   ResetGen_++;
   Frontier_ = frontier;
+  FloorWait_ = false;
 
   for (auto &entry: Pending_) {
     InFlight_--;
@@ -407,13 +438,15 @@ void CBlockPipeline::selector()
 
   for (;;) {
     uint64_t arrival;
+    bool floorActive;
     {
       std::unique_lock lock(Mutex_);
       for (;;) {
         if (Stopped_)
           return;
         if (InFlight_ + Ready_.size() < Params_.ReadyQueueDepth + Params_.PrepLanes &&
-            IdleAt_ != ArrivalGen_.load(std::memory_order_acquire))
+            (IdleAt_ != ArrivalGen_.load(std::memory_order_acquire) ||
+             (FloorWait_ && pipelineIdleLocked())))
           break;
 
         SelectorWaiting_.store(true, std::memory_order_release);
@@ -427,11 +460,17 @@ void CBlockPipeline::selector()
         frontier = Frontier_;
       }
       arrival = ArrivalGen_.load(std::memory_order_acquire);
+      FloorWait_ = false;
+      // An idle pipeline takes anything: connecting dust beats connecting nothing. A busy one
+      // holds the floor even with empty queues - dust accumulates into a segment while the
+      // serial stage chews, and that is the whole point
+      floorActive = BulkFeed_.load(std::memory_order_relaxed) && !pipelineIdleLocked();
       SelectorBusy_ = true;
     }
     releaseStragglers();
 
-    std::unique_ptr<CSegment> segment = bite(frontier);
+    bool deferred = false;
+    std::unique_ptr<CSegment> segment = bite(frontier, floorActive, &deferred);
 
     // The candidate is not on the chain the queue was built for: what is in flight would be
     // connected only to be disconnected again. Let the pipeline run out first, then take the
@@ -467,7 +506,10 @@ void CBlockPipeline::selector()
       discard(*segment);
       segment.reset();
     } else if (gen == ResetGen_) {
+      // A deferred run still sleeps until the next arrival, but the pipeline going idle also
+      // wakes it up - and drainedLocked() knows the data is not connected yet
       IdleAt_ = arrival;
+      FloorWait_ = deferred;
     }
 
     SelectorBusy_ = false;

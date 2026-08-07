@@ -1343,6 +1343,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
 
   std::vector<BlockPosition> blockOffsets;
 
+  pipeline.setBulkFeed(true);
   for (;;) {
     snprintf(blockFileName, sizeof(blockFileName), "blk%05u.dat", blkFileIndex);
     std::filesystem::path path = blockPath / blockFileName;
@@ -1444,6 +1445,7 @@ bool reindex(BlockInMemoryIndex &blockIndex,
 
   // Pipeline and write queue tails are part of reindex work: without draining them the speed
   // number would exclude a cache worth of pending writes
+  pipeline.setBulkFeed(false);
   pipeline.waitDrained();
   if (pipeline.failed())
     return false;

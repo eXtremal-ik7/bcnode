@@ -5,17 +5,11 @@
 
 #pragma once
 
-// The database half of the window engine: shards, base configuration, stamp and
-// chain position - everything CKvEngine deliberately does not know. Rationale:
-// kv-view-migration-plan.md
-//
-// One unit of connect is one write set: connect() hands a fresh CKvWriter down
-// and attaches it whole. The set belongs to the unit, not to the database -
-// which is what lets it be filled in prepare later instead of here.
-//
-// CKvDatabase is family-agnostic; what a shard's windows become on disk is the
-// fold below it. CKvBase is the KV one - last write wins - and merge/array
-// bring their own (kvmerge.h, kvarray.h).
+// The database half of the engine: shards, base configuration, stamp and
+// chain position - everything CKvEngine deliberately does not know. connect()
+// hands a CKvWriter over the active eras down and commits the unit's
+// watermark; what a layer becomes on disk is the family fold below -
+// CKvBase is the KV one (last write wins), merge/array bring their own.
 
 #include "common/utils.h"
 #include "db/common.h"
@@ -168,12 +162,9 @@ public:
     if (!initializeImpl(cfg, storage))
       return false;
 
-    // Heirs of flushLogSizeMb, per shard: the floors are the annihilation
-    // horizon, the window count also bounds how deep a lookup walks
     typename CKvEngine<CKey>::CConfig engineCfg;
     engineCfg.Name = Name_;
-    engineCfg.FlushBytesLower = static_cast<size_t>(cfg->lookupInt(Name_.c_str(), "flushLogSizeMb", 16)) << 20;
-    engineCfg.FlushSegmentsLower = static_cast<size_t>(cfg->lookupInt(Name_.c_str(), "flushSegments", DefaultFlushSegments));
+    engineCfg.EraBytes = static_cast<size_t>(cfg->lookupInt(Name_.c_str(), "eraSizeMb", 256)) << 20;
     return Engine_.initialize(engineCfg, shards, this);
   }
 
@@ -182,7 +173,7 @@ public:
   void connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) final {
     if (batch.empty())
       return;
-    CKvWriter<CKey> writer = Engine_.newWriter(ArenaBytes_, MapCapacity_);
+    CKvWriter<CKey> writer = Engine_.liveWriter();
     connectImpl(batch, writer, blockIndex, blockDb);
     finishMutation(writer, batch.back().Index->Header.GetHash());
   }
@@ -193,12 +184,12 @@ public:
                   const BC::Proto::CBlockValidationData &validationData,
                   BlockInMemoryIndex &blockIndex,
                   BlockDatabase &blockDb) final {
-    CKvWriter<CKey> writer = Engine_.newWriter(ArenaBytes_, MapCapacity_);
+    CKvWriter<CKey> writer = Engine_.liveWriter();
     disconnectImpl(index, block, linkedOutputs, validationData, writer, blockIndex, blockDb);
     finishMutation(writer, index->Header.hashPrevBlock);
   }
 
-  // Attached windows waiting for the flusher: attach cannot refuse, so the
+  // Frozen eras waiting for the flusher: the commit cannot refuse, so the
   // pipeline stops admitting work on this instead (blockPipeline throttled())
   bool pipelineFull() const final { return Engine_.isPipelineFull(); }
 
@@ -229,17 +220,10 @@ public:
 
 protected:
   // Tail of every chain mutation, both directions: the position moves to where
-  // the operation left the database, and the set becomes a revision stamped there
+  // the operation left the database, and the commit publishes the unit's cut
   void finishMutation(CKvWriter<CKey> &writer, const BC::Proto::BlockHashTy &newTip) {
     CurrentBlock_ = newTip;
-    if (writer.empty())
-      return;
-
-    // The next set is sized by this one, before attach takes the windows: units
-    // of one chain are alike, and an arena that grew mid-fill copied its prefix
-    ArenaBytes_ = std::max(ArenaBytes_, writer.maxWindowSize());
-    MapCapacity_ = std::max(MapCapacity_, 2 * writer.maxUsed());
-    Engine_.attach(writer, newTip);
+    Engine_.commitLive(writer, newTip);
   }
 
   // Every batch carries the stamp: without WAL a crash rolls data and position
@@ -262,10 +246,6 @@ protected:
   std::vector<std::unique_ptr<rocksdb::DB>> OnDiskStorage_;
 
   CKvEngine<CKey> Engine_;
-
-  // Sizes the next unit's set, from what the units before it needed
-  size_t ArenaBytes_ = 1u << 20;
-  size_t MapCapacity_ = 4096;
 };
 
 // Plain key-value: the newest record of a key wins, and a lookup stops at the
@@ -275,7 +255,7 @@ class CKvBase : public CKvDatabase<CKey> {
 public:
   CKvBase(const std::string &name) : CKvDatabase<CKey>(name) {}
 
-  // The flusher dispatches writeSegments implemented at this level: stop it
+  // The flusher dispatches the folds implemented at this level: stop it
   // while the dispatch is still valid (~CKvDatabase's shutdown is a no-op then)
   ~CKvBase() override { this->Engine_.shutdown(); }
 
@@ -288,89 +268,40 @@ protected:
     return this->Engine_.find(guard, key, callback);
   }
 
-  // Fold of several windows into the final value of every key: one sort instead
-  // of a batch per window. A window holds at most one record per key, so a
-  // sorted group is that key's whole history inside this batch
-  void writeSegments(rocksdb::DB *db,
-                     size_t shardIndex,
-                     const CWindow<CKey> *const *segments,
-                     size_t count,
-                     const BC::Proto::BlockHashTy &stamp) final {
-    // The batch reaches rocksdb in memcmp order of keys: with the memtable
-    // insert hint that turns the skiplist fill into an append. Sort on a big
-    // endian prefix, full compare only inside a same-prefix run, order last
-    struct CSortedRef {
-      uint64_t Prefix;
-      const CKey *Key;      // points into the sealed map slot, stable while pinned
-      const void *Entry;    // CKvHeader* or one of the markers
-      uint32_t Order;       // position of the window, oldest first
-    };
+  // One sealed layer, one batch, in memcmp order of keys (what the memtable
+  // insert hint wants): the newest record per key goes as a Put, a tombstone
+  // that may exist below as a Delete, a pair born and died here not at all
+  void writeLayer(rocksdb::DB *db, size_t shardIndex, const CLayer<CKey> *layer, const BC::Proto::BlockHashTy &stamp) final {
+    layer->buildScattered();
 
-    size_t entries = 0;
-    for (size_t i = 0; i < count; i++)
-      entries += segments[i]->Map.used();
-
-    std::vector<CSortedRef> refs;
-    refs.reserve(entries);
-    size_t batchBytes = 64;
-    for (uint32_t order = 0; order < count; order++) {
-      segments[order]->Map.forEachCurrent([&refs, &batchBytes, order](const CKey &key, void *value) {
-        uint64_t prefix = 0;
-        memcpy(&prefix, &key, std::min(sizeof(prefix), sizeof(CKey)));
-        refs.push_back({xhtobe(prefix), &key, value, order});
-        batchBytes += sizeof(CKey) + 4 + (isKvMarker(value) ? 0 : static_cast<const CKvHeader*>(value)->size() + 8);
-      });
-    }
-
-    std::sort(refs.begin(), refs.end(), [](const CSortedRef &l, const CSortedRef &r) {
-      if (l.Prefix != r.Prefix)
-        return l.Prefix < r.Prefix;
-      const int cmp = memcmp(l.Key, r.Key, sizeof(CKey));
-      if (cmp != 0)
-        return cmp < 0;
-      return l.Order < r.Order;
-    });
-
-    rocksdb::WriteBatch batch(batchBytes);
+    rocksdb::WriteBatch batch(layer->BatchBytesBound + 64);
     this->putStamp(batch, stamp);
 
     size_t written = 0;
     size_t annihilated = 0;
-    for (size_t i = 0; i < refs.size(); ) {
-      // What lies under the batch is decided by the OLDEST record of the group,
-      // not by all of them: a value written as definitely-absent-below (or a
-      // pair already annihilated inside its window) means the key was born
-      // here, so a marker at the end drops the pair instead of tombstoning a
-      // key the disk never had. Tombstone is the opposite - it is only ever
-      // written for a key that may exist below
-      const void *first = refs[i].Entry;
-      const bool mayExistBelow = first == &KvTombstoneMarker ||
-                                 (first != &KvBornDeadMarker && static_cast<const CKvHeader*>(first)->mayExistBelow());
+    for (size_t b = 0; b < KvScatterBuckets && !layer->Scattered.empty(); b++) {
+      kvSortBucket(layer->Scattered, layer->Bounds, b);
+      for (uint32_t k = b ? layer->Bounds[b - 1] : 0, end = layer->Bounds[b]; k < end; k++) {
+        const CKvSortedRef<CKey> &ref = layer->Scattered[k];
+        const CGenRecord *rec = static_cast<const CGenRecord*>(ref.Entry);
 
-      size_t j = i;
-      while (j != refs.size() && memcmp(refs[j].Key, refs[i].Key, sizeof(CKey)) == 0)
-        j++;
-
-      const CSortedRef &last = refs[j - 1];
-      rocksdb::Slice keySlice(reinterpret_cast<const char*>(last.Key), sizeof(CKey));
-      if (!isKvMarker(last.Entry)) {
-        const CKvHeader *header = static_cast<const CKvHeader*>(last.Entry);
-        batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(header + 1), header->size()));
-        written++;
-      } else if (mayExistBelow) {
-        batch.Delete(keySlice);
-        written++;
-      } else {
-        // born and died without the disk ever hearing about it
-        annihilated++;
+        rocksdb::Slice keySlice(reinterpret_cast<const char*>(ref.Key), sizeof(CKey));
+        if (!rec->tombstone()) {
+          batch.Put(keySlice, rocksdb::Slice(static_cast<const char*>(rec->payload()), rec->size()));
+          written++;
+        } else if (rec->mayExistBelow()) {
+          batch.Delete(keySlice);
+          written++;
+        } else {
+          // born and died without the disk ever hearing about it
+          annihilated++;
+        }
       }
-
-      i = j;
     }
 
     this->writeBatch(db, batch);
-    LOG_F(1, "%s: shard %zu flushed %zu windows, %zu records, %zu pairs annihilated",
-          this->Name_.c_str(), shardIndex, count, written, annihilated);
+    LOG_F(INFO, "%s: shard %zu flushed %zu records, %zu pairs annihilated, %zu MB",
+          this->Name_.c_str(), shardIndex, written, annihilated, layer->Bytes >> 20);
   }
 };
 

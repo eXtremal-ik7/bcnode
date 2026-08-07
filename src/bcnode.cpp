@@ -339,6 +339,8 @@ int main(int argc, char **argv)
       waveThreadsNum = cfg->lookupInt("bcnode", "waveThreadsNum", 0);
       pipelineParams.SegmentSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "segmentSizeMb", static_cast<int>(pipelineParams.SegmentSizeLimit / 1048576))) * 1048576;
       pipelineParams.SegmentBlocksLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "segmentBlocks", static_cast<int>(pipelineParams.SegmentBlocksLimit)));
+      pipelineParams.BiteFloorSize = static_cast<size_t>(cfg->lookupInt("bcnode", "biteFloorMb", static_cast<int>(pipelineParams.BiteFloorSize / 1048576))) * 1048576;
+      pipelineParams.BiteFloorBlocks = static_cast<size_t>(cfg->lookupInt("bcnode", "biteFloorBlocks", static_cast<int>(pipelineParams.BiteFloorBlocks)));
       pipelineParams.ReadyQueueDepth = static_cast<size_t>(cfg->lookupInt("bcnode", "readyQueueDepth", static_cast<int>(pipelineParams.ReadyQueueDepth)));
       pipelineParams.PrepLanes = static_cast<size_t>(cfg->lookupInt("bcnode", "prepLanes", static_cast<int>(pipelineParams.PrepLanes)));
       pipelineParams.RawSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "readAheadMb", static_cast<int>(pipelineParams.RawSizeLimit / 1048576))) * 1048576;
