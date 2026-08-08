@@ -35,9 +35,6 @@ public:
     size_t currentSize = InitialSize_ << (AllocationCount_ - 1);
     size_t requiredSize = Offset_ + size;
     if (requiredSize > currentSize) {
-      // count from begin of new buffer
-      requiredSize = size;
-
      // Calculate new size
       unsigned newAllocationCount = AllocationCount_ + 1;
       size_t newSize = currentSize * 2;

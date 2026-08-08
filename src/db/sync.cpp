@@ -55,7 +55,8 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
 
   bool noError = true;
   BC::Common::BlockIndex *best = blockIndex.best();
-  uint32_t count = best->Height - firstCommon->Height;
+  // firstCommon is the first block to connect, not the one already applied
+  uint32_t count = best->Height - firstCommon->Height + 1;
   LOG_F(INFO, "Update %s: connecting %u blocks", name, count);
 
   auto handler = [&utxoDb, utxoBestHeight, &archiveDatabases, &blockIndex, &chainParams, &storage](BC::Common::BlockIndex *index, const BC::Proto::Block &block, const BC::Proto::CBlockLinkedOutputs &linkedOutputs) {
