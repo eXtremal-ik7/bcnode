@@ -20,8 +20,8 @@
 // replay, no per-element pointer chase. Buffers and descriptors die with the
 // layer (MLog frees nothing), which is what keeps every pinned reader valid.
 //
-// CItem requirements: trivially copyable, fixed size, public uint64_t
-// Aggregate field with the semantics above.
+// CItem requirements: trivially copyable, fixed size, public Aggregate field
+// with the semantics above - additive, default state is the zero.
 
 #include "db/kvbase.h"
 
@@ -35,6 +35,8 @@ namespace DB {
 template<typename CKey, typename CItem>
 class CKvArrayBase : public CKvDatabase<CKey> {
 private:
+  using CAggregate = decltype(CItem::Aggregate);
+
 #pragma pack(push, 1)
   // Layer-state descriptor, one generation record each: cumulative within the
   // layer, so the newest record at a watermark is the whole composed state.
@@ -56,7 +58,7 @@ private:
   // element - the rebase point for the unflushed windows
   struct CMetadata {
     int64_t Count;
-    uint64_t Aggregate;
+    CAggregate Aggregate;
   };
 #pragma pack(pop)
 
@@ -136,7 +138,7 @@ public:
   class CTailWriter {
   public:
     CTailWriter() = default;
-    CTailWriter(CItem *cursor, uint64_t running) : Cursor_(cursor), Running_(running) {}
+    CTailWriter(CItem *cursor, const CAggregate &running) : Cursor_(cursor), Running_(running) {}
 
     void append(const CItem &item) {
       Running_ += item.Aggregate;
@@ -147,7 +149,7 @@ public:
 
   private:
     CItem *Cursor_ = nullptr;
-    uint64_t Running_ = 0;
+    CAggregate Running_{};
   };
 
   // The key's tail elements of this unit, appended to the layer's contiguous
@@ -161,7 +163,7 @@ public:
     // descriptor of an uncommitted unit is replaced, not chained over
     assert(!writer.findOwn(key, hash) && "key already has a tail in this unit");
     CItem *cursor = nullptr;
-    uint64_t running = 0;
+    CAggregate running{};
     writer.putWith(key, hash, sizeof(CHeader), [&](void *dst, const CGenRecord *prevRec) {
       CHeader *header = static_cast<CHeader*>(dst);
       const CHeader *prev = prevRec ? static_cast<const CHeader*>(prevRec->payload()) : nullptr;
@@ -180,7 +182,8 @@ public:
           memcpy(static_cast<void*>(header->Items), prev->Items, prevCount * sizeof(CItem));
       }
       cursor = header->Items + prevCount;
-      running = prevCount ? header->Items[prevCount - 1].Aggregate : 0;
+      if (prevCount)
+        running = header->Items[prevCount - 1].Aggregate;
     });
     return CTailWriter(cursor, running);
   }
@@ -251,7 +254,7 @@ public:
     }
 
     int64_t durableCount = 0;
-    uint64_t durableAggregate = 0;
+    CAggregate durableAggregate{};
     if (readResult[0].size() == sizeof(CMetadata)) {
       const CMetadata *meta = reinterpret_cast<const CMetadata*>(readResult[0].data());
       durableCount = meta->Count;
@@ -259,7 +262,7 @@ public:
     }
 
     const int64_t baseCount = durableCount - static_cast<int64_t>(baseTrim);
-    uint64_t baseAggregate = durableAggregate;
+    CAggregate baseAggregate = durableAggregate;
 
     if (baseCount < 0) {
       LOG_F(ERROR, "%s: window trims %llu elements of an array holding %lld", this->Name_.c_str(),
@@ -267,7 +270,7 @@ public:
       ok = false;
     } else if (baseTrim) {
       // The durable end moved: the rebase point is the element that survived
-      baseAggregate = 0;
+      baseAggregate = CAggregate{};
       if (baseCount > 0 && !aggregateAt(storage, readOptions, key, baseCount - 1, baseAggregate)) {
         LOG_F(ERROR, "%s: can't read back the aggregate of element %lld", this->Name_.c_str(),
               static_cast<long long>(baseCount - 1));
@@ -304,11 +307,11 @@ public:
       // Composed tail: segment sums are layer-relative, each segment rebased
       // onto the last element surviving below it
       int64_t skip = inMemoryOffset;
-      uint64_t segmentBase = baseAggregate;
+      CAggregate segmentBase = baseAggregate;
       for (const CTailSegment &seg: segments) {
         if (remaining <= 0)
           break;
-        const uint64_t last = seg.Items[seg.Count - 1].Aggregate;
+        const CAggregate last = seg.Items[seg.Count - 1].Aggregate;
         if (skip >= static_cast<int64_t>(seg.Count)) {
           skip -= seg.Count;
           segmentBase += last;
@@ -387,7 +390,7 @@ private:
     std::vector<rocksdb::Slice> missSlices;
     for (size_t i = 0; i < allKeys.size(); i++) {
       if (complete) {
-        auto [it, inserted] = MetaCache_.try_emplace(*allKeys[i], CMetadata{0, 0});
+        auto [it, inserted] = MetaCache_.try_emplace(*allKeys[i], CMetadata{});
         durable[i] = &it->second;
         continue;
       }
@@ -417,7 +420,7 @@ private:
     std::vector<CMetadata> scratchMeta(missIndex.size());
     for (size_t m = 0; m < missIndex.size(); m++) {
       CMetadata &slot = scratchMeta[m];
-      slot = {0, 0};
+      slot = {};
       if (metadataReadResult[m].ok() && metadata[m].size() == sizeof(CMetadata))
         slot = *reinterpret_cast<const CMetadata*>(metadata[m].data());
       durable[missIndex[m]] = &slot;
@@ -444,7 +447,7 @@ private:
       const uint64_t headerTailCount = allTailCount[i];
 
       const int64_t durableCount = durable[i]->Count;
-      const uint64_t durableAggregate = durable[i]->Aggregate;
+      const CAggregate durableAggregate = durable[i]->Aggregate;
 
       const int64_t baseCount = durableCount - static_cast<int64_t>(headerBaseTrim);
       const int64_t newCount = baseCount + static_cast<int64_t>(headerTailCount);
@@ -461,9 +464,9 @@ private:
 
       // The rebase point of the batch: the aggregate of the last element that
       // survived the trim, read back from its chunk when the trim moved it
-      uint64_t baseAggregate = durableAggregate;
+      CAggregate baseAggregate = durableAggregate;
       if (headerBaseTrim) {
-        baseAggregate = 0;
+        baseAggregate = CAggregate{};
         if (baseCount > 0 && !aggregateAt(db, readOptions, *allKeys[i], baseCount - 1, baseAggregate)) {
           LOG_F(ERROR, "%s: shard %zu, can't read back the aggregate of element %lld",
                 this->Name_.c_str(), shardIndex, static_cast<long long>(baseCount - 1));
@@ -471,7 +474,7 @@ private:
         }
       }
 
-      const uint64_t newAggregate = headerTailCount
+      const CAggregate newAggregate = headerTailCount
         ? baseAggregate + tailItems[headerTailCount - 1].Aggregate : baseAggregate;
 
       // Metadata update, the resident copy in step with the batch
@@ -484,7 +487,7 @@ private:
           batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(&cached), sizeof(cached)));
         } else {
           cached.Count = 0;
-          cached.Aggregate = 0;
+          cached.Aggregate = CAggregate{};
           batch.Delete(keySlice);
         }
       }
@@ -588,14 +591,14 @@ private:
 
   // Absolute copy of a piece of the Tail; the published windows keep their
   // window-relative sums
-  static void rebase(void *dst, const CItem *items, size_t count, uint64_t base) {
+  static void rebase(void *dst, const CItem *items, size_t count, const CAggregate &base) {
     CItem *out = static_cast<CItem*>(dst);
     memcpy(dst, items, count * sizeof(CItem));
     for (size_t i = 0; i < count; i++)
       out[i].Aggregate += base;
   }
 
-  bool aggregateAt(rocksdb::DB *storage, const rocksdb::ReadOptions &readOptions, const CKey &key, int64_t index, uint64_t &aggregate) const {
+  bool aggregateAt(rocksdb::DB *storage, const rocksdb::ReadOptions &readOptions, const CKey &key, int64_t index, CAggregate &aggregate) const {
     CChunkKey chunkKey;
     chunkKey.Key = key;
     chunkKey.Index = xhtobe<uint64_t>(index / static_cast<int64_t>(ChunkSize_));

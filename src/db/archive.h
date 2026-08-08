@@ -8,6 +8,10 @@
 #include "db/common.h"
 #include "db/sync.h"
 
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
 class BlockDatabase;
 
 namespace BC {
@@ -15,6 +19,8 @@ namespace DB {
 
 class Archive {
 public:
+  ~Archive();
+
   bool init(BlockInMemoryIndex &blockIndex,
             BC::Common::ChainParams &chainParams,
             BC::DB::Storage &storage,
@@ -24,10 +30,11 @@ public:
 
   bool purge(config4cpp::Configuration *cfg, std::filesystem::path &dataDir);
 
-  void connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) {
-    for (auto &db: AllDb_)
-      db->connect(batch, blockIndex, blockDb);
-  }
+  // The databases are independent over one read-only batch (each writes only
+  // its own engine), so the batch fans out to a thread per database. The
+  // barrier before returning keeps per-database unit order and lets the batch
+  // die with the caller
+  void connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
 
   void disconnect(const BC::Common::BlockIndex *index,
                   const BC::Proto::Block &block,
@@ -55,7 +62,24 @@ public:
   }
 
 private:
+  void connectWorker(size_t slot);
+
+private:
   std::vector<std::unique_ptr<BC::DB::BaseInterface>> AllDb_;
+
+  // One worker per database except AllDb_[0], which the storage thread runs
+  // itself. A database is always mutated by the same thread - the engines
+  // expect a single mutator
+  std::vector<std::thread> ConnectWorkers_;
+  std::mutex ConnectMutex_;
+  std::condition_variable ConnectStartCv_;
+  std::condition_variable ConnectDoneCv_;
+  CBlockBatch ConnectBatch_;
+  BlockInMemoryIndex *ConnectBlockIndex_ = nullptr;
+  BlockDatabase *ConnectBlockDb_ = nullptr;
+  uint64_t ConnectGeneration_ = 0;
+  size_t ConnectDone_ = 0;
+  bool ConnectStop_ = false;
 
 public:
   // Handlers

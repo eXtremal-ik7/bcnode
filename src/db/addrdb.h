@@ -17,8 +17,15 @@ class AddrDb :
 
 public:
   AddrDb() : CKvMergeBase<BC::Script::CAddress, CAddrValue>("addrdb") {
-    registerIndex("balance", [](const CAddrValue &value) -> uint64_t { return value.Received - value.Sent; });
-    registerIndex("tx_count", [](const CAddrValue &value) -> uint64_t { return value.TxCount; });
+    // The metric width is the column's own - per-coin for the balance. New
+    // indexes register at the end: the order is the stored id, and shifting
+    // it degenerates the xcfg diff to drop-all+rebuild
+    registerIndex("balance", sizeof(BC::Proto::BalanceType),
+                  [](const CAddrValue &value) -> UInt<128> { return value.Received - value.Sent; });
+    registerIndex("tx_count", sizeof(uint64_t),
+                  [](const CAddrValue &value) -> UInt<128> { return UInt<128>(value.TxCount); });
+    registerIndex("total_received", sizeof(UInt<128>),
+                  [](const CAddrValue &value) -> UInt<128> { return value.Received; });
   }
   virtual ~AddrDb() {}
 

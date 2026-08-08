@@ -15,6 +15,7 @@ public:
   using BlockHashTy = BTC::Proto::BlockHashTy;
   using TxHashTy = BTC::Proto::TxHashTy;
   using AddressTy = BTC::Proto::AddressTy;
+  using BalanceType = BTC::Proto::BalanceType;
   using BlockHeader = BTC::Proto::BlockHeader;
   using BlockHeaderNet = BTC::Proto::BlockHeaderNet;
   using NetworkAddress = BTC::Proto::NetworkAddress;

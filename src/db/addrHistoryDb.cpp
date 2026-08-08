@@ -51,14 +51,14 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
   // a per-tx map: ending a tx costs one clear() of its own touches
   struct CTxTouch {
     uint32_t KeyId;
-    uint64_t Delta;
+    BC::Proto::BalanceType Delta;
   };
   std::vector<uint64_t> touchEpoch;  // per id: serial of the tx that touched it last
   std::vector<uint32_t> txSlot;      // per id: the touch's slot within that tx
   std::vector<CTxTouch> txTouches;   // current tx, insertion order
   uint64_t txSerial = 0;
 
-  auto touch = [&](const BC::Script::CAddress &address, uint64_t delta) {
+  auto touch = [&](const BC::Script::CAddress &address, const BC::Proto::BalanceType &delta) {
     auto [it, inserted] = keyIds.try_emplace(address, static_cast<uint32_t>(keyById.size()));
     const uint32_t id = it->second;
     if (inserted) {
@@ -70,7 +70,7 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
     if (touchEpoch[id] != txSerial) {
       touchEpoch[id] = txSerial;
       txSlot[id] = static_cast<uint32_t>(txTouches.size());
-      txTouches.push_back({id, 0});
+      txTouches.push_back({id, {}});
     }
     txTouches[txSlot[id]].Delta += delta;
   };
@@ -113,7 +113,9 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
           // one of the two can ever be spent: the address gets the history element
           // (the block did pay it) with a zero delta, so the running balance stays
           // equal to what the utxo set holds
-          touch(address, validationData.CoinbaseRepeat ? 0 : txout.value);
+          touch(address, validationData.CoinbaseRepeat ?
+                           BC::Proto::BalanceType{} :
+                           BC::Proto::BalanceType(static_cast<uint64_t>(txout.value)));
         }
       }
 
@@ -138,12 +140,12 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
 
         const BC::Script::UnspentOutputInfo *outputInfo = (const BC::Script::UnspentOutputInfo*)linkedTxin.data();
         if (BC::Script::extractAddress(*outputInfo, address))
-          touch(address, 0ull - outputInfo->Value);
+          touch(address, -BC::Proto::BalanceType(static_cast<uint64_t>(outputInfo->Value)));
       }
 
       for (const auto &txout: tx.txOut) {
         if (BC::Script::extractAddress(txout, address))
-          touch(address, txout.value);
+          touch(address, BC::Proto::BalanceType(static_cast<uint64_t>(txout.value)));
       }
 
       flushTx(validationData.TxIds[i]);

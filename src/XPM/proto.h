@@ -14,6 +14,7 @@ public:
   using BlockHashTy = BTC::Proto::BlockHashTy;
   using TxHashTy = BTC::Proto::TxHashTy;
   using AddressTy = BTC::Proto::AddressTy;
+  using BalanceType = BTC::Proto::BalanceType;
 
   // Data structures
 #pragma pack(push, 1)

@@ -32,8 +32,8 @@ static void buildBlockDelta(const BC::Proto::Block &block,
         // the balance and the utxo count of the address stay above what the utxo
         // set holds forever
         if (!coinbaseRepeat) {
-          delta.Received += txout.value;
-          delta.Mined += txout.value;
+          delta.Received += static_cast<uint64_t>(txout.value);
+          delta.Mined += static_cast<uint64_t>(txout.value);
           delta.TxOutCount++;
         }
         if (affectedAddresses.insert(address).second) {
@@ -62,7 +62,7 @@ static void buildBlockDelta(const BC::Proto::Block &block,
       const BC::Script::UnspentOutputInfo *outputInfo = (const BC::Script::UnspentOutputInfo*)linkedTxin.data();
       if (BC::Script::extractAddress(*outputInfo, address)) {
         CAddrValue &delta = deltaMap[address];
-        delta.Sent += outputInfo->Value;
+        delta.Sent += static_cast<uint64_t>(outputInfo->Value);
         delta.TxInCount++;
         if (affectedAddresses.insert(address).second)
           delta.TxCount++;
@@ -72,7 +72,7 @@ static void buildBlockDelta(const BC::Proto::Block &block,
     for (const auto &txout: tx.txOut) {
       if (BC::Script::extractAddress(txout, address)) {
         CAddrValue &delta = deltaMap[address];
-        delta.Received += txout.value;
+        delta.Received += static_cast<uint64_t>(txout.value);
         delta.TxOutCount++;
         if (affectedAddresses.insert(address).second)
           delta.TxCount++;

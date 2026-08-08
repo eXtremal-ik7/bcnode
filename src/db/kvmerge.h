@@ -14,8 +14,10 @@
 //
 // Shard key space is split into disjoint prefix regions:
 //   data rows    'd' ++ key                               -> value
-//   index rows   'i' ++ indexId ++ be64(~metric) ++ key   -> value (same shard)
+//   index rows   'i' ++ indexId ++ beN(~metric) ++ key    -> value (same shard)
 //   service keys "stamp", "basecfg", "xcfg" - outside both.
+// N is the index's metric width - the width of the column itself, so no value
+// is ever clamped and the memcmp order of the region IS the metric order.
 // Disjointness makes an index droppable by a range tombstone and buildable by
 // a single scan of the data region.
 //
@@ -33,9 +35,12 @@ namespace DB {
 template<typename CKey, typename CValue>
 class CKvMergeBase : public CKvDatabase<CKey> {
 protected:
+  // Extract computes at full width; Width is the metric column's size in
+  // bytes - what the key stores and what every comparison is canonical to
   struct CIndexDef {
     std::string Name;
-    uint64_t (*Extract)(const CValue&);
+    unsigned Width;
+    UInt<128> (*Extract)(const CValue&);
   };
 
 private:
@@ -49,24 +54,31 @@ private:
     uint8_t Prefix;
     CKey Key;
   };
-
-  // The row is covering: its value is a copy of the data row, so a head scan
-  // answers top() without going back to the data region
-  struct CIndexRowKey {
-    uint8_t Prefix;
-    uint8_t IndexId;
-    uint64_t InvertedValue;
-    CKey Key;
-  };
 #pragma pack(pop)
+
+  // Index rows are covering: the value is a copy of the data row, so a head
+  // scan answers top() without going back to the data region. The key is
+  // built by buildIndexRowKey - its size varies with the index's Width
+  static constexpr size_t IndexRowKeyMax = 2 + sizeof(UInt<128>) + sizeof(CKey);
+
+  // The metric at the index's width: bytes past it are zero, so in-memory
+  // ordering and arithmetic agree with the stored key bytes exactly. A value
+  // that outgrew the column (a wrapped delta, corrupt data) truncates the way
+  // the stored bytes do - the two views can never disagree
+  static UInt<128> metricOf(const CIndexDef &def, const CValue &value) {
+    UInt<128> metric = def.Extract(value);
+    for (size_t j = def.Width; j < sizeof(UInt<128>); j++)
+      metric.data()[j / 8] &= ~(static_cast<uint64_t>(0xFF) << (8 * (j % 8)));
+    return metric;
+  }
 
   // Metric-descending, ties broken by the key: the order of the index region
   // itself, so a merged list keeps the order a plain scan would have given
   struct CMetricOrder {
-    uint64_t (*Extract)(const CValue&);
+    const CIndexDef *Def;
     bool operator()(const std::pair<CKey, CValue> &l, const std::pair<CKey, CValue> &r) const {
-      uint64_t lv = Extract(l.second);
-      uint64_t rv = Extract(r.second);
+      UInt<128> lv = metricOf(*Def, l.second);
+      UInt<128> rv = metricOf(*Def, r.second);
       if (lv != rv)
         return lv > rv;
       return memcmp(&l.first, &r.first, sizeof(CKey)) < 0;
@@ -78,11 +90,34 @@ private:
     rowKey.Key = key;
   }
 
-  static void makeIndexRowKey(CIndexRowKey &rowKey, uint8_t indexId, uint64_t value, const CKey &key) {
-    rowKey.Prefix = 'i';
-    rowKey.IndexId = indexId;
-    rowKey.InvertedValue = xhtobe<uint64_t>(~value);
-    rowKey.Key = key;
+  static uint8_t metricByte(const UInt<128> &value, size_t index) {
+    return static_cast<uint8_t>(value.data()[index / 8] >> (8 * (index % 8)));
+  }
+
+  static void encodeInvertedMetric(uint8_t *out, const UInt<128> &metric, unsigned width) {
+    const UInt<128> inverted = ~metric;
+    for (unsigned i = 0; i < width; i++)
+      out[i] = metricByte(inverted, width - 1 - i);
+  }
+
+  static UInt<128> decodeInvertedMetric(const uint8_t *in, unsigned width) {
+    UInt<128> metric;
+    for (unsigned i = 0; i < width; i++)
+      metric.data()[(width - 1 - i) / 8] |=
+        static_cast<uint64_t>(static_cast<uint8_t>(~in[i])) << (8 * ((width - 1 - i) % 8));
+    return metric;
+  }
+
+  static size_t indexRowKeySize(const CIndexDef &def) {
+    return 2 + def.Width + sizeof(CKey);
+  }
+
+  static size_t buildIndexRowKey(uint8_t *out, const CActiveIndex &index, const UInt<128> &metric, const CKey &key) {
+    out[0] = 'i';
+    out[1] = index.Id;
+    encodeInvertedMetric(out + 2, metric, index.Def.Width);
+    memcpy(out + 2 + index.Def.Width, &key, sizeof(CKey));
+    return indexRowKeySize(index.Def);
   }
 
   class MergeOperator : public rocksdb::AssociativeMergeOperator {
@@ -283,7 +318,7 @@ public:
     if (need == 0)
       return true;
 
-    CMetricOrder order{active->Def.Extract};
+    CMetricOrder order{&active->Def};
     size_t depth = need * 4 + 256;
 
     for (;;) {
@@ -291,19 +326,19 @@ public:
       // one revision and the windows of another would double-count a flush
       CKvGuard<CKey> guard = this->Engine_.guard();
       std::vector<std::pair<CKey, CValue>> candidates;
-      std::vector<uint64_t> tails;
+      std::vector<UInt<128>> tails;
       for (size_t shardIndex = 0; shardIndex < this->BaseCfg_.ShardsNum; shardIndex++)
-        topFromShard(guard, active->Id, order, shardIndex, depth, need, candidates, tails);
+        topFromShard(guard, *active, order, shardIndex, depth, need, candidates, tails);
 
       std::sort(candidates.begin(), candidates.end(), order);
-      uint64_t cut = candidates.size() >= need ? order.Extract(candidates[need-1].second) : 0;
+      UInt<128> cut = candidates.size() >= need ? metricOf(active->Def, candidates[need-1].second) : UInt<128>();
 
       // Keys left unread in a shard are bounded by its tail; a tail above the
       // cut means one of them may belong in the answer - go deeper. Normally
       // the tail is far below (that is what depth buys), and a monotonic metric
       // like tx_count can't push the cut down at all
       bool deeper = false;
-      for (uint64_t tail: tails)
+      for (const UInt<128> &tail: tails)
         deeper |= tail > cut;
       if (deeper) {
         depth *= 4;
@@ -317,8 +352,8 @@ public:
   }
 
 protected:
-  void registerIndex(const std::string &name, uint64_t (*extract)(const CValue&)) {
-    RegisteredIndexes_.push_back(CIndexDef{name, extract});
+  void registerIndex(const std::string &name, unsigned width, UInt<128> (*extract)(const CValue&)) {
+    RegisteredIndexes_.push_back(CIndexDef{name, width, extract});
   }
 
   // One sealed layer, one batch in memcmp order of keys: the newest record
@@ -354,7 +389,7 @@ private:
     // Reserved once: without it the batch string of a whole layer doubles
     // its way up through a few hundred MB of memcpy
     rocksdb::WriteBatch batch(64 + folded.size() * (sizeof(CDataRowKey) + sizeof(CValue) + 16
-                              + ActiveIndexes_.size() * 2 * (sizeof(CIndexRowKey) + sizeof(CValue) + 16)));
+                              + ActiveIndexes_.size() * 2 * (IndexRowKeyMax + sizeof(CValue) + 16)));
     this->putStamp(batch, stamp);
 
     std::vector<CDataRowKey> rowKeys;
@@ -401,21 +436,21 @@ private:
           batch.Delete(keySlices[i]);
 
         for (const auto &index: ActiveIndexes_) {
-          uint64_t oldMetric = index.Def.Extract(oldValue);
-          uint64_t newMetric = index.Def.Extract(newValue);
+          UInt<128> oldMetric = metricOf(index.Def, oldValue);
+          UInt<128> newMetric = metricOf(index.Def, newValue);
           // The row is covering, so an unchanged metric is not an unchanged
           // row: a tx of an address moves tx_count without moving balance.
           // Same metric means same key though - rewrite it in place
           bool sameKey = hadRow && hasRow && oldMetric == newMetric;
 
-          CIndexRowKey rowKey;
+          uint8_t rowKey[IndexRowKeyMax];
           if (hadRow && !sameKey) {
-            makeIndexRowKey(rowKey, index.Id, oldMetric, *folded[i].first);
-            batch.Delete(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)));
+            size_t size = buildIndexRowKey(rowKey, index, oldMetric, *folded[i].first);
+            batch.Delete(rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size));
           }
           if (hasRow) {
-            makeIndexRowKey(rowKey, index.Id, newMetric, *folded[i].first);
-            batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)),
+            size_t size = buildIndexRowKey(rowKey, index, newMetric, *folded[i].first);
+            batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size),
                       rocksdb::Slice(reinterpret_cast<const char*>(&newValue), sizeof(CValue)));
           }
         }
@@ -464,12 +499,13 @@ private:
   // Everything is read at one revision, so a row and the deltas above it are
   // the pair find() would have built. Appends the shard's candidates; a shard
   // with rows left unread appends its tail, the metric bound for all of them
-  void topFromShard(const CKvGuard<CKey> &guard, uint8_t indexId, const CMetricOrder &order, size_t shardIndex,
+  void topFromShard(const CKvGuard<CKey> &guard, const CActiveIndex &index, const CMetricOrder &order, size_t shardIndex,
                     size_t depth, size_t need,
                     std::vector<std::pair<CKey, CValue>> &candidates,
-                    std::vector<uint64_t> &tails) const {
+                    std::vector<UInt<128>> &tails) const {
     const auto &shard = this->Engine_.shard(guard, shardIndex);
-    const uint8_t seekPrefix[2] = {'i', indexId};
+    const uint8_t seekPrefix[2] = {'i', index.Id};
+    const size_t rowKeySize = indexRowKeySize(index.Def);
 
     rocksdb::ReadOptions readOptions;
     readOptions.snapshot = shard.Disk.get()->Snapshot;
@@ -477,7 +513,7 @@ private:
     // Index rows are ordered by the inverted metric: iteration is metric-descending
     std::vector<std::pair<CKey, CValue>> selection;
     ankerl::unordered_dense::map<CKey, size_t> position;
-    uint64_t tail = 0;
+    UInt<128> tail;
     bool exhausted = true;
     size_t unreadable = 0;
 
@@ -489,16 +525,14 @@ private:
       if (key.size() < sizeof(seekPrefix) || memcmp(key.data(), seekPrefix, sizeof(seekPrefix)) != 0)
         break;
       // Nothing else lives under the 'i' prefix, the size check is a guard
-      if (key.size() != sizeof(CIndexRowKey))
+      if (key.size() != rowKeySize)
         continue;
       if (selection.size() == depth) {
         exhausted = false;
         break;
       }
 
-      uint64_t inverted;
-      memcpy(&inverted, key.data() + offsetof(CIndexRowKey, InvertedValue), sizeof(inverted));
-      tail = ~xbetoh<uint64_t>(inverted);
+      tail = decodeInvertedMetric(reinterpret_cast<const uint8_t*>(key.data()) + 2, index.Def.Width);
 
       // A row without its covering value is a row of a layout that is not this
       // one: it stays out of the selection, so the shard is not read to the end
@@ -510,7 +544,7 @@ private:
       }
 
       auto &row = selection.emplace_back();
-      memcpy(static_cast<void*>(&row.first), key.data() + offsetof(CIndexRowKey, Key), sizeof(CKey));
+      memcpy(static_cast<void*>(&row.first), key.data() + 2 + index.Def.Width, sizeof(CKey));
       memcpy(&row.second, It->value().data(), sizeof(CValue));
       position.emplace(row.first, selection.size() - 1);
     }
@@ -535,16 +569,16 @@ private:
 
     // Shard-local cut. The final one is taken over all shards and can only be
     // higher, so filtering by this one never drops a key that belongs in the top
-    uint64_t shardCut = 0;
+    UInt<128> shardCut;
     if (merged.size() >= need) {
       std::nth_element(merged.begin(), merged.begin() + (need - 1), merged.end(), order);
-      shardCut = order.Extract(merged[need-1].second);
+      shardCut = metricOf(index.Def, merged[need-1].second);
     }
 
     // The rest of the layers: a key's disk value is bounded by the tail (a
     // shard read to the end leaves nothing on disk to bound at all), so only a
     // delta big enough to lift that bound over the cut is worth a read
-    const uint64_t bound = exhausted ? 0 : tail;
+    const UInt<128> bound = exhausted ? UInt<128>() : tail;
     ankerl::unordered_dense::map<CKey, CValue> extraDeltas;
     forEachDelta(shard, [&](const CKey &key, const CValue &delta) {
       if (position.count(key))
@@ -557,14 +591,14 @@ private:
       // Pruning is legal only under a saturated cut: with no cut the answer
       // takes every key the layers hold - a zero-metric value is still a row,
       // and dropping it would make the answer depend on flush timing
-      if (shardCut) {
+      if (shardCut.nonZero()) {
         // a delta lowering the metric can't lift its key over the cut, a
-        // positive one is bounded by tail + delta
-        int64_t metric = static_cast<int64_t>(order.Extract(entry.second));
-        if (metric <= 0)
+        // positive one is bounded by tail + delta; the sign of a delta lives
+        // at the column width - its top bit, canonical bytes above are zero
+        UInt<128> metric = metricOf(index.Def, entry.second);
+        if (metric.isZero() || (metric >> (8 * index.Def.Width - 1)).nonZero())
           continue;
-        if (bound <= UINT64_MAX - static_cast<uint64_t>(metric) &&
-            bound + static_cast<uint64_t>(metric) < shardCut)
+        if (bound <= UInt<128>::max() - metric && bound + metric < shardCut)
           continue;
       }
       extras.emplace_back(entry.first, entry.second);
@@ -602,7 +636,7 @@ private:
 
     if (unreadable)
       LOG_F(ERROR, "%s: index '%u' of shard %zu has %zu rows in a foreign layout, rebuild the database",
-            this->Name_.c_str(), indexId, shardIndex, unreadable);
+            this->Name_.c_str(), index.Id, shardIndex, unreadable);
 
     candidates.insert(candidates.end(), merged.begin(), merged.end());
     if (!exhausted)
@@ -671,9 +705,9 @@ private:
       CKey baseKey;
       memcpy(static_cast<void*>(&baseKey), key.data() + offsetof(CDataRowKey, Key), sizeof(CKey));
       for (const CActiveIndex *index: indexes) {
-        CIndexRowKey rowKey;
-        makeIndexRowKey(rowKey, index->Id, index->Def.Extract(baseValue), baseKey);
-        batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey)),
+        uint8_t rowKey[IndexRowKeyMax];
+        size_t size = buildIndexRowKey(rowKey, *index, metricOf(index->Def, baseValue), baseKey);
+        batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size),
                   rocksdb::Slice(reinterpret_cast<const char*>(&baseValue), sizeof(CValue)));
         batchSize++;
       }

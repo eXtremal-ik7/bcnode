@@ -6,6 +6,7 @@
 #pragma once
 
 #include "common/baseBlob.h"
+#include "common/uint.h"
 #include "loguru.hpp"
 #include <filesystem>
 
@@ -23,6 +24,8 @@ std::string real_strprintf(const std::string &format, int dummy, ...);
 std::string vstrprintf(const char *format, va_list ap);
 std::string real_strprintf(const std::string &format, int dummy, ...);
 std::string FormatMoney(int64_t n, int64_t rationalPartSize, bool fPlus=false);
+// For cumulative counters that outgrow the native integers
+std::string FormatMoney(const UInt<128> &n, int64_t rationalPartSize);
 bool parseMoneyValue(const char *value, const int64_t rationalPartSize, int64_t *out);
 
 template<typename X>

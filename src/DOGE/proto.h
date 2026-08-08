@@ -13,6 +13,8 @@ public:
   using BlockHashTy = LTC::Proto::BlockHashTy;
   using TxHashTy = LTC::Proto::TxHashTy;
   using AddressTy = LTC::Proto::AddressTy;
+  // The dogecoin supply in base units outgrows uint64 around 2032
+  using BalanceType = UInt<128>;
 
   // Transaction format same as BTC: LTC's grew the MWEB sections, dogecoin has none
   using TxIn = LTC::Proto::TxIn;

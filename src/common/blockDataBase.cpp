@@ -131,25 +131,33 @@ BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
   if (newBest->Prev == previousBest) {
     return newBest;
   } else {
-    // Rebuild chain from least common ancestor
+    // Rebuild chain from least common ancestor. The return is the first block
+    // to CONNECT - the child of the ancestor on the new chain, never the
+    // ancestor itself: previousBest is already applied, and replaying it
+    // double-counts every delta-folded database
     BC::Common::BlockIndex *lb;
     BC::Common::BlockIndex *sb;
     if (newBest->Height >= previousBest->Height) {
       lb = newBest;
       sb = previousBest;
+      BC::Common::BlockIndex *lbChild = nullptr;
       uint32_t sbHeight = sb->Height;
       while (lb->Height > sbHeight) {
+        lbChild = lb;
         lb = lb->Prev;
       }
       while (sb != lb) {
         forDisconnect.push_back(sb);
         sb = sb->Prev;
+        lbChild = lb;
         lb = lb->Prev;
       }
 
+      return lbChild;
     } else {
       lb = previousBest;
       sb = newBest;
+      BC::Common::BlockIndex *sbChild = nullptr;
       uint32_t sbHeight = sb->Height;
       while (lb->Height > sbHeight) {
         forDisconnect.push_back(lb);
@@ -157,12 +165,14 @@ BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
       }
       while (sb != lb) {
         forDisconnect.push_back(lb);
+        sbChild = sb;
         sb = sb->Prev;
         lb = lb->Prev;
       }
-    }
 
-    return sb;
+      // Null when newBest is an ancestor of previousBest: disconnect only
+      return sbChild;
+    }
   }
 }
 

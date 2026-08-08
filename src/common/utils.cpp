@@ -81,6 +81,37 @@ std::string FormatMoney(int64_t n, int64_t rationalPartSize, bool fPlus)
   return result;
 }
 
+std::string FormatMoney(const UInt<128> &value, int64_t rationalPartSize)
+{
+  // The MSB reads as a sign: no real value gets near 2^127, so a wrapped
+  // (corrupted) counter shows as the minus it is instead of a huge number
+  const bool negative = value.isNegative();
+  const UInt<128> n = negative ? -value : value;
+
+  UInt<128> quotient;
+  uint64_t remainder = n.divmod64(static_cast<uint64_t>(rationalPartSize), &quotient);
+  std::string result = negative ? "-" + quotient.getDecimal() : quotient.getDecimal();
+
+  if (remainder) {
+    result.push_back('.');
+    // an index, not an iterator: push_back may grow the string
+    size_t point = result.size();
+    bool printZeroes = false;
+    do {
+      char digit = remainder % 10;
+      printZeroes |= digit != 0;
+      if (printZeroes)
+        result.push_back('0' + digit);
+      remainder /= 10;
+      rationalPartSize /= 10;
+    } while (rationalPartSize > 1);
+
+    std::reverse(result.begin() + point, result.end());
+  }
+
+  return result;
+}
+
 bool parseMoneyValue(const char *value, const int64_t rationalPartSize, int64_t *out)
 {
   *out = 0;

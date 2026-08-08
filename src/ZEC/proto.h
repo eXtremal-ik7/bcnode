@@ -14,6 +14,7 @@ public:
   using BlockHashTy = BTC::Proto::BlockHashTy;
   using TxHashTy = BTC::Proto::TxHashTy;
   using AddressTy = BTC::Proto::AddressTy;
+  using BalanceType = BTC::Proto::BalanceType;
 
   static constexpr uint32_t OVERWINTER_VERSION_GROUP_ID = 0x03C48270;
   static constexpr uint32_t SAPLING_VERSION_GROUP_ID = 0x892F2085;

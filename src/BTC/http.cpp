@@ -180,10 +180,10 @@ void BC::Network::HttpApiConnection::onAddressesInfo(rapidjson::Document &reques
     {
       JSON::Object object(stream);
       object.addString("address", address);
-      object.addString("balance", FormatMoney(static_cast<int64_t>(info.Received - info.Sent), BC::Configuration::RationalPartSize));
-      object.addString("total_received", FormatMoney(static_cast<int64_t>(info.Received), BC::Configuration::RationalPartSize));
-      object.addString("total_sent", FormatMoney(static_cast<int64_t>(info.Sent), BC::Configuration::RationalPartSize));
-      object.addString("total_mined", FormatMoney(static_cast<int64_t>(info.Mined), BC::Configuration::RationalPartSize));
+      object.addString("balance", FormatMoney(info.Received - info.Sent, BC::Configuration::RationalPartSize));
+      object.addString("total_received", FormatMoney(info.Received, BC::Configuration::RationalPartSize));
+      object.addString("total_sent", FormatMoney(info.Sent, BC::Configuration::RationalPartSize));
+      object.addString("total_mined", FormatMoney(info.Mined, BC::Configuration::RationalPartSize));
       object.addInt("tx_count", info.TxCount);
       object.addInt("txin_count", info.TxInCount);
       object.addInt("txout_count", info.TxOutCount);
@@ -570,10 +570,7 @@ void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document &request)
     {
       JSON::Array itemsArray(stream);
 
-      for (size_t i = pagination.offset; i < pagination.limit; i++) {
-        if (i >= block.vtx.size())
-          break;
-
+      for (size_t i = pagination.offset; i < block.vtx.size() && i - pagination.offset < pagination.limit; i++) {
         const BC::Proto::Transaction &tx = block.vtx[i];
         const BC::Proto::CTxLinkedOutputs &txOutputs = blockOutputs.Tx[i];
         itemsArray.addField();
@@ -666,9 +663,9 @@ void BC::Network::HttpApiConnection::onStatsRichList(rapidjson::Document &reques
           JSON::Object itemObject(stream);
           itemObject.addInt("rank", pagination.offset + i + 1);
           itemObject.addString("address", address58);
-          itemObject.addString("balance", FormatMoney(static_cast<int64_t>(value.Received - value.Sent), BC::Configuration::RationalPartSize));
-          itemObject.addString("total_received", FormatMoney(static_cast<int64_t>(value.Received), BC::Configuration::RationalPartSize));
-          itemObject.addString("total_sent", FormatMoney(static_cast<int64_t>(value.Sent), BC::Configuration::RationalPartSize));
+          itemObject.addString("balance", FormatMoney(value.Received - value.Sent, BC::Configuration::RationalPartSize));
+          itemObject.addString("total_received", FormatMoney(value.Received, BC::Configuration::RationalPartSize));
+          itemObject.addString("total_sent", FormatMoney(value.Sent, BC::Configuration::RationalPartSize));
           itemObject.addInt("tx_count", value.TxCount);
           itemObject.addNull("percentage_of_supply");
         }
@@ -975,7 +972,7 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
                                                  const BC::Common::BlockIndex *index,
                                                  bool isCoinbase,
                                                  uint64_t confirmations,
-                                                 const uint64_t *balanceAfter)
+                                                 const BC::Proto::BalanceType *balanceAfter)
 {
   JSON::Object txObject(stream);
 
@@ -1015,7 +1012,7 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   txObject.addString("fee", FormatMoney(fee, BC::Configuration::RationalPartSize));
   // Set for the addresses/txs context only: the address balance right after this tx
   if (balanceAfter)
-    txObject.addString("balance_after", FormatMoney(static_cast<int64_t>(*balanceAfter), BC::Configuration::RationalPartSize));
+    txObject.addString("balance_after", FormatMoney(*balanceAfter, BC::Configuration::RationalPartSize));
 
   // Only a BIP30 repeat has more than one place in the chain: the same transaction
   // sits in two blocks, and the coins of the earlier copy are dead - the later one
@@ -1070,8 +1067,7 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
           inputObject.addNull("value");
         }
 
-        // TODO: check it, excess field
-        inputObject.addBoolean("coinbase", txin.previousOutputIndex == 0);
+        inputObject.addBoolean("coinbase", isCoinbase);
       }
     }
   }

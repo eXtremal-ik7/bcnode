@@ -19,6 +19,9 @@ public:
   using TxHashTy = ::BaseBlob<256>;
   using AddressTy = ::BaseBlob<160>;
   using PrivateKeyTy = ::BaseBlob<256>;
+  // For money bounded by coins actually held or created (balances, mined
+  // totals): uint64 is enough while the supply in base units fits it
+  using BalanceType = uint64_t;
 
   enum class ServicesTy : uint64_t {
     Network = 1,

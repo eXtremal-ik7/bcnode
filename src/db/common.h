@@ -6,6 +6,7 @@
 #pragma once
 
 #include "common/blockDataBase.h"
+#include "common/uint.h"
 
 #include "config4cpp/Configuration.h"
 #include <filesystem>
@@ -115,7 +116,7 @@ struct CAddrHistoryItem {
   BC::Proto::TxHashTy TxId;
   uint32_t Height;
   uint32_t Time;
-  uint64_t Aggregate;
+  BC::Proto::BalanceType Aggregate;
 };
 #pragma pack(pop)
 
@@ -138,16 +139,21 @@ public:
 };
 
 // Cumulative per-address counters; also serves as the in-memory delta
-// (all fields are additive, negative deltas use two's complement wrap)
+// (all fields are additive, negative deltas use two's complement wrap).
+// Received/Sent are 128-bit - lifetime turnover is not bounded by the supply,
+// a busy DOGE wallet passes 2^64 satoshi within a few years. Mined counts
+// created coins only, so it is supply-bounded and takes the per-coin width
 #pragma pack(push, 1)
 struct CAddrValue {
-  uint64_t Received = 0;
-  uint64_t Sent = 0;
-  uint64_t Mined = 0;
-  uint32_t TxCount = 0;
-  uint32_t TxInCount = 0;
-  uint32_t TxOutCount = 0;
-  uint32_t MinedTxCount = 0;
+  UInt<128> Received;
+  UInt<128> Sent;
+  BC::Proto::BalanceType Mined{};
+  // The chain-wide transaction count outgrows uint32 in the foreseeable
+  // future, and the input/output counters run ahead of it
+  uint64_t TxCount = 0;
+  uint64_t TxInCount = 0;
+  uint64_t TxOutCount = 0;
+  uint64_t MinedTxCount = 0;
 
   void merge(const CAddrValue &delta) {
     Received += delta.Received;
@@ -160,9 +166,9 @@ struct CAddrValue {
   }
 
   void negate() {
-    Received = 0 - Received;
-    Sent = 0 - Sent;
-    Mined = 0 - Mined;
+    Received = -Received;
+    Sent = -Sent;
+    Mined = -Mined;
     TxCount = 0 - TxCount;
     TxInCount = 0 - TxInCount;
     TxOutCount = 0 - TxOutCount;
@@ -170,7 +176,7 @@ struct CAddrValue {
   }
 
   bool isNull() const {
-    return Received == 0 && Sent == 0 && Mined == 0 &&
+    return Received.isZero() && Sent.isZero() && Mined == 0u &&
            TxCount == 0 && TxInCount == 0 && TxOutCount == 0 && MinedTxCount == 0;
   }
 };

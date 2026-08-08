@@ -14,6 +14,75 @@
 namespace BC {
 namespace DB {
 
+Archive::~Archive()
+{
+  if (!ConnectWorkers_.empty()) {
+    {
+      std::lock_guard lock(ConnectMutex_);
+      ConnectStop_ = true;
+    }
+    ConnectStartCv_.notify_all();
+    for (std::thread &thread: ConnectWorkers_)
+      thread.join();
+  }
+}
+
+void Archive::connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
+{
+  if (ConnectWorkers_.empty()) {
+    for (auto &db: AllDb_)
+      db->connect(batch, blockIndex, blockDb);
+    return;
+  }
+
+  {
+    std::lock_guard lock(ConnectMutex_);
+    ConnectBatch_ = batch;
+    ConnectBlockIndex_ = &blockIndex;
+    ConnectBlockDb_ = &blockDb;
+    ConnectDone_ = 0;
+    ConnectGeneration_++;
+  }
+  ConnectStartCv_.notify_all();
+
+  // The caller is a worker too: the batch ends with its slowest database, an
+  // idle wait here would buy nothing
+  AllDb_[0]->connect(batch, blockIndex, blockDb);
+
+  std::unique_lock lock(ConnectMutex_);
+  ConnectDoneCv_.wait(lock, [this]() { return ConnectDone_ == ConnectWorkers_.size(); });
+}
+
+void Archive::connectWorker(size_t slot)
+{
+  loguru::set_thread_name((AllDb_[slot]->name() + ".connect").c_str());
+
+  uint64_t seen = 0;
+  for (;;) {
+    CBlockBatch batch;
+    BlockInMemoryIndex *blockIndex;
+    BlockDatabase *blockDb;
+    {
+      std::unique_lock lock(ConnectMutex_);
+      ConnectStartCv_.wait(lock, [this, seen]() { return ConnectStop_ || ConnectGeneration_ != seen; });
+      if (ConnectStop_)
+        return;
+      seen = ConnectGeneration_;
+      batch = ConnectBatch_;
+      blockIndex = ConnectBlockIndex_;
+      blockDb = ConnectBlockDb_;
+    }
+
+    AllDb_[slot]->connect(batch, *blockIndex, *blockDb);
+
+    {
+      std::lock_guard lock(ConnectMutex_);
+      ConnectDone_++;
+    }
+    ConnectDoneCv_.notify_one();
+  }
+}
+
 template<typename IInterface>
 IInterface* setupHandler(config4cpp::Configuration *cfg,
                          const char *name,
@@ -115,6 +184,11 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   // Connect
   if (!dbConnectBlocks(storage.utxodb(), utxoBestBlock, archiveDatabases, blockIndex, chainParams, storage, "utxo & archive databases"))
     return false;
+
+  // After the catch-up: it feeds each database separately (they wake up at
+  // different heights) and never goes through connect()
+  for (size_t i = 1; i < AllDb_.size(); i++)
+    ConnectWorkers_.emplace_back([this, i]() { connectWorker(i); });
 
   return true;
 }
