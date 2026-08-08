@@ -299,6 +299,41 @@ static void BuildHeaderChain(BlockInMemoryIndex &blockIndex, BC::Common::ChainPa
   }
 }
 
+intrusive_ptr<BC::Common::CIndexCacheObject> objectFromStoredBytes(BC::Common::BlockIndex *index,
+                                                                   BC::Common::ChainParams &chainParams,
+                                                                   const void *blockData,
+                                                                   size_t blockSize,
+                                                                   const void *linkedOutputsData,
+                                                                   size_t linkedOutputsSize,
+                                                                   CAllocationInfo *info)
+{
+  size_t unpackedSize = 0;
+  xmstream blockStream(const_cast<void*>(blockData), blockSize);
+  BC::Proto::Block *block = BTC::unpack2<BC::Proto::Block>(blockStream, &unpackedSize);
+  if (!block)
+    return nullptr;
+
+  // The serialized bytes are not kept: the block is on disk, and the caller owns the copy
+  intrusive_ptr<BC::Common::CIndexCacheObject> object(
+    new BC::Common::CIndexCacheObject(info, nullptr, blockSize, 0, block, unpackedSize));
+
+  {
+    xmstream stream(const_cast<void*>(linkedOutputsData), linkedOutputsSize);
+    if (!BTC::unserializeAndCheck(stream, object.get()->linkedOutputs()))
+      return nullptr;
+  }
+
+  // Same invariant as a fresh block: validation data is filled before any connect/disconnect.
+  // No contextual check runs here - the block passed one on its way into the block database -
+  // so the exemptions come straight from the pinned list
+  BC::Common::initializeValidationContext(*block, object.get()->validationData());
+  BTC::Common::fillBIP30Context(*index, chainParams, object.get()->validationData());
+  object.get()->validationData().InputsResolved = true;
+  object.get()->reaccount();
+
+  return object;
+}
+
 intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockIndex *index,
                                                            BC::Common::ChainParams &chainParams,
                                                            BlockDatabase &blockDb)
@@ -327,37 +362,13 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockInde
                                           index->LinkedOutputsSerializedSize))
     return nullptr;
 
-
-
-  size_t unpackedSize = 0;
-  xmstream stream(serialized.get(), index->SerializedBlockSize);
-  BC::Proto::Block *block = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
-  if (!block)
-    return nullptr;
-
-  // Create block object
-  intrusive_ptr<BC::Common::CIndexCacheObject> object(new BC::Common::CIndexCacheObject(nullptr,
-                                                                                        nullptr,
-                                                                                        index->SerializedBlockSize,
-                                                                                        0,
-                                                                                        block,
-                                                                                        unpackedSize));
-
-  {
-    xmstream stream(linkedOutputsData.get(), index->LinkedOutputsSerializedSize);
-    if (!BTC::unserializeAndCheck(stream, object.get()->linkedOutputs()))
-      return nullptr;
-  }
-
-  // A disk-reloaded object must satisfy the same invariant as a fresh one:
-  // validation data (txids and consensus exemptions included) is filled before any
-  // connect/disconnect. No contextual check runs here, so the exemptions are taken
-  // straight from the pinned list
-  BC::Common::initializeValidationContext(*block, object.get()->validationData());
-  BTC::Common::fillBIP30Context(*index, chainParams, object.get()->validationData());
-  object.get()->validationData().InputsResolved = true;
-
-  return object;
+  return objectFromStoredBytes(index,
+                               chainParams,
+                               serialized.get(),
+                               index->SerializedBlockSize,
+                               linkedOutputsData.get(),
+                               index->LinkedOutputsSerializedSize,
+                               nullptr);
 }
 
 static intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndexChecked(BC::Common::BlockIndex *index,
@@ -875,6 +886,45 @@ static void cutSegment(CSegment &segment, size_t keep, const char *reason)
   segment.Objects.resize(keep);
 }
 
+// A batch a database missed. Its blocks were checked when they got on the chain and carry their
+// own linked outputs, so nothing is verified or resolved here - only the objects to rebuild,
+// which is the one part that costs and goes over the whole pool
+static bool prepareCatchUpSegment(BC::Common::ChainParams &chainParams,
+                                  BC::DB::Storage &storage,
+                                  CSegment &segment,
+                                  CParallelRunner &runner,
+                                  CPipelineCounters &counters)
+{
+  std::atomic<bool> failed = false;
+
+  runner.run(segment.Objects.size(), [&](size_t begin, size_t end) {
+    for (size_t i = begin; i < end; i++) {
+      CSegment::CObject &entry = segment.Objects[i];
+      entry.Object = objectFromStoredBytes(entry.Index,
+                                           chainParams,
+                                           entry.BlockData,
+                                           entry.BlockSize,
+                                           entry.LinkedOutputsData,
+                                           entry.LinkedOutputsSize,
+                                           &storage.cache());
+      if (!entry.Object.get()) {
+        LOG_F(ERROR,
+              "Can't rebuild stored block %s (%u), block database is damaged",
+              entry.Index->Header.GetHash().getHexLE().c_str(),
+              entry.Index->Height);
+        entry.Valid = false;
+        failed.store(true, std::memory_order_relaxed);
+      }
+    }
+  });
+
+  counters.RawBytes -= segment.RawBytes;
+  // Everything the objects need has been copied into them
+  segment.BlockBlob = nullptr;
+  segment.LinkedOutputsBlob = nullptr;
+  return !failed.load(std::memory_order_relaxed);
+}
+
 bool prepareSegment(BlockInMemoryIndex&,
                     BC::Common::ChainParams &chainParams,
                     BC::DB::Storage &storage,
@@ -885,6 +935,9 @@ bool prepareSegment(BlockInMemoryIndex&,
 {
   if (segment.Objects.empty())
     return false;
+
+  if (segment.CatchUp)
+    return prepareCatchUpSegment(chainParams, storage, segment, runner, counters);
 
   checkSegmentWork(segment, chainParams, runner);
   prepareSegmentBlocks(chainParams, storage, segment, runner, counters);
@@ -1643,186 +1696,138 @@ void BlockSearcher::fetchPending()
   ExpectedBlockSizes_.clear();
 }
 
-BC::Common::BlockIndex *BlockBulkReader::add(BlockInMemoryIndex &blockIndex, const BC::Proto::BlockHashTy &hash)
+// One read per contiguous run: the walk and the block database are both in chain order, so a
+// whole batch is usually one or two reads
+bool CCatchUpReader::readRecords(LinearDataStorage &storage, const std::vector<CRecord> &records, void *destination)
 {
-  auto It = blockIndex.blockIndex().find(hash);
-  if (It != blockIndex.blockIndex().end()) {
-    return add(It->second);
-  } else {
-    return nullptr;
-  }
-}
+  uint8_t *out = static_cast<uint8_t*>(destination);
+  size_t i = 0;
 
-BC::Common::BlockIndex *BlockBulkReader::add(BC::Common::BlockIndex *index)
-{
-  // The batch is cut before the block that would overflow it, never inside a
-  // combined read: the cut only ends the batch, the read is already split by
-  // whatever contiguity the files have
-  const size_t size = index->SerializedBlockSize != std::numeric_limits<uint32_t>::max() ?
-                        index->SerializedBlockSize : 0;
-  if (BatchBytes_ && (BatchBytes_ + size > BatchSizeLimit_ ||
-                      Indexes_.size() + Batch_.size() >= BatchBlocksLimit_))
-    flush();
-
-  intrusive_ptr<BC::Common::CIndexCacheObject> object(index->Serialized);
-  if (object.get()) {
-    // Block now in cache: the pending read goes first, order inside the batch
-    // is the order the walk added them in
-    fetchPending();
-    BatchBytes_ += size;
-    CBulkBlock &entry = Batch_.emplace_back();
-    entry.Index = index;
-    entry.Object = object;
-  } else if (index->FileNo != std::numeric_limits<uint32_t>::max() &&
-             index->FileOffset != std::numeric_limits<uint32_t>::max() &&
-             index->SerializedBlockSize != std::numeric_limits<uint32_t>::max() &&
-             index->LinkedOutputsFileNo != std::numeric_limits<uint32_t>::max() &&
-             index->LinkedOutputsFileOffset != std::numeric_limits<uint32_t>::max() &&
-             index->LinkedOutputsSerializedSize != std::numeric_limits<uint32_t>::max()) {
-    // Block not in cache, but present on disk storage
-    if (!BlockCursor_.initialized()) {
-      // Queue is empty, initialize it with first block
-      BlockCursor_.set(index->FileNo, index->FileOffset, index->FileOffset + index->SerializedBlockSize + 8);
-      LinkedOutputsCursor_.emplace_back(index->LinkedOutputsFileNo,
-                                        index->LinkedOutputsFileOffset,
-                                        index->LinkedOutputsFileOffset + index->LinkedOutputsSerializedSize + 4);
-      Indexes_.push_back(index);
-    } else if (BlockCursor_.FileNo == index->FileNo && BlockCursor_.OffsetCurrent == index->FileOffset) {
-      // Read from disk can be combined
-      BlockCursor_.OffsetCurrent = index->FileOffset + index->SerializedBlockSize + 8;
-
-      if (LinkedOutputsCursor_.back().FileNo == index->LinkedOutputsFileNo && LinkedOutputsCursor_.back().OffsetCurrent == index->LinkedOutputsFileOffset) {
-        LinkedOutputsCursor_.back().OffsetCurrent = index->LinkedOutputsFileOffset + index->LinkedOutputsSerializedSize + 4;
-      } else {
-        LinkedOutputsCursor_.emplace_back(index->LinkedOutputsFileNo,
-                                          index->LinkedOutputsFileOffset,
-                                          index->LinkedOutputsFileOffset + index->LinkedOutputsSerializedSize + 4);
-      }
-      Indexes_.push_back(index);
-    } else {
-      fetchPending();
-      BlockCursor_.set(index->FileNo, index->FileOffset, index->FileOffset + index->SerializedBlockSize + 8);
-      LinkedOutputsCursor_.emplace_back(index->LinkedOutputsFileNo,
-                                        index->LinkedOutputsFileOffset,
-                                        index->LinkedOutputsFileOffset + index->LinkedOutputsSerializedSize + 4);
-      Indexes_.push_back(index);
+  while (i < records.size()) {
+    uint32_t size = records[i].Size;
+    size_t j = i + 1;
+    while (j < records.size() &&
+           records[j].FileNo == records[i].FileNo &&
+           records[j].Offset == records[i].Offset + size) {
+      size += records[j].Size;
+      j++;
     }
-    BatchBytes_ += size;
-  } else {
-    return nullptr;
-  }
 
-  return index;
-}
-
-void BlockBulkReader::flush()
-{
-  fetchPending();
-  if (!Batch_.empty() && !Failed_)
-    Handler_(Batch_);
-  Batch_.clear();
-  BatchBytes_ = 0;
-}
-
-void BlockBulkReader::fetchPending()
-{
-  if (!BlockCursor_.initialized())
-    return;
-
-  // Read block data
-  BlockStream_.reset();
-  uint32_t blockDataSize = BlockCursor_.OffsetCurrent - BlockCursor_.OffsetBegin;
-  void *blockData = BlockStream_.reserve(blockDataSize);
-  if (!BlockDb_.blockReader().read(BlockCursor_.FileNo, BlockCursor_.OffsetBegin, blockData, blockDataSize)) {
-    LOG_F(ERROR,
-          "Can't read data from %s (offset = %u, size = %u)",
-          BlockDb_.blockReader().getFilePath(BlockCursor_.FileNo).c_str(),
-          BlockCursor_.OffsetBegin,
-          blockDataSize);
-    fail();
-    return;
-  }
-
-  // Read linked outputs data
-  LinkedOutputsStream_.reset();
-  uint32_t linkedOutputsDataSize = 0;
-  for (const auto &b: LinkedOutputsCursor_)
-    linkedOutputsDataSize += b.OffsetCurrent - b.OffsetBegin;
-  void *linkedOutputsData = LinkedOutputsStream_.reserve(linkedOutputsDataSize);
-
-  uint8_t *p = (uint8_t*)linkedOutputsData;
-  for (const auto &b: LinkedOutputsCursor_) {
-    if (!BlockDb_.linkedOutputsReader().read(b.FileNo, b.OffsetBegin, p, b.OffsetCurrent - b.OffsetBegin)) {
+    if (!storage.read(records[i].FileNo, records[i].Offset, out, size)) {
       LOG_F(ERROR,
             "Can't read data from %s (offset = %u, size = %u)",
-            BlockDb_.linkedOutputsReader().getFilePath(b.FileNo).c_str(),
-            b.OffsetBegin,
-            b.OffsetCurrent - b.OffsetBegin);
-      fail();
-      return;
+            storage.getFilePath(records[i].FileNo).c_str(),
+            records[i].Offset,
+            size);
+      return false;
     }
-    p += b.OffsetCurrent - b.OffsetBegin;
+
+    out += size;
+    i = j;
   }
 
-  size_t i = 0;
-  BlockStream_.seekSet(0);
-  LinkedOutputsStream_.seekSet(0);
-  while (BlockStream_.remaining()) {
-    if (i >= Indexes_.size()) {
-      fail();
-      return;
-    }
+  return true;
+}
 
-    uint32_t magic;
-    uint32_t bSize;
-    uint32_t lSize;
-    BC::unserialize(BlockStream_, magic);
-    BC::unserialize(BlockStream_, bSize);
-    BC::unserialize(LinkedOutputsStream_, lSize);
+std::unique_ptr<CSegment> CCatchUpReader::next()
+{
+  if (Failed_)
+    return nullptr;
 
-    if (magic != BlockDb_.magic() || BlockStream_.eof()) {
-      LOG_F(ERROR, "Invalid block data in file %s", BlockDb_.blockReader().getFilePath(BlockCursor_.FileNo).c_str());
-      fail();
-      return;
-    }
-
-    // Unserialize block and linked outputs
-    size_t size;
-    auto *block = BTC::unpack2<BC::Proto::Block>(BlockStream_, &size);
-    if (!block) {
-      LOG_F(ERROR,
-            "BlockBulkReader: can't unserialize block [%u]%s",
-            Indexes_[i]->Height,
-            Indexes_[i]->Header.GetHash().getHexLE().c_str());
-      fail();
-      return;
-    }
-
-    // The batch owns the block from here on: the consumer may hand it to
-    // databases that are still reading it after this call returns
-    CBulkBlock &entry = Batch_.emplace_back();
-    entry.Index = Indexes_[i++];
-    entry.Parsed.reset(block);
-
-    if (!BC::unserializeAndCheck(LinkedOutputsStream_, entry.ParsedLinkedOutputs)) {
-      LOG_F(ERROR,
-            "BlockBulkReader: can't unserialize linked outputs for block [%u]%s",
-            entry.Index->Height,
-            entry.Index->Header.GetHash().getHexLE().c_str());
-      fail();
-      return;
-    }
-  }
-
-  if (i != Indexes_.size() ||
-      BlockStream_.remaining() ||
-      LinkedOutputsStream_.remaining()) {
-    LOG_F(ERROR, "BlockBulkReader: inconsistent data");
-    fail();
-    return;
-  }
-
-  BlockCursor_.reset();
-  LinkedOutputsCursor_.clear();
   Indexes_.clear();
+  BlockRecords_.clear();
+  LinkedOutputsRecords_.clear();
+  size_t blockBytes = 0;
+  size_t linkedOutputsBytes = 0;
+  size_t rawBytes = 0;
+
+  for (; Cursor_; Cursor_ = Cursor_->Next) {
+    BC::Common::BlockIndex *index = Cursor_;
+    if (!index->blockStored() || !index->indexStored()) {
+      LOG_F(ERROR,
+            "Block %s (%u) is on the chain but not in the block database",
+            index->Header.GetHash().getHexLE().c_str(),
+            index->Height);
+      Failed_ = true;
+      return nullptr;
+    }
+
+    // Records are read whole, with their <magic>:4 <size>:4 (blocks) and <size>:4 (linked
+    // outputs) prefixes, so that neighbours stay contiguous
+    const uint32_t blockRecord = index->SerializedBlockSize + 8;
+    const uint32_t linkedOutputsRecord = index->LinkedOutputsSerializedSize + 4;
+
+    // Cut before the block that would overflow the batch, never after it
+    if (!BlockRecords_.empty() &&
+        (rawBytes + index->SerializedBlockSize > BatchSizeLimit_ ||
+         BlockRecords_.size() >= BatchBlocksLimit_))
+      break;
+
+    BlockRecords_.push_back(CRecord{index->FileNo, index->FileOffset, blockRecord});
+    LinkedOutputsRecords_.push_back(CRecord{index->LinkedOutputsFileNo, index->LinkedOutputsFileOffset, linkedOutputsRecord});
+    Indexes_.push_back(index);
+    blockBytes += blockRecord;
+    linkedOutputsBytes += linkedOutputsRecord;
+    rawBytes += index->SerializedBlockSize;
+  }
+
+  if (Indexes_.empty())
+    return nullptr;
+
+  auto segment = std::make_unique<CSegment>();
+  segment->CatchUp = true;
+  segment->RawBytes = rawBytes;
+  segment->BlockBlob = intrusive_ptr<CRawBlockData>(new CRawBlockData(operator new(blockBytes), blockBytes, nullptr));
+  segment->LinkedOutputsBlob = intrusive_ptr<CRawBlockData>(new CRawBlockData(operator new(linkedOutputsBytes), linkedOutputsBytes, nullptr));
+
+  if (!readRecords(BlockDb_.blockReader(), BlockRecords_, segment->BlockBlob.get()->data()) ||
+      !readRecords(BlockDb_.linkedOutputsReader(), LinkedOutputsRecords_, segment->LinkedOutputsBlob.get()->data())) {
+    Failed_ = true;
+    return nullptr;
+  }
+
+  segment->Objects.resize(Indexes_.size());
+  uint8_t *blockData = static_cast<uint8_t*>(segment->BlockBlob.get()->data());
+  uint8_t *linkedOutputsData = static_cast<uint8_t*>(segment->LinkedOutputsBlob.get()->data());
+
+  for (size_t i = 0; i < Indexes_.size(); i++) {
+    BC::Common::BlockIndex *index = Indexes_[i];
+    CSegment::CObject &entry = segment->Objects[i];
+    entry.Index = index;
+
+    uint32_t magic = 0;
+    uint32_t blockSize = 0;
+    uint32_t linkedOutputsSize = 0;
+    {
+      xmstream stream(blockData, 8);
+      BC::unserialize(stream, magic);
+      BC::unserialize(stream, blockSize);
+    }
+    {
+      xmstream stream(linkedOutputsData, 4);
+      BC::unserialize(stream, linkedOutputsSize);
+    }
+
+    // What the index says the record is must be what the record says it is
+    if (magic != BlockDb_.magic() ||
+        blockSize != index->SerializedBlockSize ||
+        linkedOutputsSize != index->LinkedOutputsSerializedSize) {
+      LOG_F(ERROR,
+            "Stored block %s (%u) does not match its index entry",
+            index->Header.GetHash().getHexLE().c_str(),
+            index->Height);
+      Failed_ = true;
+      return nullptr;
+    }
+
+    entry.BlockData = blockData + 8;
+    entry.BlockSize = blockSize;
+    entry.LinkedOutputsData = linkedOutputsData + 4;
+    entry.LinkedOutputsSize = linkedOutputsSize;
+    blockData += blockSize + 8;
+    linkedOutputsData += linkedOutputsSize + 4;
+  }
+
+  Indexes_.clear();
+  return segment;
 }

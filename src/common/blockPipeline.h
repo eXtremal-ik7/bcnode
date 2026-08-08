@@ -104,6 +104,12 @@ struct CSegment {
     bool Relay = false;
     // Preparation left nothing unresolved; false means it spends what it may not
     bool Completable = true;
+    // Catch-up only: the stored bytes the preparation rebuilds the object from, pointing into
+    // the segment's blobs below
+    const void *BlockData = nullptr;
+    const void *LinkedOutputsData = nullptr;
+    uint32_t BlockSize = 0;
+    uint32_t LinkedOutputsSize = 0;
   };
 
   // Input spending a coin older than the segment: only the state it connects to answers it
@@ -124,6 +130,13 @@ struct CSegment {
   // Order of the bite; segments are prepared in parallel and connected in this order
   uint64_t Seq = 0;
   uint64_t Gen = 0;
+  // Replays blocks the chain already holds, for a database that missed them. Comes from a
+  // feeder, not from the selector, and connects nothing
+  bool CatchUp = false;
+  // Catch-up only: the combined reads the pointers above go into. The preparation drops them -
+  // the objects it builds copy what they need
+  intrusive_ptr<CRawBlockData> BlockBlob;
+  intrusive_ptr<CRawBlockData> LinkedOutputsBlob;
 };
 
 
@@ -223,6 +236,17 @@ public:
   bool started() const { return Started_; }
   void setCallback(newBestCallback callback) { Callback_ = std::move(callback); }
 
+  // Where a prepared catch-up segment goes, called by the serial stage in chain order. The sink
+  // owns it from there: the databases are still reading it after the call returns
+  typedef std::function<void(std::unique_ptr<CSegment>)> catchUpSink;
+  void setCatchUpSink(catchUpSink sink) { CatchUpSink_ = std::move(sink); }
+
+  // A segment built outside the selector: the chain is settled, so a feeder knows what is
+  // missing without walking topology. Blocks until the pipeline has room
+  void feed(std::unique_ptr<CSegment> segment);
+  // A stored block that would not rebuild: the block database is damaged and the run is over
+  bool catchUpFailed() const { return CatchUpFailed_.load(std::memory_order_relaxed); }
+
   // Block file reader: block data lives inside a shared block file buffer
   EResult attachFromFile(const intrusive_ptr<CRawBlockData> &buffer,
                          uint32_t offset,
@@ -281,6 +305,8 @@ private:
   CParams Params_;
   bool Started_ = false;
   newBestCallback Callback_;
+  catchUpSink CatchUpSink_;
+  std::atomic<bool> CatchUpFailed_ = false;
 
   CParallelRunner Runner_;
   std::thread SelectorThread_;

@@ -430,6 +430,13 @@ int main(int argc, char **argv)
   if (!loadingBlockIndex(context.BlockIndex, context.BlocksDir, context.IndexDir))
     return 1;
 
+  // Pull pipeline: shared by the reindex reader, the network catch-up and the database catch-up
+  // below - the chain is settled at this point, so its selector has nothing to bite and only the
+  // lanes and the ordering are in use
+  pipelineParams.WaveThreads = waveThreadsNum;
+  if (!context.Pipeline.start(context.BlockIndex, context.ChainParams, context.Storage, pipelineParams))
+    return 1;
+
   // Initialize databases
   if (!archiveEnabled) {
     // Archive disabled, processing UTXO database
@@ -441,12 +448,13 @@ int main(int argc, char **argv)
     if (!BC::DB::dbDisconnectBlocks(context.Storage.utxodb(), context.BlockIndex, context.ChainParams, context.Storage, forDisconnect))
       return 1;
     if (!BC::DB::dbConnectBlocks(context.Storage.utxodb(), utxoBestBlock, {}, nullptr,
-                                 context.BlockIndex, context.ChainParams, context.Storage,
-                                 pipelineParams.SegmentSizeLimit, "UTXO database"))
+                                 context.BlockIndex, context.Storage, context.Pipeline,
+                                 pipelineParams, "UTXO database"))
       return 1;
   } else {
     // Initialize full archive
-    if (!context.Archive.init(context.BlockIndex, context.ChainParams, context.Storage, context.DataDir, context.UtxoDir, cfg))
+    if (!context.Archive.init(context.BlockIndex, context.ChainParams, context.Storage,
+                              context.Pipeline, pipelineParams, context.DataDir, context.UtxoDir, cfg))
       return 1;
   }
 
@@ -458,11 +466,6 @@ int main(int argc, char **argv)
 
   // Initialize storage manager
   if (!context.Storage.run([&context]() { postQuitOperation(context.MainBase); }))
-    return 1;
-
-  // Pull pipeline: shared by the reindex reader and network catch-up
-  pipelineParams.WaveThreads = waveThreadsNum;
-  if (!context.Pipeline.start(context.BlockIndex, context.ChainParams, context.Storage, pipelineParams))
     return 1;
 
   if (gReindex) {

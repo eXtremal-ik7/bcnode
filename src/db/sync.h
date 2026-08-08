@@ -21,17 +21,19 @@ bool dbDisconnectBlocks(BC::DB::BaseInterface &db,
                         BC::DB::Storage &storage,
                         std::vector<BC::Common::BlockIndex *> &forDisconnect);
 
-// archive may be null - the utxo-only path has no archive at all. When it is
-// set, the archive databases are fed through its connect workers and this
-// thread keeps a batch ahead of them
+// Feeds the databases the blocks they missed. The chain is settled and holds all of them, so
+// nothing is selected, validated or written back: the walk starts at the lowest block anyone
+// still needs, the pipeline prepares the batches and returns them in order, and they go straight
+// to the archive. Databases wake up at different heights and each takes its own tail of a batch
+// (Archive::setConnectFrom); archive may be null - the utxo-only path has none
 bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
                      BC::Common::BlockIndex *utxoBestBlock,
                      std::vector<BaseWithBest> archiveDatabases,
                      BC::DB::Archive *archive,
                      BlockInMemoryIndex &blockIndex,
-                     BC::Common::ChainParams &chainParams,
                      BC::DB::Storage &storage,
-                     size_t batchSizeLimit,
+                     CBlockPipeline &pipeline,
+                     const CBlockPipeline::CParams &params,
                      const char *name);
 
 }

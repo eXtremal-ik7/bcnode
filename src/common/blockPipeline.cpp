@@ -156,6 +156,28 @@ CBlockPipeline::EResult CBlockPipeline::attachFromNetwork(void *data,
   return Staged;
 }
 
+void CBlockPipeline::feed(std::unique_ptr<CSegment> segment)
+{
+  if (segment->Objects.empty())
+    return;
+
+  std::unique_lock lock(Mutex_);
+  // The admission the selector obeys, for a feeder that has none. This is the whole backpressure
+  // of a catch-up run: the next batch is read only once this returns
+  DrainCV_.wait(lock, [this]() {
+    return Stopped_ || InFlight_ + Ready_.size() < Params_.ReadyQueueDepth + Params_.PrepLanes;
+  });
+  if (Stopped_)
+    return;
+
+  Counters_.RawBytes.fetch_add(segment->RawBytes, std::memory_order_relaxed);
+  segment->Seq = NextSeq_++;
+  segment->Gen = ResetGen_;
+  Pending_.push_back(std::move(segment));
+  InFlight_++;
+  PrepCV_.notify_one();
+}
+
 bool CBlockPipeline::throttled() const
 {
   // What the storage thread has to write and has not written yet: the archive is ten times
@@ -379,7 +401,10 @@ void CBlockPipeline::discard(CSegment &segment)
   for (CSegment::CObject &object: segment.Objects) {
     if (object.Object.get())
       object.Object.get()->validationData().dropPairs();
-    object.Index->Prepared.store(false, std::memory_order_relaxed);
+    // A catch-up segment never took its blocks off the chain: clearing the mark would offer
+    // connected blocks to the selector again
+    if (!segment.CatchUp)
+      object.Index->Prepared.store(false, std::memory_order_relaxed);
   }
 }
 
@@ -548,6 +573,13 @@ void CBlockPipeline::prepare()
       } else if (ok) {
         Reorder_[segment->Seq] = std::move(segment);
         publishReadyLocked();
+      } else if (segment->CatchUp) {
+        // A stored block that does not rebuild means a damaged block database, and there is no
+        // fork to fall back to. Published all the same: a hole in the sequence would leave
+        // everything after it waiting forever. The sink drops it once it sees the flag
+        CatchUpFailed_.store(true, std::memory_order_relaxed);
+        Reorder_[segment->Seq] = std::move(segment);
+        publishReadyLocked();
       } else {
         // Something in the segment was rejected by its own checks; the block is BSInvalid now,
         // so the next bite stops before it and the good part comes back as a segment of its own
@@ -584,8 +616,24 @@ void CBlockPipeline::serial()
       segment = std::move(Ready_.front());
       Ready_.pop_front();
       SerialBusy_ = true;
+      // Room for one more: a feeder on the admission need not wait for this one to be applied
+      DrainCV_.notify_all();
     }
     SelectorCV_.notify_one();
+
+    // Blocks the chain already holds: nothing to connect or rebase, they only have to reach the
+    // databases that missed them in this order - the one thing this stage is for here
+    if (segment->CatchUp) {
+      CatchUpSink_(std::move(segment));
+
+      {
+        std::lock_guard lock(Mutex_);
+        SerialBusy_ = false;
+        DrainCV_.notify_all();
+      }
+      SelectorCV_.notify_one();
+      continue;
+    }
 
     size_t failedAt = 0;
     bool ok = connectSegment(*BlockIndex_, *ChainParams_, *Storage_, Runner_, *segment, &failedAt);

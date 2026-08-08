@@ -37,6 +37,8 @@ public:
   bool init(BlockInMemoryIndex &blockIndex,
             BC::Common::ChainParams &chainParams,
             BC::DB::Storage &storage,
+            CBlockPipeline &pipeline,
+            const CBlockPipeline::CParams &params,
             const std::filesystem::path &dataDir,
             const std::filesystem::path &utxoPath,
             config4cpp::Configuration *cfg);

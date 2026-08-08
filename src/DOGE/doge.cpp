@@ -19,6 +19,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 22555;
 
     params->PublicKeyPrefix = {30};
+    params->ScriptPrefix = {22};
 
     params->powLimit = UInt<256>::fromHex("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -86,6 +87,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 44555;
 
     params->PublicKeyPrefix = {113};
+    params->ScriptPrefix = {196};
 
     params->powLimit = UInt<256>::fromHex("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 

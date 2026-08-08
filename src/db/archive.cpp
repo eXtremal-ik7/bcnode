@@ -138,6 +138,8 @@ IInterface* setupHandler(config4cpp::Configuration *cfg,
 bool Archive::init(BlockInMemoryIndex &blockIndex,
                    BC::Common::ChainParams &chainParams,
                    BC::DB::Storage &storage,
+                   CBlockPipeline &pipeline,
+                   const CBlockPipeline::CParams &params,
                    const std::filesystem::path &dataDir,
                    const std::filesystem::path &utxoPath,
                    config4cpp::Configuration *cfg)
@@ -222,10 +224,8 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
                                                     : std::numeric_limits<uint32_t>::max());
   }
 
-  const size_t segmentSize =
-    static_cast<size_t>(cfg->lookupInt("bcnode", "segmentSizeMb", 256)) * 1048576;
   bool connected = dbConnectBlocks(storage.utxodb(), utxoBestBlock, archiveDatabases, this,
-                                   blockIndex, chainParams, storage, segmentSize,
+                                   blockIndex, storage, pipeline, params,
                                    "utxo & archive databases");
 
   // Everyone is level from here on: a batch goes to every database whole

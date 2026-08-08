@@ -176,103 +176,54 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockInde
                                                            BC::Common::ChainParams &chainParams,
                                                            BlockDatabase &blockDb);
 
-class BlockBulkReader {
+// The single definition of what a stored block must become before a database may connect or
+// disconnect it: linked outputs and validation data (txids, consensus exemptions) filled in.
+// objectByIndex reads the bytes itself, the catch-up preparation brings them from a combined
+// read. 'info' accounts the result, null for a block nobody budgets for
+intrusive_ptr<BC::Common::CIndexCacheObject> objectFromStoredBytes(BC::Common::BlockIndex *index,
+                                                                   BC::Common::ChainParams &chainParams,
+                                                                   const void *blockData,
+                                                                   size_t blockSize,
+                                                                   const void *linkedOutputsData,
+                                                                   size_t linkedOutputsSize,
+                                                                   CAllocationInfo *info);
+
+// Reads blocks back in chain order for a database that is behind, a batch at a time: a block
+// and its linked outputs come from one combined read, and the batch goes on as a catch-up
+// segment for the pipeline to prepare
+class CCatchUpReader {
 public:
-  // One block of a run with whatever keeps its data alive. A run is read from
-  // the disk in one go, so the blocks of a batch outlive the read that brought
-  // them - which is what lets a consumer connect them as one unit
-  struct CBulkBlock {
-    struct CDeleter {
-      // unpack2 hands out one blob with the object built inside it
-      void operator()(BC::Proto::Block *block) const { operator delete(block); }
-    };
+  // batchSizeLimit/batchBlocksLimit cut the batch, same meaning as the segment limits of the
+  // pipeline; the disk read stays combined across whatever piece of it is contiguous
+  CCatchUpReader(BlockDatabase &blockDb,
+                 BC::Common::BlockIndex *first,
+                 size_t batchSizeLimit,
+                 size_t batchBlocksLimit) :
+    BlockDb_(blockDb), Cursor_(first), BatchSizeLimit_(batchSizeLimit), BatchBlocksLimit_(batchBlocksLimit) {}
 
-    BC::Common::BlockIndex *Index = nullptr;
-    // Exactly one of the two owns the data: a block parsed out of the run, or
-    // the cache object it was already sitting in
-    std::unique_ptr<BC::Proto::Block, CDeleter> Parsed;
-    BC::Proto::CBlockLinkedOutputs ParsedLinkedOutputs;
-    intrusive_ptr<BC::Common::CIndexCacheObject> Object;
-
-    const BC::Proto::Block &block() const {
-      return Object.get() ? *Object.get()->block() : *Parsed;
-    }
-    const BC::Proto::CBlockLinkedOutputs &linkedOutputs() const {
-      return Object.get() ? Object.get()->linkedOutputs() : ParsedLinkedOutputs;
-    }
-  };
-
-  struct CCursor {
-    uint32_t FileNo;
-    uint32_t OffsetBegin;
-    uint32_t OffsetCurrent;
-
-    CCursor() {}
-    CCursor(uint32_t fileNo, uint32_t offsetBegin, uint32_t offsetCurrent) :
-      FileNo(fileNo), OffsetBegin(offsetBegin), OffsetCurrent(offsetCurrent) {}
-
-    void reset() { FileNo = std::numeric_limits<uint32_t>::max(); }
-    void set(uint32_t fileNo, uint32_t offsetBegin, uint32_t offsetCurrent) {
-      FileNo = fileNo;
-      OffsetBegin = offsetBegin;
-      OffsetCurrent = offsetCurrent;
-    }
-    bool initialized() { return FileNo != std::numeric_limits<uint32_t>::max(); }
-  };
-
-public:
-  // batchSizeLimit/batchBlocksLimit cut the batch handed to the consumer; the
-  // disk read stays combined across whatever piece of it is contiguous
-  BlockBulkReader(BlockDatabase &blockDb,
-                  size_t batchSizeLimit,
-                  size_t batchBlocksLimit,
-                  std::function<void(std::vector<CBulkBlock>&)> handler,
-                  std::function<void()> errorHandler) :
-    BlockDb_(blockDb), BatchSizeLimit_(batchSizeLimit), BatchBlocksLimit_(batchBlocksLimit),
-    Handler_(handler), ErrorHandler_(errorHandler)
-  {
-    BlocksDirectory_ = blockDb.blocksDir();
-    LinkedOutputsDirectory_ = blockDb.indexDir();
-    BlockCursor_.reset();
-  }
-
-  ~BlockBulkReader() {
-    flush();
-  }
-
-  BC::Common::BlockIndex *add(BC::Common::BlockIndex *index);
-  BC::Common::BlockIndex *add(BlockInMemoryIndex &blockIndex, const BC::Proto::BlockHashTy &hash);
-
-  // Everything accumulated goes to the consumer; the destructor does it too
-  void flush();
+  // Null at the end of the chain, and when the block database does not hold what the index
+  // says it holds - failed() tells the two apart
+  std::unique_ptr<CSegment> next();
+  bool failed() const { return Failed_; }
 
 private:
-  void fetchPending();
-  // A batch that lost blocks to a read or parse error is not a batch: it would
-  // connect a hole. Nothing more is handed out after the first failure
-  void fail() {
-    Failed_ = true;
-    ErrorHandler_();
-  }
+  // One stored record with its prefix: what a single read covers
+  struct CRecord {
+    uint32_t FileNo;
+    uint32_t Offset;
+    uint32_t Size;
+  };
+
+  static bool readRecords(LinearDataStorage &storage, const std::vector<CRecord> &records, void *destination);
 
 private:
   BlockDatabase &BlockDb_;
-  CCursor BlockCursor_;
-  std::vector<CCursor> LinkedOutputsCursor_;
-
-  std::filesystem::path BlocksDirectory_;
-  std::filesystem::path LinkedOutputsDirectory_;
+  BC::Common::BlockIndex *Cursor_ = nullptr;
   size_t BatchSizeLimit_ = 0;
   size_t BatchBlocksLimit_ = 0;
-  std::function<void(std::vector<CBulkBlock>&)> Handler_;
-  std::function<void()> ErrorHandler_;
+  bool Failed_ = false;
 
   std::vector<BC::Common::BlockIndex*> Indexes_;
-  // The batch being built: fetchPending appends the blocks it parsed, a block
-  // already in the cache joins it directly
-  std::vector<CBulkBlock> Batch_;
-  size_t BatchBytes_ = 0;
-  bool Failed_ = false;
-  xmstream BlockStream_;
-  xmstream LinkedOutputsStream_;
+  std::vector<CRecord> BlockRecords_;
+  std::vector<CRecord> LinkedOutputsRecords_;
 };
