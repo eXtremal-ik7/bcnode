@@ -309,7 +309,7 @@ protected:
     }
 
     this->writeBatch(db, batch);
-    LOG_F(INFO, "%s: shard %zu flushed %zu records, %zu pairs annihilated, %zu MB",
+    LOG_F(1, "%s: shard %zu flushed %zu records, %zu pairs annihilated, %zu MB",
           this->Name_.c_str(), shardIndex, written, annihilated, layer->Bytes >> 20);
   }
 };

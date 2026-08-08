@@ -27,59 +27,85 @@ Archive::~Archive()
   }
 }
 
+void Archive::startConnectWorkers()
+{
+  for (size_t i = 0; i < AllDb_.size(); i++)
+    ConnectWorkers_.emplace_back([this, i]() { connectWorker(i); });
+}
+
 void Archive::connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb)
 {
+  if (batch.empty())
+    return;
+
+  CConnectTask task;
+  task.Batch = batch;
+  task.BlockIndex = &blockIndex;
+  task.BlockDb = &blockDb;
+  task.FirstHeight = batch.front().Index->Height;
+  submit(task);
+  wait(task);
+}
+
+void Archive::submit(CConnectTask &task)
+{
+  // Before init() started them: same work, this thread doing all of it
   if (ConnectWorkers_.empty()) {
-    for (auto &db: AllDb_)
-      db->connect(batch, blockIndex, blockDb);
+    for (size_t i = 0; i < AllDb_.size(); i++)
+      connectSlot(i, task);
     return;
   }
 
   {
     std::lock_guard lock(ConnectMutex_);
-    ConnectBatch_ = batch;
-    ConnectBlockIndex_ = &blockIndex;
-    ConnectBlockDb_ = &blockDb;
-    ConnectDone_ = 0;
-    ConnectGeneration_++;
+    task.Pending = AllDb_.size();
+    for (auto &queue: ConnectQueues_)
+      queue.push_back(&task);
   }
   ConnectStartCv_.notify_all();
+}
 
-  // The caller is a worker too: the batch ends with its slowest database, an
-  // idle wait here would buy nothing
-  AllDb_[0]->connect(batch, blockIndex, blockDb);
-
+void Archive::wait(CConnectTask &task)
+{
   std::unique_lock lock(ConnectMutex_);
-  ConnectDoneCv_.wait(lock, [this]() { return ConnectDone_ == ConnectWorkers_.size(); });
+  ConnectDoneCv_.wait(lock, [&task]() { return task.Pending == 0; });
+}
+
+// The database's own tail of the batch. Heights inside a batch are contiguous,
+// so the wake-up height turns straight into the number of blocks to skip
+void Archive::connectSlot(size_t slot, CConnectTask &task)
+{
+  const uint32_t from = ConnectFromHeight_[slot];
+  const size_t skip = from > task.FirstHeight ? from - task.FirstHeight : 0;
+  if (skip >= task.Batch.size())
+    return;
+  AllDb_[slot]->connect(task.Batch.subspan(skip), *task.BlockIndex, *task.BlockDb);
 }
 
 void Archive::connectWorker(size_t slot)
 {
   loguru::set_thread_name((AllDb_[slot]->name() + ".connect").c_str());
 
-  uint64_t seen = 0;
   for (;;) {
-    CBlockBatch batch;
-    BlockInMemoryIndex *blockIndex;
-    BlockDatabase *blockDb;
+    CConnectTask *task = nullptr;
     {
       std::unique_lock lock(ConnectMutex_);
-      ConnectStartCv_.wait(lock, [this, seen]() { return ConnectStop_ || ConnectGeneration_ != seen; });
-      if (ConnectStop_)
+      ConnectStartCv_.wait(lock, [this, slot]() { return ConnectStop_ || !ConnectQueues_[slot].empty(); });
+      if (ConnectQueues_[slot].empty())
         return;
-      seen = ConnectGeneration_;
-      batch = ConnectBatch_;
-      blockIndex = ConnectBlockIndex_;
-      blockDb = ConnectBlockDb_;
+      task = ConnectQueues_[slot].front();
+      ConnectQueues_[slot].pop_front();
     }
 
-    AllDb_[slot]->connect(batch, *blockIndex, *blockDb);
+    connectSlot(slot, *task);
 
+    bool done;
     {
       std::lock_guard lock(ConnectMutex_);
-      ConnectDone_++;
+      done = (--task->Pending == 0);
     }
-    ConnectDoneCv_.notify_one();
+    if (done)
+      ConnectDoneCv_.notify_all();
   }
 }
 
@@ -142,6 +168,10 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
     }
   }
 
+  // Sized before anything can connect; the workers themselves start below
+  ConnectQueues_.resize(AllDb_.size());
+  ConnectFromHeight_.assign(AllDb_.size(), 0);
+
   // Route queries
   TransactionDb_ = setupHandler<ITransactionDb>(cfg, "tx", EIQueryTransaction, dbIndexMap, AllDb_);
   AddrHistoryDb_ = setupHandler<IAddrHistoryDb>(cfg, "addrhistory", EIQueryAddrHistory, dbIndexMap, AllDb_);
@@ -171,6 +201,10 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
       return false;
   }
 
+  // The catch-up below already fans out over these; the disconnect walks above
+  // it run on this thread while every queue is empty
+  startConnectWorkers();
+
   // Disconnect UTXO
   if (!dbDisconnectBlocks(storage.utxodb(), blockIndex, chainParams, storage, utxoDisconnect))
     return false;
@@ -181,16 +215,24 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
       return false;
   }
 
-  // Connect
-  if (!dbConnectBlocks(storage.utxodb(), utxoBestBlock, archiveDatabases, blockIndex, chainParams, storage, "utxo & archive databases"))
-    return false;
+  // Connect. The databases wake up at different heights, so the catch-up feeds
+  // one batch to all of them and each takes the tail that is new to it
+  for (size_t i = 0; i < AllDb_.size(); i++) {
+    setConnectFrom(i, archiveDatabases[i].BestBlock ? archiveDatabases[i].BestBlock->Height
+                                                    : std::numeric_limits<uint32_t>::max());
+  }
 
-  // After the catch-up: it feeds each database separately (they wake up at
-  // different heights) and never goes through connect()
-  for (size_t i = 1; i < AllDb_.size(); i++)
-    ConnectWorkers_.emplace_back([this, i]() { connectWorker(i); });
+  const size_t segmentSize =
+    static_cast<size_t>(cfg->lookupInt("bcnode", "segmentSizeMb", 256)) * 1048576;
+  bool connected = dbConnectBlocks(storage.utxodb(), utxoBestBlock, archiveDatabases, this,
+                                   blockIndex, chainParams, storage, segmentSize,
+                                   "utxo & archive databases");
 
-  return true;
+  // Everyone is level from here on: a batch goes to every database whole
+  for (size_t i = 0; i < AllDb_.size(); i++)
+    setConnectFrom(i, 0);
+
+  return connected;
 }
 
 bool Archive::purge(config4cpp::Configuration *cfg, std::filesystem::path &dataDir)

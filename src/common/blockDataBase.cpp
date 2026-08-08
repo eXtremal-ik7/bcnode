@@ -1655,11 +1655,24 @@ BC::Common::BlockIndex *BlockBulkReader::add(BlockInMemoryIndex &blockIndex, con
 
 BC::Common::BlockIndex *BlockBulkReader::add(BC::Common::BlockIndex *index)
 {
+  // The batch is cut before the block that would overflow it, never inside a
+  // combined read: the cut only ends the batch, the read is already split by
+  // whatever contiguity the files have
+  const size_t size = index->SerializedBlockSize != std::numeric_limits<uint32_t>::max() ?
+                        index->SerializedBlockSize : 0;
+  if (BatchBytes_ && (BatchBytes_ + size > BatchSizeLimit_ ||
+                      Indexes_.size() + Batch_.size() >= BatchBlocksLimit_))
+    flush();
+
   intrusive_ptr<BC::Common::CIndexCacheObject> object(index->Serialized);
   if (object.get()) {
-    // Block now in cache, flush queue and call handler
+    // Block now in cache: the pending read goes first, order inside the batch
+    // is the order the walk added them in
     fetchPending();
-    Handler_(index, *object.get()->block(), object.get()->linkedOutputs());
+    BatchBytes_ += size;
+    CBulkBlock &entry = Batch_.emplace_back();
+    entry.Index = index;
+    entry.Object = object;
   } else if (index->FileNo != std::numeric_limits<uint32_t>::max() &&
              index->FileOffset != std::numeric_limits<uint32_t>::max() &&
              index->SerializedBlockSize != std::numeric_limits<uint32_t>::max() &&
@@ -1694,11 +1707,21 @@ BC::Common::BlockIndex *BlockBulkReader::add(BC::Common::BlockIndex *index)
                                         index->LinkedOutputsFileOffset + index->LinkedOutputsSerializedSize + 4);
       Indexes_.push_back(index);
     }
+    BatchBytes_ += size;
   } else {
     return nullptr;
   }
 
   return index;
+}
+
+void BlockBulkReader::flush()
+{
+  fetchPending();
+  if (!Batch_.empty() && !Failed_)
+    Handler_(Batch_);
+  Batch_.clear();
+  BatchBytes_ = 0;
 }
 
 void BlockBulkReader::fetchPending()
@@ -1716,7 +1739,7 @@ void BlockBulkReader::fetchPending()
           BlockDb_.blockReader().getFilePath(BlockCursor_.FileNo).c_str(),
           BlockCursor_.OffsetBegin,
           blockDataSize);
-    ErrorHandler_();
+    fail();
     return;
   }
 
@@ -1735,7 +1758,7 @@ void BlockBulkReader::fetchPending()
             BlockDb_.linkedOutputsReader().getFilePath(b.FileNo).c_str(),
             b.OffsetBegin,
             b.OffsetCurrent - b.OffsetBegin);
-      ErrorHandler_();
+      fail();
       return;
     }
     p += b.OffsetCurrent - b.OffsetBegin;
@@ -1746,7 +1769,7 @@ void BlockBulkReader::fetchPending()
   LinkedOutputsStream_.seekSet(0);
   while (BlockStream_.remaining()) {
     if (i >= Indexes_.size()) {
-      ErrorHandler_();
+      fail();
       return;
     }
 
@@ -1759,7 +1782,7 @@ void BlockBulkReader::fetchPending()
 
     if (magic != BlockDb_.magic() || BlockStream_.eof()) {
       LOG_F(ERROR, "Invalid block data in file %s", BlockDb_.blockReader().getFilePath(BlockCursor_.FileNo).c_str());
-      ErrorHandler_();
+      fail();
       return;
     }
 
@@ -1771,32 +1794,31 @@ void BlockBulkReader::fetchPending()
             "BlockBulkReader: can't unserialize block [%u]%s",
             Indexes_[i]->Height,
             Indexes_[i]->Header.GetHash().getHexLE().c_str());
-      ErrorHandler_();
+      fail();
       return;
     }
 
-    BC::Proto::CBlockLinkedOutputs linkedOutputs;
-    if (!BC::unserializeAndCheck(LinkedOutputsStream_, linkedOutputs)) {
+    // The batch owns the block from here on: the consumer may hand it to
+    // databases that are still reading it after this call returns
+    CBulkBlock &entry = Batch_.emplace_back();
+    entry.Index = Indexes_[i++];
+    entry.Parsed.reset(block);
+
+    if (!BC::unserializeAndCheck(LinkedOutputsStream_, entry.ParsedLinkedOutputs)) {
       LOG_F(ERROR,
             "BlockBulkReader: can't unserialize linked outputs for block [%u]%s",
-            Indexes_[i]->Height,
-            Indexes_[i]->Header.GetHash().getHexLE().c_str());
-      operator delete(block);
-      ErrorHandler_();
+            entry.Index->Height,
+            entry.Index->Header.GetHash().getHexLE().c_str());
+      fail();
       return;
     }
-
-    // The handler connects synchronously and the databases copy what they keep into their
-    // shard logs, so the arena can go right after
-    Handler_(Indexes_[i++], *block, linkedOutputs);
-    operator delete(block);
   }
 
   if (i != Indexes_.size() ||
       BlockStream_.remaining() ||
       LinkedOutputsStream_.remaining()) {
     LOG_F(ERROR, "BlockBulkReader: inconsistent data");
-    ErrorHandler_();
+    fail();
     return;
   }
 

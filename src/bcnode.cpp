@@ -440,7 +440,9 @@ int main(int argc, char **argv)
       return 1;
     if (!BC::DB::dbDisconnectBlocks(context.Storage.utxodb(), context.BlockIndex, context.ChainParams, context.Storage, forDisconnect))
       return 1;
-    if (!BC::DB::dbConnectBlocks(context.Storage.utxodb(), utxoBestBlock, {}, context.BlockIndex, context.ChainParams, context.Storage, "UTXO database"))
+    if (!BC::DB::dbConnectBlocks(context.Storage.utxodb(), utxoBestBlock, {}, nullptr,
+                                 context.BlockIndex, context.ChainParams, context.Storage,
+                                 pipelineParams.SegmentSizeLimit, "UTXO database"))
       return 1;
   } else {
     // Initialize full archive

@@ -9,6 +9,7 @@
 #include "db/sync.h"
 
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <thread>
 
@@ -19,6 +20,18 @@ namespace DB {
 
 class Archive {
 public:
+  // One batch on its way to every database. The refs, and whatever keeps the
+  // data they point at alive, belong to the submitter: a worker only reads
+  // them and drops Pending when done, so the submitter may reuse the storage
+  // once wait() has returned
+  struct CConnectTask {
+    CBlockBatch Batch;
+    BlockInMemoryIndex *BlockIndex = nullptr;
+    BlockDatabase *BlockDb = nullptr;
+    uint32_t FirstHeight = 0;
+    size_t Pending = 0;   // ConnectMutex_
+  };
+
   ~Archive();
 
   bool init(BlockInMemoryIndex &blockIndex,
@@ -31,10 +44,20 @@ public:
   bool purge(config4cpp::Configuration *cfg, std::filesystem::path &dataDir);
 
   // The databases are independent over one read-only batch (each writes only
-  // its own engine), so the batch fans out to a thread per database. The
-  // barrier before returning keeps per-database unit order and lets the batch
-  // die with the caller
+  // its own engine), so the batch fans out to a thread per database. Post and
+  // wait: the caller has nothing else to do, and the batch dies with it
   void connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb);
+
+  // The same fan-out for a feeder that has work of its own while the databases
+  // chew - the catch-up prepares the next batch between these two calls
+  void submit(CConnectTask &task);
+  void wait(CConnectTask &task);
+
+  // Where a database wakes up: everything below is already in it, so it gets
+  // the tail of the batch and nothing else. UINT32_MAX skips it entirely, and
+  // zero - the state once everyone is caught up - takes every batch whole
+  void setConnectFrom(size_t index, uint32_t height) { ConnectFromHeight_[index] = height; }
+  size_t databasesNum() const { return AllDb_.size(); }
 
   void disconnect(const BC::Common::BlockIndex *index,
                   const BC::Proto::Block &block,
@@ -62,23 +85,23 @@ public:
   }
 
 private:
+  void startConnectWorkers();
   void connectWorker(size_t slot);
+  void connectSlot(size_t slot, CConnectTask &task);
 
 private:
   std::vector<std::unique_ptr<BC::DB::BaseInterface>> AllDb_;
 
-  // One worker per database except AllDb_[0], which the storage thread runs
-  // itself. A database is always mutated by the same thread - the engines
-  // expect a single mutator
+  // A worker per database, alive from init() to the destructor. Nobody else
+  // ever connects: a database is always mutated by the same thread, which is
+  // what the engines expect of a single mutator. Everything the storage thread
+  // still does itself (disconnect, flush) is ordered after a wait()
   std::vector<std::thread> ConnectWorkers_;
+  std::vector<std::deque<CConnectTask*>> ConnectQueues_;
+  std::vector<uint32_t> ConnectFromHeight_;
   std::mutex ConnectMutex_;
   std::condition_variable ConnectStartCv_;
   std::condition_variable ConnectDoneCv_;
-  CBlockBatch ConnectBatch_;
-  BlockInMemoryIndex *ConnectBlockIndex_ = nullptr;
-  BlockDatabase *ConnectBlockDb_ = nullptr;
-  uint64_t ConnectGeneration_ = 0;
-  size_t ConnectDone_ = 0;
   bool ConnectStop_ = false;
 
 public:

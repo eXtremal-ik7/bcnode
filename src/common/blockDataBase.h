@@ -178,6 +178,30 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockInde
 
 class BlockBulkReader {
 public:
+  // One block of a run with whatever keeps its data alive. A run is read from
+  // the disk in one go, so the blocks of a batch outlive the read that brought
+  // them - which is what lets a consumer connect them as one unit
+  struct CBulkBlock {
+    struct CDeleter {
+      // unpack2 hands out one blob with the object built inside it
+      void operator()(BC::Proto::Block *block) const { operator delete(block); }
+    };
+
+    BC::Common::BlockIndex *Index = nullptr;
+    // Exactly one of the two owns the data: a block parsed out of the run, or
+    // the cache object it was already sitting in
+    std::unique_ptr<BC::Proto::Block, CDeleter> Parsed;
+    BC::Proto::CBlockLinkedOutputs ParsedLinkedOutputs;
+    intrusive_ptr<BC::Common::CIndexCacheObject> Object;
+
+    const BC::Proto::Block &block() const {
+      return Object.get() ? *Object.get()->block() : *Parsed;
+    }
+    const BC::Proto::CBlockLinkedOutputs &linkedOutputs() const {
+      return Object.get() ? Object.get()->linkedOutputs() : ParsedLinkedOutputs;
+    }
+  };
+
   struct CCursor {
     uint32_t FileNo;
     uint32_t OffsetBegin;
@@ -197,8 +221,15 @@ public:
   };
 
 public:
-  BlockBulkReader(BlockDatabase &blockDb, std::function<void(BC::Common::BlockIndex*, const BC::Proto::Block&, const BC::Proto::CBlockLinkedOutputs&)> handler, std::function<void()> errorHandler) :
-    BlockDb_(blockDb), Handler_(handler), ErrorHandler_(errorHandler)
+  // batchSizeLimit/batchBlocksLimit cut the batch handed to the consumer; the
+  // disk read stays combined across whatever piece of it is contiguous
+  BlockBulkReader(BlockDatabase &blockDb,
+                  size_t batchSizeLimit,
+                  size_t batchBlocksLimit,
+                  std::function<void(std::vector<CBulkBlock>&)> handler,
+                  std::function<void()> errorHandler) :
+    BlockDb_(blockDb), BatchSizeLimit_(batchSizeLimit), BatchBlocksLimit_(batchBlocksLimit),
+    Handler_(handler), ErrorHandler_(errorHandler)
   {
     BlocksDirectory_ = blockDb.blocksDir();
     LinkedOutputsDirectory_ = blockDb.indexDir();
@@ -206,14 +237,23 @@ public:
   }
 
   ~BlockBulkReader() {
-    fetchPending();
+    flush();
   }
 
   BC::Common::BlockIndex *add(BC::Common::BlockIndex *index);
   BC::Common::BlockIndex *add(BlockInMemoryIndex &blockIndex, const BC::Proto::BlockHashTy &hash);
 
+  // Everything accumulated goes to the consumer; the destructor does it too
+  void flush();
+
 private:
   void fetchPending();
+  // A batch that lost blocks to a read or parse error is not a batch: it would
+  // connect a hole. Nothing more is handed out after the first failure
+  void fail() {
+    Failed_ = true;
+    ErrorHandler_();
+  }
 
 private:
   BlockDatabase &BlockDb_;
@@ -222,10 +262,17 @@ private:
 
   std::filesystem::path BlocksDirectory_;
   std::filesystem::path LinkedOutputsDirectory_;
-  std::function<void(BC::Common::BlockIndex*, const BC::Proto::Block&, const BC::Proto::CBlockLinkedOutputs&)> Handler_;
+  size_t BatchSizeLimit_ = 0;
+  size_t BatchBlocksLimit_ = 0;
+  std::function<void(std::vector<CBulkBlock>&)> Handler_;
   std::function<void()> ErrorHandler_;
 
   std::vector<BC::Common::BlockIndex*> Indexes_;
+  // The batch being built: fetchPending appends the blocks it parsed, a block
+  // already in the cache joins it directly
+  std::vector<CBulkBlock> Batch_;
+  size_t BatchBytes_ = 0;
+  bool Failed_ = false;
   xmstream BlockStream_;
   xmstream LinkedOutputsStream_;
 };
