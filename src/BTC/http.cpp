@@ -229,7 +229,9 @@ void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request
     return;
   }
 
-  if (!Storage_->AddrHistoryDb_ || !Storage_->TransactionDb_) {
+  // The transaction database is not on this path: a history element carries the
+  // position of its transaction and the block file is read directly
+  if (!Storage_->AddrHistoryDb_) {
     replyWithError("DATABASE_NOT_ENABLED", "", "", "");
     return;
   }
@@ -279,21 +281,17 @@ void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request
         // Descending order shows the newest transaction first
         const auto &item = history.Items[isAscending ? i : history.Items.size() - 1 - i];
 
-        DB::CQueryTransactionResult queryResult;
-        if (!Storage_->TransactionDb_->queryTransaction(item.TxId, BlockIndex_, *BlockDb_, queryResult) ||
-            !queryResult.Found || queryResult.DataCorrupted) {
-          replyWithError("DATABASE_CORRUPTED", "", "", item.TxId.getHexLE());
+        // The element itself says which block paid the address, so a BIP30 repeat
+        // needs no special case: both of its inclusions are elements of this history
+        BC::Common::BlockIndex *index = BlockIndex_.indexByHeight(item.Height);
+        if (!index) {
+          replyWithError("BLOCK_NOT_FOUND", "", "", std::to_string(item.Height));
           return;
         }
 
-        // The element itself says which block paid the address; the transaction
-        // database knows only one of the two blocks a BIP30 repeat sits in, and
-        // both of them are elements of this history
-        BC::Common::BlockIndex *index = BlockIndex_.indexByHeight(item.Height);
-        if (!index)
-          index = BlockIndex_.indexByHash(queryResult.Block);
-        if (!index) {
-          replyWithError("BLOCK_NOT_FOUND", "", "", queryResult.Block.getHexLE());
+        DB::CQueryTransactionResult queryResult;
+        if (!DB::readTransactionAt(index, item.TxIndex, item.TxOffset, item.TxSize, *BlockDb_, queryResult)) {
+          replyWithError("DATABASE_CORRUPTED", "", "", index->Header.GetHash().getHexLE());
           return;
         }
 

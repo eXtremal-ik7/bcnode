@@ -13,16 +13,24 @@ namespace BC {
 namespace DB {
 
 bool TxDb::queryTransaction(const BC::Proto::TxHashTy &txid,
-                            BlockInMemoryIndex&,
+                            BlockInMemoryIndex &blockIndex,
                             BlockDatabase&,
                             CQueryTransactionResult &result)
 {
   result.DataCorrupted = false;
-  result.Found = this->find(txid, [&result](const void *data, size_t size) {
-    CLogData *p = (CLogData*)data;
-    result.Block = p->Hash;
-    result.TxNum = p->Index;
-    xmstream s(p+1, size-sizeof(CLogData));
+  result.Found = this->find(txid, [&result, &blockIndex](const void *data, size_t size) {
+    CLogData logData;
+    memcpy(&logData, data, sizeof(logData));
+    result.TxNum = logData.Index;
+
+    // The row keeps a height, and the reply a hash: the header is in memory anyway
+    BC::Common::BlockIndex *index = blockIndex.indexByHeight(logData.Height);
+    if (index)
+      result.Block = index->Header.GetHash();
+    else
+      result.DataCorrupted = true;
+
+    xmstream s(static_cast<uint8_t*>(const_cast<void*>(data)) + sizeof(CLogData), size - sizeof(CLogData));
     result.DataCorrupted |= !BC::unserializeAndCheck(s, result.Tx);
     result.DataCorrupted |= !BC::unserializeAndCheck(s, result.LinkedOutputs);
   });
@@ -42,7 +50,6 @@ void TxDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Proto::TxHashTy> &writer
     const BC::Proto::Block &block = *ref.Block;
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
     assert(validationData.TxIds.size() == block.vtx.size());
-    const auto blockId = ref.Index->Header.GetHash();
 
     // A BIP30 repeat carries a coinbase this database already holds, byte for byte
     // the same one: leaving the twin's record alone keeps the key write-once, and a
@@ -52,7 +59,7 @@ void TxDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Proto::TxHashTy> &writer
 
       stream.reset();
       CLogData *data = stream.reserve<CLogData>(1);
-      data->Hash = blockId;
+      data->Height = ref.Index->Height;
       data->Index = i;
       BC::serialize(stream, tx);
       BC::serialize(stream, ref.LinkedOutputs->Tx[i]);

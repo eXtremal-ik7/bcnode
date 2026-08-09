@@ -13,6 +13,18 @@
 #include "../loguru.hpp"
 
 namespace BTC {
+
+// Where each transaction lies inside the serialized block, derived from the block itself: the
+// header size and the transaction count give the offset of the first one, every next offset is
+// the previous plus that transaction's size. Exact because unserializeVarSize rejects non
+// minimal encodings, so no stored block can be non canonical; the sum is checked against the
+// stored size to make sure of it. Databases keep a position instead of a txid, and the reader
+// takes exactly those bytes out of the block file
+struct CTxPosition {
+  uint32_t Offset;
+  uint32_t Size;
+};
+
 class Proto {
 public:
   using BlockHashTy = ::BaseBlob<256>;
@@ -324,6 +336,10 @@ struct NetworkAddress {
     // txid of every transaction, parallel to block.vtx ([0] = coinbase);
     // checkBlockStandalone verifies them against the header merkle root
     xvector<TxHashTy> TxIds;
+    // Byte layout of the same transactions inside the stored block. Computed here
+    // once because more than one database keeps positions instead of txids, and
+    // walking the block again per database would parse it twice
+    xvector<CTxPosition> TxPositions;
     // Same-block spend topology, derived from TxIds. InputLocalTx: for every
     // input of vtx[1..] in block walk order, the index of the earlier tx of
     // this block whose output it spends (NoLocalTx otherwise).
@@ -361,7 +377,7 @@ struct NetworkAddress {
     // Built after the block is already in the block cache and outweighs it: the cache limit
     // means nothing unless this is charged to it too
     size_t memorySize() const {
-      size_t size = TxIds.memoryBytes() + InputLocalTx.memoryBytes() + OutputSpentLocally.memoryBytes() +
+      size_t size = TxIds.memoryBytes() + TxPositions.memoryBytes() + InputLocalTx.memoryBytes() + OutputSpentLocally.memoryBytes() +
                     TxData.memoryBytes() + OutputData.memoryBytes() + OutputDataOffset.memoryBytes() +
                     OutputSpentInBatch.memoryBytes() + InputSpendsInBatch.memoryBytes();
       for (const CTxValidationData &tx: TxData)
@@ -586,16 +602,6 @@ void serializeForSignature(xmstream &dst,
                            const uint8_t *utxo,
                            size_t utxoSize);
 
-// Where each transaction lies inside the serialized block, derived from the block itself: the
-// header size and the transaction count give the offset of the first one, every next offset is
-// the previous plus that transaction's size. Exact because unserializeVarSize rejects non
-// minimal encodings, so no stored block can be non canonical; the sum is checked against the
-// stored size to make sure of it.
-struct CTxPosition {
-  uint32_t Offset;
-  uint32_t Size;
-};
-
 // What a coin writes after the transaction list, LTC's MWEB extension block being the only one
 template<typename BlockTy>
 static inline size_t blockExtensionSize(const BlockTy &block)
@@ -606,10 +612,8 @@ static inline size_t blockExtensionSize(const BlockTy &block)
     return 0;
 }
 
-template<typename BlockTy>
-static inline bool enumerateTransactions(const BlockTy &block,
-                                        uint32_t storedSize,
-                                        std::vector<CTxPosition> &out)
+template<typename BlockTy, typename VectorTy>
+static inline void fillTxPositions(const BlockTy &block, VectorTy &out)
 {
   using HeaderTy = std::remove_cvref_t<decltype(block.header)>;
   using TransactionTy = std::remove_cvref_t<decltype(block.vtx[0])>;
@@ -622,8 +626,17 @@ static inline bool enumerateTransactions(const BlockTy &block,
     out[i] = {static_cast<uint32_t>(offset), static_cast<uint32_t>(size)};
     offset += size;
   }
+}
 
-  return offset + blockExtensionSize(block) == storedSize;
+// The parse and the bytes on disk must describe the same block, or a position reads
+// somebody else's transaction: the pieces have to add up to the stored size
+template<typename BlockTy, typename VectorTy>
+static inline bool txPositionsMatchStored(const BlockTy &block, const VectorTy &positions, uint32_t storedSize)
+{
+  if (positions.size() != block.vtx.size() || positions.size() == 0)
+    return false;
+  const CTxPosition &last = positions[positions.size() - 1];
+  return last.Offset + last.Size + blockExtensionSize(block) == storedSize;
 }
 
 }

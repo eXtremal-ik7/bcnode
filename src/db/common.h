@@ -112,14 +112,29 @@ struct CQueryTransactionResult {
   bool DataCorrupted = false;
 };
 
-// History element of addrhistorydb: the fact (txid) plus scalars denormalized
-// for the list UI and the balance chart; Aggregate is the running balance
-// maintained by CKvArrayBase - the address balance right after this tx
+// Reads what a stored position points at: the transaction out of the block still
+// held in memory, or exactly its bytes out of the block file, plus the linked
+// outputs of that block. Everything the databases keep besides the position is
+// in the block index already, so this is the whole read path behind a position
+bool readTransactionAt(BC::Common::BlockIndex *index,
+                       uint32_t txIndex,
+                       uint32_t txOffset,
+                       uint32_t txSize,
+                       BlockDatabase &blockDb,
+                       CQueryTransactionResult &result);
+
+// History element of addrhistorydb: where the transaction lies plus the running
+// balance maintained by CKvArrayBase - the address balance right after this tx.
+// A position and not a txid: the reader takes the transaction straight out of
+// the block file, so the transaction database drops out of this path entirely,
+// and the txid is recomputed for the reply anyway (serializeTx). TxIndex stays
+// because the linked outputs of a block are one blob indexed by it
 #pragma pack(push, 1)
 struct CAddrHistoryItem {
-  BC::Proto::TxHashTy TxId;
   uint32_t Height;
-  uint32_t Time;
+  uint32_t TxIndex;
+  uint32_t TxOffset;   // from the start of the serialized block
+  uint32_t TxSize;
   BC::Proto::BalanceType Aggregate;
 };
 #pragma pack(pop)

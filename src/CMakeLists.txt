@@ -179,6 +179,7 @@ set(BASE_SOURCES
   db/storage.cpp
   db/txdb.cpp
   db/txdbRef.cpp
+  db/txread.cpp
   db/utxodb.cpp
   db/sync.cpp
 )

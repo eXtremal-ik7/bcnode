@@ -55,7 +55,8 @@ private:
   };
 
   // Per-key metadata row: element count plus the aggregate of the last durable
-  // element - the rebase point for the unflushed windows
+  // element - the rebase point for the unflushed windows. Written only once the
+  // array outgrows a chunk; below that the chunk answers both (flushComposed)
   struct CMetadata {
     int64_t Count;
     CAggregate Aggregate;
@@ -231,6 +232,10 @@ public:
     readOptions.snapshot = shard.Disk.get()->Snapshot;
     bool ok = true;
 
+    // An array of one chunk carries no metadata row: chunk 0 describes itself,
+    // so a page starting past it still has to be told how long the array is
+    const bool needChunkZero = firstChunk != 0;
+
     std::vector<std::string> readResult;
     {
       std::vector<CChunkKey> chunkKeys;
@@ -243,6 +248,11 @@ public:
         CChunkKey &k = chunkKeys.emplace_back();
         k.Key = key;
         k.Index = xhtobe<uint64_t>(chunkId);
+      }
+      if (needChunkZero) {
+        CChunkKey &k = chunkKeys.emplace_back();
+        k.Key = key;
+        k.Index = xhtobe<uint64_t>(0);
       }
       for (const auto &k: chunkKeys)
         allKeySlices.push_back(slice(k));
@@ -259,6 +269,12 @@ public:
       const CMetadata *meta = reinterpret_cast<const CMetadata*>(readResult[0].data());
       durableCount = meta->Count;
       durableAggregate = meta->Aggregate;
+    } else {
+      const std::string &chunkZero = readResult[needChunkZero ? readResult.size() - 1 : 1];
+      if (chunkZero.size() >= sizeof(CItem)) {
+        durableCount = chunkZero.size() / sizeof(CItem);
+        durableAggregate = reinterpret_cast<const CItem*>(chunkZero.data())[durableCount - 1].Aggregate;
+      }
     }
 
     const int64_t baseCount = durableCount - static_cast<int64_t>(baseTrim);
@@ -388,6 +404,11 @@ private:
     std::vector<CMetadata*> durable(allKeys.size(), nullptr);
     std::vector<uint32_t> missIndex;
     std::vector<rocksdb::Slice> missSlices;
+    // A miss asks for chunk 0, not for the row: it answers both questions at
+    // once and costs the same one key. Only a chunk 0 filled to the brim leaves
+    // the count open, and those keys - 0.5% - are asked about in a second round
+    std::vector<CChunkKey> missChunkKeys;
+    missChunkKeys.reserve(allKeys.size());
     for (size_t i = 0; i < allKeys.size(); i++) {
       if (complete) {
         auto [it, inserted] = MetaCache_.try_emplace(*allKeys[i], CMetadata{});
@@ -402,28 +423,53 @@ private:
         }
       }
       missIndex.push_back(static_cast<uint32_t>(i));
-      missSlices.emplace_back((const char*)allKeys[i], sizeof(CKey));
+      CChunkKey &chunkKey = missChunkKeys.emplace_back();
+      chunkKey.Key = *allKeys[i];
+      chunkKey.Index = xhtobe<uint64_t>(0);
+      missSlices.push_back(slice(chunkKey));
     }
 
-    // Metadata and the boundary chunks of trimmed keys are one consistent view.
-    // The keys leave kvSortBucket in memcmp order - the comparator's own, kept
-    // by the filtering above - so sorted_input spares rocksdb its per-call sort
-    std::vector<rocksdb::PinnableSlice> metadata(missSlices.size());
-    std::vector<rocksdb::Status> metadataReadResult(missSlices.size());
+    // The chunks read here and the boundary chunks of trimmed keys are one
+    // consistent view. The keys leave kvSortBucket in memcmp order - the
+    // comparator's own, kept by the filtering above - so sorted_input spares
+    // rocksdb its per-call sort
+    std::vector<rocksdb::PinnableSlice> chunkZero(missSlices.size());
+    std::vector<rocksdb::Status> chunkZeroStatus(missSlices.size());
     rocksdb::ReadOptions readOptions;
     readOptions.snapshot = db->GetSnapshot();
     if (!missSlices.empty())
       db->MultiGet(readOptions, db->DefaultColumnFamily(), missSlices.size(),
-                   missSlices.data(), metadata.data(), metadataReadResult.data(),
+                   missSlices.data(), chunkZero.data(), chunkZeroStatus.data(),
                    /*sorted_input=*/true);
 
     std::vector<CMetadata> scratchMeta(missIndex.size());
+    std::vector<uint32_t> spilled;   // chunk 0 full: the count lives in a row after all
     for (size_t m = 0; m < missIndex.size(); m++) {
       CMetadata &slot = scratchMeta[m];
       slot = {};
-      if (metadataReadResult[m].ok() && metadata[m].size() == sizeof(CMetadata))
-        slot = *reinterpret_cast<const CMetadata*>(metadata[m].data());
+      if (chunkZeroStatus[m].ok() && chunkZero[m].size() >= sizeof(CItem)) {
+        slot.Count = chunkZero[m].size() / sizeof(CItem);
+        slot.Aggregate = reinterpret_cast<const CItem*>(chunkZero[m].data())[slot.Count - 1].Aggregate;
+        if (slot.Count == static_cast<int64_t>(ChunkSize_))
+          spilled.push_back(static_cast<uint32_t>(m));
+      }
       durable[missIndex[m]] = &slot;
+    }
+
+    if (!spilled.empty()) {
+      std::vector<rocksdb::Slice> rowSlices;
+      rowSlices.reserve(spilled.size());
+      for (uint32_t m: spilled)
+        rowSlices.emplace_back((const char*)allKeys[missIndex[m]], sizeof(CKey));
+      std::vector<rocksdb::PinnableSlice> rows(rowSlices.size());
+      std::vector<rocksdb::Status> rowStatus(rowSlices.size());
+      db->MultiGet(readOptions, db->DefaultColumnFamily(), rowSlices.size(),
+                   rowSlices.data(), rows.data(), rowStatus.data(), /*sorted_input=*/true);
+      for (size_t r = 0; r < spilled.size(); r++) {
+        // No row means the array ends exactly at the chunk boundary
+        if (rowStatus[r].ok() && rows[r].size() == sizeof(CMetadata))
+          scratchMeta[spilled[r]] = *reinterpret_cast<const CMetadata*>(rows[r].data());
+      }
     }
 
     // Reserved once: without it the batch string of a whole layer doubles
@@ -477,22 +523,46 @@ private:
       const CAggregate newAggregate = headerTailCount
         ? baseAggregate + tailItems[headerTailCount - 1].Aggregate : baseAggregate;
 
-      // Metadata update, the resident copy in step with the batch
+      // Metadata update, the resident copy in step with the batch. The row is
+      // written only for an array that outgrew one chunk: below that the chunk
+      // describes itself - length is the count, last element the aggregate -
+      // and 99% of the keys never leave it
+      const bool wantRow = newCount > static_cast<int64_t>(ChunkSize_);
+      const bool hadRow = durableCount > static_cast<int64_t>(ChunkSize_);
       {
         rocksdb::Slice keySlice(reinterpret_cast<const char*>(allKeys[i]), sizeof(CKey));
         CMetadata &cached = *durable[i];
-        if (newCount) {
-          cached.Count = newCount;
-          cached.Aggregate = newAggregate;
+        cached.Count = newCount;
+        cached.Aggregate = newCount ? newAggregate : CAggregate{};
+        if (wantRow)
           batch.Put(keySlice, rocksdb::Slice(reinterpret_cast<const char*>(&cached), sizeof(cached)));
-        } else {
-          cached.Count = 0;
-          cached.Aggregate = CAggregate{};
+        else if (hadRow)
           batch.Delete(keySlice);
-        }
       }
 
-      if (headerTailCount) {
+      // A trim leaves bytes past the end of the last chunk, harmless while a
+      // row caps the count - but here the length is the count, so the chunk is
+      // rewritten whole. Merge operands can only extend. Disconnects are rare
+      if (headerBaseTrim && newCount > 0 && !wantRow) {
+        CChunkKey chunkKey;
+        chunkKey.Key = *allKeys[i];
+        chunkKey.Index = xhtobe<uint64_t>(0);
+
+        scratch.resize(static_cast<size_t>(newCount) * sizeof(CItem));
+        if (baseCount) {
+          std::string chunkData;
+          if (!db->Get(readOptions, slice(chunkKey), &chunkData).ok() ||
+              chunkData.size() < static_cast<size_t>(baseCount) * sizeof(CItem)) {
+            LOG_F(ERROR, "%s: shard %zu, can't read back the surviving %lld elements",
+                  this->Name_.c_str(), shardIndex, static_cast<long long>(baseCount));
+            abort();
+          }
+          memcpy(scratch.data(), chunkData.data(), static_cast<size_t>(baseCount) * sizeof(CItem));
+        }
+        if (headerTailCount)
+          rebase(scratch.data() + static_cast<size_t>(baseCount) * sizeof(CItem), tailItems, headerTailCount, baseAggregate);
+        batch.Put(slice(chunkKey), rocksdb::Slice(reinterpret_cast<const char*>(scratch.data()), scratch.size()));
+      } else if (headerTailCount) {
         size_t remaining = headerTailCount;
         size_t taken = 0;
         int64_t offset = baseCount;

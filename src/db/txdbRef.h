@@ -40,8 +40,10 @@ public:
                         CQueryTransactionResult &result);
 
 private:
+  // The height and not the block hash: this database only ever holds rows of the
+  // connected chain (disconnect erases them), so a height names one block
   struct CLogData {
-    BC::Proto::BlockHashTy Hash;
+    uint32_t Height;
     uint32_t Index;
     uint32_t SerializedDataOffset;
     uint32_t SerializedDataSize;

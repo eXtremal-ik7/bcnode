@@ -79,23 +79,24 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
     const BC::Proto::Block &block = *ref.Block;
     const BC::Proto::CBlockLinkedOutputs &linkedOutputs = *ref.LinkedOutputs;
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
-    assert(validationData.TxIds.size() == block.vtx.size());
+    assert(validationData.TxPositions.size() == block.vtx.size());
     if (block.vtx.empty())
       continue;
 
     const uint32_t height = ref.Index->Height;
-    const uint32_t time = ref.Index->Header.nTime;
 
     // Order across addresses within one tx is free to change: a transaction
     // gives an address exactly one element, its delta already folded
-    auto flushTx = [&](const BC::Proto::TxHashTy &hash) {
+    auto flushTx = [&](size_t txIndex) {
+      const BTC::CTxPosition &position = validationData.TxPositions[txIndex];
       for (const CTxTouch &t: txTouches) {
         counts[t.KeyId]++;
         CTouch &out = touches.emplace_back();
         out.KeyId = t.KeyId;
-        out.Item.TxId = hash;
         out.Item.Height = height;
-        out.Item.Time = time;
+        out.Item.TxIndex = static_cast<uint32_t>(txIndex);
+        out.Item.TxOffset = position.Offset;
+        out.Item.TxSize = position.Size;
         // The delta; CTailWriter folds it into the running balance
         out.Item.Aggregate = t.Delta;
       }
@@ -120,7 +121,7 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
       }
 
       // TODO: check kind on txid (segwit or normal)
-      flushTx(validationData.TxIds[0]);
+      flushTx(0);
     }
 
     // Other transactions
@@ -148,7 +149,7 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
           touch(address, BC::Proto::BalanceType(static_cast<uint64_t>(txout.value)));
       }
 
-      flushTx(validationData.TxIds[i]);
+      flushTx(i);
     }
   }
 

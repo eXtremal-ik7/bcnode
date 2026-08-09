@@ -171,8 +171,8 @@ public:
       }
     }
 
-    // Bytes after the transaction list: enumerateTransactions checks a stored block's layout
-    // against its size and has to account for them
+    // Bytes after the transaction list: txPositionsMatchStored checks a stored block's
+    // layout against its size and has to account for them
     static size_t extensionSize(const Block &d) {
       if (d.vtx.size() < 2 || !d.vtx.back().hogEx)
         return 0;
