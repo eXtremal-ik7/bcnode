@@ -21,6 +21,10 @@
 // Disjointness makes an index droppable by a range tombstone and buildable by
 // a single scan of the data region.
 //
+// A zero metric has no index row: the rank of a zero is nothing anybody asks
+// for, and on a chain most addresses end spent - dropping them takes the bulk
+// of the balance index away. top() filters zero-metric keys on both paths.
+//
 // CValue requirements: trivially copyable, default state is the identity,
 // merge() commutative/associative, negate() gives the inverse delta for
 // disconnect.
@@ -28,6 +32,8 @@
 #include "db/kvbase.h"
 
 #include "thirdparty/ankerl/unordered_dense.h"
+
+#include <chrono>
 
 namespace BC {
 namespace DB {
@@ -255,6 +261,12 @@ public:
       if (hasData && !forBuild.empty() && !buildIndexes(shardIndex, forBuild))
         return false;
 
+      // The rows above went in without the journal, so they are durable only
+      // once the memtable is on disk. "xcfg" is the marker of the whole
+      // transition and must not outlive them: a crash before it repeats the
+      // drop and the build, both idempotent
+      if (!storage->Flush(rocksdb::FlushOptions()).ok())
+        return false;
       if (!storage->Put(rocksdb::WriteOptions(), rocksdb::Slice("xcfg"), rocksdb::Slice(indexCfg)).ok())
         return false;
     }
@@ -438,17 +450,21 @@ private:
         for (const auto &index: ActiveIndexes_) {
           UInt<128> oldMetric = metricOf(index.Def, oldValue);
           UInt<128> newMetric = metricOf(index.Def, newValue);
+          // A zero metric is not in the index, so a data row and its index row
+          // do not come and go together
+          bool hadIndexRow = hadRow && oldMetric.nonZero();
+          bool hasIndexRow = hasRow && newMetric.nonZero();
           // The row is covering, so an unchanged metric is not an unchanged
           // row: a tx of an address moves tx_count without moving balance.
           // Same metric means same key though - rewrite it in place
-          bool sameKey = hadRow && hasRow && oldMetric == newMetric;
+          bool sameKey = hadIndexRow && hasIndexRow && oldMetric == newMetric;
 
           uint8_t rowKey[IndexRowKeyMax];
-          if (hadRow && !sameKey) {
+          if (hadIndexRow && !sameKey) {
             size_t size = buildIndexRowKey(rowKey, index, oldMetric, *folded[i].first);
             batch.Delete(rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size));
           }
-          if (hasRow) {
+          if (hasIndexRow) {
             size_t size = buildIndexRowKey(rowKey, index, newMetric, *folded[i].first);
             batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size),
                       rocksdb::Slice(reinterpret_cast<const char*>(&newValue), sizeof(CValue)));
@@ -562,8 +578,9 @@ private:
     merged.reserve(selection.size());
     for (size_t i = 0; i < selection.size(); i++) {
       selection[i].second.merge(deltas[i]);
-      // A key the windows drove to zero is gone, the way the flush drops it
-      if (!selection[i].second.isNull())
+      // A key the windows drove to zero is gone, the way the flush drops it -
+      // a null row and a zero metric alike
+      if (!selection[i].second.isNull() && metricOf(index.Def, selection[i].second).nonZero())
         merged.push_back(selection[i]);
     }
 
@@ -588,15 +605,20 @@ private:
 
     std::vector<std::pair<CKey, CValue>> extras;
     for (const auto &entry: extraDeltas) {
-      // Pruning is legal only under a saturated cut: with no cut the answer
-      // takes every key the layers hold - a zero-metric value is still a row,
-      // and dropping it would make the answer depend on flush timing
+      // The sign of a delta lives at the column width - its top bit, canonical
+      // bytes above are zero
+      UInt<128> metric = metricOf(index.Def, entry.second);
+      bool lowers = metric.isZero() || (metric >> (8 * index.Def.Width - 1)).nonZero();
+      // A shard read to the end holds a row for every non-zero metric it has,
+      // so a key outside the selection sits at zero on disk: only its own
+      // delta can lift it into the index
+      if (exhausted && lowers)
+        continue;
+      // Below a saturated cut pruning is legal for any key: a delta lowering
+      // the metric can't lift it over the cut, a positive one is bounded by
+      // tail + delta. With no cut the answer takes every key the layers hold
       if (shardCut.nonZero()) {
-        // a delta lowering the metric can't lift its key over the cut, a
-        // positive one is bounded by tail + delta; the sign of a delta lives
-        // at the column width - its top bit, canonical bytes above are zero
-        UInt<128> metric = metricOf(index.Def, entry.second);
-        if (metric.isZero() || (metric >> (8 * index.Def.Width - 1)).nonZero())
+        if (lowers)
           continue;
         if (bound <= UInt<128>::max() - metric && bound + metric < shardCut)
           continue;
@@ -605,31 +627,27 @@ private:
     }
 
     if (!extras.empty()) {
-      // A shard read to the end has an index row for every non-null data row it
-      // holds, so a key outside the selection has no base to read - it is new in
-      // the windows. Skipping the reads is what keeps a fresh database (empty
-      // index, everything still in memory) off a full-window MultiGet
+      // Every extra needs its base read: a key can be outside the index and
+      // still have a data row - that is what a zero metric looks like. The
+      // pruning above is what keeps this off the whole window
+      std::vector<CDataRowKey> rowKeys;
+      rowKeys.reserve(extras.size());
+      for (const auto &extra: extras)
+        makeDataRowKey(rowKeys.emplace_back(), extra.first);
+      std::vector<rocksdb::Slice> keySlices;
+      keySlices.reserve(rowKeys.size());
+      for (const auto &rowKey: rowKeys)
+        keySlices.emplace_back(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
       std::vector<std::string> values;
-      std::vector<rocksdb::Status> readResult;
-      if (!exhausted) {
-        std::vector<CDataRowKey> rowKeys;
-        rowKeys.reserve(extras.size());
-        for (const auto &extra: extras)
-          makeDataRowKey(rowKeys.emplace_back(), extra.first);
-        std::vector<rocksdb::Slice> keySlices;
-        keySlices.reserve(rowKeys.size());
-        for (const auto &rowKey: rowKeys)
-          keySlices.emplace_back(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
-        readResult = shard.Disk.get()->Db->MultiGet(readOptions, keySlices, &values);
-      }
+      std::vector<rocksdb::Status> readResult = shard.Disk.get()->Db->MultiGet(readOptions, keySlices, &values);
 
       for (size_t i = 0; i < extras.size(); i++) {
         // Nothing on disk is a legal base: the key is new in the windows
         CValue value;
-        if (!readResult.empty() && readResult[i].ok() && values[i].size() == sizeof(CValue))
+        if (readResult[i].ok() && values[i].size() == sizeof(CValue))
           memcpy(&value, values[i].data(), sizeof(CValue));
         value.merge(extras[i].second);
-        if (!value.isNull())
+        if (!value.isNull() && metricOf(index.Def, value).nonZero())
           candidates.emplace_back(extras[i].first, value);
       }
     }
@@ -643,6 +661,14 @@ private:
       tails.push_back(tail);
   }
 
+  // The index transition writes the way the flush does - no journal. What
+  // makes it durable is the memtable flush before "xcfg"
+  static rocksdb::WriteOptions transitionWriteOptions() {
+    rocksdb::WriteOptions writeOptions;
+    writeOptions.disableWAL = true;
+    return writeOptions;
+  }
+
   // The regions are disjoint, so one index is exactly the range ['i' id, next)
   bool dropIndexRows(size_t shardIndex, uint8_t id) {
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
@@ -652,7 +678,7 @@ private:
     rocksdb::Slice endSlice = id != 0xFF ?
       rocksdb::Slice(reinterpret_cast<const char*>(end), sizeof(end)) :
       rocksdb::Slice(reinterpret_cast<const char*>(&endAll), sizeof(endAll));
-    return storage->DeleteRange(rocksdb::WriteOptions(), storage->DefaultColumnFamily(),
+    return storage->DeleteRange(transitionWriteOptions(), storage->DefaultColumnFamily(),
                                 rocksdb::Slice(reinterpret_cast<const char*>(begin), sizeof(begin)), endSlice).ok();
   }
 
@@ -660,7 +686,7 @@ private:
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
     const uint8_t begin = 'i';
     const uint8_t end = 'i' + 1;
-    return storage->DeleteRange(rocksdb::WriteOptions(), storage->DefaultColumnFamily(),
+    return storage->DeleteRange(transitionWriteOptions(), storage->DefaultColumnFamily(),
                                 rocksdb::Slice(reinterpret_cast<const char*>(&begin), sizeof(begin)),
                                 rocksdb::Slice(reinterpret_cast<const char*>(&end), sizeof(end))).ok();
   }
@@ -671,13 +697,15 @@ private:
   bool buildIndexes(size_t shardIndex, const std::vector<const CActiveIndex*> &indexes) {
     rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
     LOG_F(INFO, "%s: building %zu indexes for shard %zu...", this->Name_.c_str(), indexes.size(), shardIndex);
+    auto startTime = std::chrono::steady_clock::now();
+    size_t rows = 0;
 
     rocksdb::ReadOptions scanOptions;
     scanOptions.fill_cache = false;
     rocksdb::WriteBatch batch;
     size_t batchSize = 0;
     auto flushBatch = [&]() {
-      if (!storage->Write(rocksdb::WriteOptions(), &batch).ok())
+      if (!storage->Write(transitionWriteOptions(), &batch).ok())
         return false;
       batch.Clear();
       batchSize = 0;
@@ -705,11 +733,15 @@ private:
       CKey baseKey;
       memcpy(static_cast<void*>(&baseKey), key.data() + offsetof(CDataRowKey, Key), sizeof(CKey));
       for (const CActiveIndex *index: indexes) {
+        UInt<128> metric = metricOf(index->Def, baseValue);
+        if (metric.isZero())
+          continue;
         uint8_t rowKey[IndexRowKeyMax];
-        size_t size = buildIndexRowKey(rowKey, *index, metricOf(index->Def, baseValue), baseKey);
+        size_t size = buildIndexRowKey(rowKey, *index, metric, baseKey);
         batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size),
                   rocksdb::Slice(reinterpret_cast<const char*>(&baseValue), sizeof(CValue)));
         batchSize++;
+        rows++;
       }
       if (batchSize >= 65536)
         writeOk = flushBatch();
@@ -720,6 +752,8 @@ private:
       return false;
     }
 
+    LOG_F(INFO, "%s: %zu index rows built for shard %zu (%.1lf seconds)", this->Name_.c_str(), rows, shardIndex,
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count() / 1000.0);
     return true;
   }
 
