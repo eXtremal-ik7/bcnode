@@ -15,12 +15,15 @@
 #include "db/common.h"
 #include "db/kvview.h"
 
+#include <rocksdb/cache.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/merge_operator.h>
 #include <rocksdb/slice_transform.h>
 #include <rocksdb/table.h>
 
+#include <chrono>
 #include <algorithm>
+#include <thread>
 
 namespace BC {
 namespace DB {
@@ -33,6 +36,21 @@ public:
   // Shutdown order: the engine waits out the readers still inside a call, then
   // the shards below it close with this object
   ~CKvDatabase() override { Engine_.shutdown(); }
+
+  // Empty name keeps rocksdb's own default; an unknown one is a config typo
+  // and must not silently fall back to something else
+  static rocksdb::CompressionType compressionByName(config4cpp::Configuration *cfg, const char *key,
+                                                    rocksdb::CompressionType defaultValue) {
+    const char *name = cfg->lookupString("rocksdb", key, nullptr);
+    if (!name || !*name)
+      return defaultValue;
+    if (strcmp(name, "none") == 0) return rocksdb::kNoCompression;
+    if (strcmp(name, "snappy") == 0) return rocksdb::kSnappyCompression;
+    if (strcmp(name, "zstd") == 0) return rocksdb::kZSTD;
+    if (strcmp(name, "lz4") == 0) return rocksdb::kLZ4Compression;
+    LOG_F(ERROR, "unknown rocksdb.%s '%s', using the default", key, name);
+    return defaultValue;
+  }
 
   bool initialize(BlockInMemoryIndex &blockIndex,
                   const std::filesystem::path &dbPath,
@@ -72,15 +90,36 @@ public:
       // and of the memtable on Get
       rocksdb::BlockBasedTableOptions tableOptions;
       tableOptions.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+
+      // Every write of these families reads the row it updates, and the block
+      // it comes in has to be decompressed each time it is missed. rocksdb's
+      // own default is 32Mb - nothing against a database of tens of GB, and
+      // one cache is shared by every database of the process
+      // HyperClockCache and not NewLRUCache: the clock table is what rocksdb
+      // picks by default, and the legacy LRU shards behind a mutex
+      static std::shared_ptr<rocksdb::Cache> blockCache =
+        rocksdb::HyperClockCacheOptions(static_cast<size_t>(cfg->lookupInt("rocksdb", "blockCacheMb", 1024)) << 20, 0).MakeSharedCache();
+      tableOptions.block_cache = blockCache;
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(tableOptions));
       options.memtable_prefix_bloom_size_ratio = 0.05;
       options.memtable_whole_key_filtering = true;
 
-      // L0 files live until the first compaction only: skip compressing them,
-      // keep zstd for the long-lived levels below
-      options.compression_per_level = {rocksdb::kNoCompression, rocksdb::kZSTD};
-      options.max_background_jobs = 8;
+      // L0 files live until the first compaction only: skip compressing them.
+      // Below it compression is the single biggest cost of compaction, while
+      // almost all of the data ends up on the bottom level - hence two knobs,
+      // the transit levels and the floor they settle on. lz4 rather than zstd:
+      // address hashes barely compress, so zstd buys 7% of space for 60% of speed
+      options.compression_per_level = {rocksdb::kNoCompression,
+                                       compressionByName(cfg, "compression", rocksdb::kLZ4Compression)};
+      options.bottommost_compression = compressionByName(cfg, "bottommostCompression", rocksdb::kDisableCompressionOption);
       options.max_write_buffer_number = 4;
+
+      // One background pool serves every database, so this is a machine-wide
+      // setting: a bulk catch-up owes tens of GB of compaction and rocksdb
+      // throttles the writer until it is paid, while most of a big box idles
+      unsigned cores = std::max(std::thread::hardware_concurrency(), 4u);
+      options.max_background_jobs = cfg->lookupInt("rocksdb", "backgroundJobs", std::clamp(cores / 4, 4u, 16u));
+      options.max_subcompactions = cfg->lookupInt("rocksdb", "subcompactions", std::clamp(cores / 16, 1u, 4u));
       std::string shardPathUtf8 = pathToUtf8(shardPath);
       rocksdb::Status status = rocksdb::DB::Open(options, shardPathUtf8, &db);
       if (!status.ok()) {
@@ -199,6 +238,21 @@ public:
   // Checkpoint: everything attached reaches the disk, then every shard is
   // stamped - including untouched ones, initialize() rejects disagreeing stamps
   void flush() final { Engine_.flushAll(CurrentBlock_); }
+
+  // Waits for the automatic compaction to work off the debt, and not a forced
+  // CompactRange: the run owes the levels it dirtied, not a rewrite of a
+  // bottom level it never touched. flush() must have run first - what sits in
+  // a memtable is not the backend's to compact
+  void settle() final {
+    for (auto &shard: OnDiskStorage_) {
+      rocksdb::WaitForCompactOptions options;
+      options.flush = true;
+      options.wait_for_purge = true;
+      rocksdb::Status status = shard->WaitForCompact(options);
+      if (!status.ok())
+        LOG_F(ERROR, "%s: waiting for compaction failed: %s", Name_.c_str(), status.ToString().c_str());
+    }
+  }
 
   virtual uint32_t version() = 0;
   // Family-level knobs, read before initializeImpl - the leaves override that one

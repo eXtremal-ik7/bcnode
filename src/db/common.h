@@ -77,6 +77,10 @@ public:
 
   virtual void flush() = 0;
 
+  // Wait out the work the writes left owing: until the backend has worked it
+  // off, a speed measured over them counts bytes nobody finished writing
+  virtual void settle() {}
+
 protected:
   BC::Proto::BlockHashTy CurrentBlock_;
   std::string Name_;

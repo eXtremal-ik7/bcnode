@@ -147,6 +147,7 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   std::unordered_map<std::string, uint32_t> dbIndexMap;
   config4cpp::StringVector enabledDatabases;
   cfg->lookupList("archive", "databases", enabledDatabases, config4cpp::StringVector());
+  CompactAfterSync_ = cfg->lookupBoolean("archive", "compactAfterSync", false);
 
   for (int i = 0; i < enabledDatabases.length(); i++) {
     if (!dbIndexMap.insert(std::make_pair(enabledDatabases[i], i)).second) {

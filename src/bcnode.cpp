@@ -350,6 +350,11 @@ int main(int argc, char **argv)
       blockCacheSize = static_cast<size_t>(cfg->lookupInt("bcnode", "blockCacheSizeMb", static_cast<int>(blockCacheSize / 1048576))) * 1048576;
 
       {
+        const char *p = cfg->lookupString("bcnode", "blocksPath", nullptr);
+        if (p)
+          context.BlocksDir = p;
+      }
+      {
         const char *p = cfg->lookupString("bcnode", "indexPath", nullptr);
         if (p)
           context.IndexDir = p;

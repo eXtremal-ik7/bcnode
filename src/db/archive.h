@@ -76,6 +76,22 @@ public:
       db->flush();
   }
 
+  // Databases settle in parallel - each one waits on its own debt, and they
+  // share the background pool anyway
+  void settle() {
+    std::vector<std::thread> workers;
+    for (auto &db: AllDb_) {
+      BC::DB::BaseInterface *base = db.get();
+      workers.emplace_back([base]() { base->flush(); base->settle(); });
+    }
+    for (auto &worker: workers)
+      worker.join();
+  }
+
+  // Off by default: a node a few blocks behind must not compact its whole
+  // archive at startup. Benchmarks and rescans turn it on to see honest numbers
+  bool compactAfterSync() const { return CompactAfterSync_; }
+
   // Any engine over its admission limit: the pipeline stops taking work while
   // the storage thread keeps draining its queue and the flushers catch up
   bool pipelineFull() const {
@@ -105,6 +121,7 @@ private:
   std::condition_variable ConnectStartCv_;
   std::condition_variable ConnectDoneCv_;
   bool ConnectStop_ = false;
+  bool CompactAfterSync_ = false;
 
 public:
   // Handlers

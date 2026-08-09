@@ -87,6 +87,9 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
   std::deque<std::unique_ptr<CInFlightBatch>> ring;
 
   uint32_t fed = 0;
+  // Portions are counted in blocks, and a block near the tip is a hundred times
+  // the one at the genesis - hence the bytes, the only comparable measure
+  uint64_t fedBytes = 0;
   unsigned portionNum = 0;
   unsigned portionSize = count / 20 + 1;
 
@@ -122,9 +125,10 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
       utxoDb.connect(BC::DB::CBlockBatch(entry->Refs).subspan(utxoSkip), blockIndex, storage.blockDb());
 
     fed += static_cast<uint32_t>(entry->Refs.size());
+    fedBytes += entry->Segment->RawBytes;
     while (portionNum < 20 && fed >= (portionNum + 1) * portionSize) {
       portionNum++;
-      LOG_F(INFO, "%u%% done, block %u", portionNum*5, entry->Refs.back().Index->Height);
+      LOG_F(INFO, "%u%% done, block %u, %.1lf MB", portionNum*5, entry->Refs.back().Index->Height, fedBytes / 1048576.0);
     }
 
     // Without an archive the batch is done the moment utxo took it; with one, the ring is how
@@ -172,6 +176,17 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
     return false;
 
   LOG_F(INFO, "100%% done");
+
+  // The databases still owe the backend a compaction here, and until it is paid
+  // the speed below counts megabytes nobody has finished writing
+  if (archive && archive->compactAfterSync()) {
+    auto compactStart = std::chrono::steady_clock::now();
+    std::thread utxoWorker([&utxoDb]() { utxoDb.flush(); utxoDb.settle(); });
+    archive->settle();
+    utxoWorker.join();
+    LOG_F(INFO, "Update %s: compaction settled in %.1lf seconds", name,
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - compactStart).count() / 1000.0);
+  }
 
   // Same measure the reindex prints: block bytes over the wall time, final waits included
   double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count() / 1000.0;
