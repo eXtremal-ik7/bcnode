@@ -77,6 +77,11 @@ public:
 
   virtual void flush() = 0;
 
+  // Second half of initialize, run once the startup catch-up is over: what a
+  // database is better off building from the finished data than maintaining
+  // block by block goes here
+  virtual bool finishInitialBuild() { return true; }
+
   // Wait out the work the writes left owing: until the backend has worked it
   // off, a speed measured over them counts bytes nobody finished writing
   virtual void settle() {}

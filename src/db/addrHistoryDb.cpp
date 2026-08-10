@@ -34,29 +34,28 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
   // exactly what these blocks add - growing tails in place recopied them on
   // every block instead, and a unit of connect runs to tens of thousands of
   // blocks (bounded by their bytes, and early blocks are small)
-  struct CTouch {
-    uint32_t KeyId;
-    CAddrHistoryItem Item;
-  };
 
   // Addresses are interned into numbers at the touch itself: everything
   // per-address downstream is a vector indexed by id, one hash lookup total
-  ankerl::unordered_dense::map<BC::Script::CAddress, uint32_t> keyIds;
-  std::vector<BC::Script::CAddress> keyById;
-  std::vector<uint32_t> counts;
-  std::vector<CTouch> touches;
+  auto &keyIds = KeyIds_;
+  auto &keyById = KeyById_;
+  auto &counts = Counts_;
+  auto &touches = Touches_;
 
   // Net balance delta of the transaction per affected address; a zero net
   // change (self-send) still gives a history element. Epoch check instead of
   // a per-tx map: ending a tx costs one clear() of its own touches
-  struct CTxTouch {
-    uint32_t KeyId;
-    BC::Proto::BalanceType Delta;
-  };
-  std::vector<uint64_t> touchEpoch;  // per id: serial of the tx that touched it last
-  std::vector<uint32_t> txSlot;      // per id: the touch's slot within that tx
-  std::vector<CTxTouch> txTouches;   // current tx, insertion order
-  uint64_t txSerial = 0;
+  auto &touchEpoch = TouchEpoch_;
+  auto &txSlot = TxSlot_;
+  auto &txTouches = TxTouches_;
+  uint64_t &txSerial = TxSerial_;
+  keyIds.clear();
+  keyById.clear();
+  counts.clear();
+  touches.clear();
+  touchEpoch.clear();
+  txSlot.clear();
+  txTouches.clear();
 
   auto touch = [&](const BC::Script::CAddress &address, const BC::Proto::BalanceType &delta) {
     auto [it, inserted] = keyIds.try_emplace(address, static_cast<uint32_t>(keyById.size()));
@@ -154,7 +153,9 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
   }
 
   // Pass two: every tail at its final length, then the touches poured into them
-  std::vector<CTailWriter> cursors(keyById.size());
+  std::vector<CTailWriter> &cursors = Cursors_;
+  cursors.clear();
+  cursors.resize(keyById.size());
   for (size_t i = 0; i < keyById.size(); i++)
     cursors[i] = this->allocTail(writer, keyById[i], counts[i]);
 

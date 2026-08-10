@@ -102,6 +102,19 @@ inline void kvScatterSort(std::vector<CKvSortedRef<CKey>> &scattered, std::vecto
   scattered.swap(scratch);
 }
 
+// The fold walks the refs in key order while the records they point at lie in
+// the arena in insertion order: every entry is a miss to memory, and the next
+// addresses are known a dozen iterations ahead
+inline void kvPrefetch(const void *p) {
+#ifdef _MSC_VER
+  _mm_prefetch(static_cast<const char*>(p), _MM_HINT_T0);
+#else
+  __builtin_prefetch(p);
+#endif
+}
+
+static constexpr uint32_t KvPrefetchDistance = 8;
+
 // Never reset, never reused - a layer dies whole, when the last view or
 // reader lets go of it, so a reader chasing an arena pointer can never meet a
 // writer rewinding that arena

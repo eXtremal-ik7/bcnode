@@ -12,14 +12,15 @@
 // layers with its snapshot by construction, so no lock guards the two-level
 // read against the flush.
 //
-// Shard key space is split into disjoint prefix regions:
-//   data rows    'd' ++ key                               -> value
-//   index rows   'i' ++ indexId ++ beN(~metric) ++ key    -> value (same shard)
-//   service keys "stamp", "basecfg", "xcfg" - outside both.
+// A shard is one rocksdb database of several column families - a key space
+// each, so nothing needs a prefix to tell it from its neighbours:
+//   "data"          key                     -> value
+//   "index.<name>"  beN(~metric) ++ key     -> value (same shard)
+//   default         "stamp", "basecfg", "xcfg"
 // N is the index's metric width - the width of the column itself, so no value
-// is ever clamped and the memcmp order of the region IS the metric order.
-// Disjointness makes an index droppable by a range tombstone and buildable by
-// a single scan of the data region.
+// is ever clamped and the memcmp order of the family IS the metric order.
+// Separate families drop an index outright (no range tombstone), build it by
+// one scan of the data family, and keep a compaction to rows of one kind.
 //
 // A zero metric has no index row: the rank of a zero is nothing anybody asks
 // for, and on a chain most addresses end spent - dropping them takes the bulk
@@ -51,21 +52,24 @@ protected:
 
 private:
   struct CActiveIndex {
-    uint8_t Id;
     CIndexDef Def;
+    // The family holding this index, per shard
+    std::vector<rocksdb::ColumnFamilyHandle*> Cf;
   };
 
-#pragma pack(push, 1)
-  struct CDataRowKey {
-    uint8_t Prefix;
-    CKey Key;
-  };
-#pragma pack(pop)
+  static const std::string &dataCfName() {
+    static const std::string name = "data";
+    return name;
+  }
+
+  static std::string indexCfName(const std::string &indexName) { return "index." + indexName; }
+
+  static bool isIndexCfName(const std::string &name) { return name.compare(0, 6, "index.") == 0; }
 
   // Index rows are covering: the value is a copy of the data row, so a head
-  // scan answers top() without going back to the data region. The key is
+  // scan answers top() without going back to the data family. The key is
   // built by buildIndexRowKey - its size varies with the index's Width
-  static constexpr size_t IndexRowKeyMax = 2 + sizeof(UInt<128>) + sizeof(CKey);
+  static constexpr size_t IndexRowKeyMax = sizeof(UInt<128>) + sizeof(CKey);
 
   // The metric at the index's width: bytes past it are zero, so in-memory
   // ordering and arithmetic agree with the stored key bytes exactly. A value
@@ -91,11 +95,6 @@ private:
     }
   };
 
-  static void makeDataRowKey(CDataRowKey &rowKey, const CKey &key) {
-    rowKey.Prefix = 'd';
-    rowKey.Key = key;
-  }
-
   static uint8_t metricByte(const UInt<128> &value, size_t index) {
     return static_cast<uint8_t>(value.data()[index / 8] >> (8 * (index % 8)));
   }
@@ -115,14 +114,12 @@ private:
   }
 
   static size_t indexRowKeySize(const CIndexDef &def) {
-    return 2 + def.Width + sizeof(CKey);
+    return def.Width + sizeof(CKey);
   }
 
   static size_t buildIndexRowKey(uint8_t *out, const CActiveIndex &index, const UInt<128> &metric, const CKey &key) {
-    out[0] = 'i';
-    out[1] = index.Id;
-    encodeInvertedMetric(out + 2, metric, index.Def.Width);
-    memcpy(out + 2 + index.Def.Width, &key, sizeof(CKey));
+    encodeInvertedMetric(out, metric, index.Def.Width);
+    memcpy(out + index.Def.Width, &key, sizeof(CKey));
     return indexRowKeySize(index.Def);
   }
 
@@ -166,6 +163,57 @@ public:
 
   rocksdb::MergeOperator *mergeOperator() final { return new MergeOperator(); }
 
+  bool usesColumnFamilies() final { return true; }
+
+  // An index row is never looked up by key - written blind, read by a head
+  // scan. A bloom over tens of millions of them answers nothing, and the
+  // insert hint misses too: key order is random in metric order
+  void columnFamilyOptions(const std::string &name, rocksdb::ColumnFamilyOptions &options,
+                           const std::shared_ptr<rocksdb::Cache> &blockCache) final {
+    if (!isIndexCfName(name))
+      return;
+
+    rocksdb::BlockBasedTableOptions tableOptions;
+    tableOptions.block_cache = blockCache;
+    options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(tableOptions));
+    options.memtable_whole_key_filtering = false;
+    options.memtable_prefix_bloom_size_ratio = 0;
+    options.memtable_insert_with_hint_prefix_extractor.reset();
+  }
+
+  // The deferred half of initialize: the catch-up is over, the windows it left
+  // go to disk and the rank rows are built from them in one scan per shard
+  bool finishInitialBuild() final {
+    if (DeferredIndexes_.empty())
+      return true;
+
+    this->flush();
+    std::vector<const CActiveIndex*> forBuild;
+    for (const auto &index: DeferredIndexes_)
+      forBuild.push_back(&index);
+
+    for (size_t shardIndex = 0; shardIndex < this->BaseCfg_.ShardsNum; shardIndex++) {
+      rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
+      for (auto &index: DeferredIndexes_) {
+        index.Cf[shardIndex] = this->createColumnFamily(shardIndex, indexCfName(index.Def.Name));
+        if (!index.Cf[shardIndex])
+          return false;
+      }
+      if (!buildIndexes(shardIndex, forBuild))
+        return false;
+      // Same order as the transition above: the marker must not outlive the
+      // rows it vouches for, and both the scan and the write are idempotent
+      if (!this->flushColumnFamilies(shardIndex))
+        return false;
+      if (!storage->Put(rocksdb::WriteOptions(), rocksdb::Slice("xcfg"), rocksdb::Slice(DeferredCfg_)).ok())
+        return false;
+    }
+
+    ActiveIndexes_.swap(DeferredIndexes_);
+    DeferredIndexes_.clear();
+    return true;
+  }
+
   bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&) final {
     // Resolve the configured index list against the set registered by the subclass
     config4cpp::StringVector names;
@@ -192,80 +240,94 @@ public:
       if (!enabled[i])
         continue;
       CActiveIndex &index = ActiveIndexes_.emplace_back();
-      index.Id = static_cast<uint8_t>(i);
       index.Def = RegisteredIndexes_[i];
+      index.Cf.resize(this->BaseCfg_.ShardsNum, nullptr);
       if (!indexCfg.empty())
         indexCfg.push_back(',');
       indexCfg.append(index.Def.Name);
     }
 
-    // Bring the index rows of every shard in sync with the configured set.
-    // The transition is a per-index diff: a dropped index is erased by a range
-    // tombstone over its region, an added one is built by a single scan of the
-    // data region; untouched indexes are not rebuilt and full chain reindex is
-    // never needed. A stored name that is no longer registered has an unknown
-    // id - that degenerates to "drop everything, build the active set"
+    // The data family comes first: everything below reads it, and its absence
+    // under a stamped shard is the old single-family layout
+    for (size_t shardIndex = 0; shardIndex < this->BaseCfg_.ShardsNum; shardIndex++) {
+      if (!this->columnFamily(shardIndex, dataCfName()) && !this->FreshAtOpen_) {
+        LOG_F(ERROR, "%s: shard %zu predates the column family layout, restart with --reindex=%s",
+              this->Name_.c_str(), shardIndex, this->Name_.c_str());
+        return false;
+      }
+      DataCf_.push_back(this->createColumnFamily(shardIndex, dataCfName()));
+      if (!DataCf_.back())
+        return false;
+    }
+
+    // Indexes of a database built from nothing wait for the catch-up: a rank
+    // row kept block by block costs four writes against one, and one scan at
+    // the end gives the same rows. Until "xcfg" they look never built
+    if (this->FreshAtOpen_ && !ActiveIndexes_.empty()) {
+      LOG_F(INFO, "%s: %zu indexes deferred until the initial catch-up is over",
+            this->Name_.c_str(), ActiveIndexes_.size());
+      DeferredIndexes_.swap(ActiveIndexes_);
+      DeferredCfg_ = indexCfg;
+      return true;
+    }
+
+    // Per-index diff against the configured set: a family nobody wants is
+    // dropped, a missing one is built by one scan of the data family. "xcfg"
+    // vouches for completeness - one missing from it is a cut-short build
     for (size_t shardIndex = 0; shardIndex < this->BaseCfg_.ShardsNum; shardIndex++) {
       rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
 
       std::string storedCfg;
       storage->Get(rocksdb::ReadOptions(), rocksdb::Slice("xcfg"), &storedCfg);
-      if (storedCfg == indexCfg)
-        continue;
-
-      std::vector<bool> stored(RegisteredIndexes_.size(), false);
-      bool storedKnown = true;
-      for (size_t pos = 0; pos < storedCfg.size() && storedKnown; ) {
-        size_t comma = storedCfg.find(',', pos);
-        if (comma == std::string::npos)
-          comma = storedCfg.size();
-        std::string name = storedCfg.substr(pos, comma - pos);
+      std::vector<std::string> built;
+      for (size_t pos = 0; pos < storedCfg.size(); ) {
+        size_t comma = std::min(storedCfg.find(',', pos), storedCfg.size());
+        built.push_back(storedCfg.substr(pos, comma - pos));
         pos = comma + 1;
-
-        storedKnown = false;
-        for (size_t i = 0; i < RegisteredIndexes_.size(); i++) {
-          if (RegisteredIndexes_[i].Name == name) {
-            stored[i] = true;
-            storedKnown = true;
-            break;
-          }
-        }
       }
 
-      // No stamp - no data rows, nothing to build: the rows of a fresh shard
-      // are maintained by regular flushes starting from the first block
-      std::string stampData;
-      bool hasData = storage->Get(rocksdb::ReadOptions(), rocksdb::Slice("stamp"), &stampData).ok();
+      bool changed = storedCfg != indexCfg;
+      std::vector<std::string> names;
+      this->columnFamilyNames(shardIndex, names);
+      for (const std::string &name: names) {
+        if (!isIndexCfName(name))
+          continue;
+        const std::string indexName = name.substr(strlen("index."));
+        bool complete = std::find(built.begin(), built.end(), indexName) != built.end();
+        bool active = false;
+        for (const auto &index: ActiveIndexes_)
+          active |= index.Def.Name == indexName;
+        if (complete && active)
+          continue;
+        LOG_F(INFO, "%s: dropping index '%s' of shard %zu", this->Name_.c_str(), indexName.c_str(), shardIndex);
+        if (!this->dropColumnFamily(shardIndex, name))
+          return false;
+        changed = true;
+      }
 
       std::vector<const CActiveIndex*> forBuild;
-      if (!storedKnown) {
-        LOG_F(INFO, "%s: dropping all index rows for shard %zu", this->Name_.c_str(), shardIndex);
-        if (!dropAllIndexRows(shardIndex))
+      for (auto &index: ActiveIndexes_) {
+        const std::string name = indexCfName(index.Def.Name);
+        bool exists = this->columnFamily(shardIndex, name) != nullptr;
+        index.Cf[shardIndex] = this->createColumnFamily(shardIndex, name);
+        if (!index.Cf[shardIndex])
           return false;
-        for (const auto &index: ActiveIndexes_)
+        if (!exists) {
           forBuild.push_back(&index);
-      } else {
-        for (size_t i = 0; i < RegisteredIndexes_.size(); i++) {
-          if (stored[i] && !enabled[i]) {
-            LOG_F(INFO, "%s: dropping index '%s' for shard %zu", this->Name_.c_str(), RegisteredIndexes_[i].Name.c_str(), shardIndex);
-            if (!dropIndexRows(shardIndex, static_cast<uint8_t>(i)))
-              return false;
-          }
-        }
-        for (const auto &index: ActiveIndexes_) {
-          if (!stored[index.Id])
-            forBuild.push_back(&index);
+          changed = true;
         }
       }
 
-      if (hasData && !forBuild.empty() && !buildIndexes(shardIndex, forBuild))
+      if (!changed)
+        continue;
+      if (!forBuild.empty() && !buildIndexes(shardIndex, forBuild))
         return false;
 
       // The rows above went in without the journal, so they are durable only
-      // once the memtable is on disk. "xcfg" is the marker of the whole
+      // once the memtables are on disk. "xcfg" is the marker of the whole
       // transition and must not outlive them: a crash before it repeats the
       // drop and the build, both idempotent
-      if (!storage->Flush(rocksdb::FlushOptions()).ok())
+      if (!this->flushColumnFamilies(shardIndex))
         return false;
       if (!storage->Put(rocksdb::WriteOptions(), rocksdb::Slice("xcfg"), rocksdb::Slice(indexCfg)).ok())
         return false;
@@ -291,15 +353,14 @@ public:
   bool find(const CKey &key, CValue &value) const {
     CKvGuard<CKey> guard = this->Engine_.guard();
     const size_t hash = std::hash<CKey>()(key);
-    const auto &shard = this->Engine_.shard(guard, fastrange(hash, this->BaseCfg_.ShardsNum));
+    const size_t shardIndex = fastrange(hash, this->BaseCfg_.ShardsNum);
+    const auto &shard = this->Engine_.shard(guard, shardIndex);
 
     value = CValue();
-    CDataRowKey rowKey;
-    makeDataRowKey(rowKey, key);
     rocksdb::ReadOptions readOptions;
     readOptions.snapshot = shard.Disk.get()->Snapshot;
     std::string data;
-    if (shard.Disk.get()->Db->Get(readOptions, slice(rowKey), &data).ok() && data.size() == sizeof(CValue))
+    if (shard.Disk.get()->Db->Get(readOptions, DataCf_[shardIndex], slice(key), &data).ok() && data.size() == sizeof(CValue))
       memcpy(&value, data.data(), sizeof(CValue));
 
     for (size_t j = 0; j < shard.Layers.size(); j++) {
@@ -398,36 +459,34 @@ private:
                    size_t shardIndex,
                    const std::vector<std::pair<const CKey*, CValue>> &folded,
                    const BC::Proto::BlockHashTy &stamp) {
+    rocksdb::ColumnFamilyHandle *dataCf = DataCf_[shardIndex];
+
     // Reserved once: without it the batch string of a whole layer doubles
     // its way up through a few hundred MB of memcpy
-    rocksdb::WriteBatch batch(64 + folded.size() * (sizeof(CDataRowKey) + sizeof(CValue) + 16
+    rocksdb::WriteBatch batch(64 + folded.size() * (sizeof(CKey) + sizeof(CValue) + 16
                               + ActiveIndexes_.size() * 2 * (IndexRowKeyMax + sizeof(CValue) + 16)));
     this->putStamp(batch, stamp);
 
-    std::vector<CDataRowKey> rowKeys;
-    rowKeys.reserve(folded.size());
-    for (const auto &entry: folded)
-      makeDataRowKey(rowKeys.emplace_back(), *entry.first);
-
-    // Slices are built after the fill: emplace_back may reallocate rowKeys
+    // The key of the layer is the key of the row: no prefix to prepend, so the
+    // slices point straight into the layer
     std::vector<rocksdb::Slice> keySlices;
-    keySlices.reserve(rowKeys.size());
-    for (const auto &rowKey: rowKeys)
-      keySlices.emplace_back(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
+    keySlices.reserve(folded.size());
+    for (const auto &entry: folded)
+      keySlices.emplace_back(reinterpret_cast<const char*>(entry.first), sizeof(CKey));
 
     if (ActiveIndexes_.empty()) {
       // No indexes: the folded delta goes to the backend as a merge operand,
       // no reads at all
       for (size_t i = 0; i < folded.size(); i++)
-        batch.Merge(keySlices[i], rocksdb::Slice(reinterpret_cast<const char*>(&folded[i].second), sizeof(CValue)));
+        batch.Merge(dataCf, keySlices[i], rocksdb::Slice(reinterpret_cast<const char*>(&folded[i].second), sizeof(CValue)));
     } else if (!folded.empty()) {
       // RMW: index row replacement needs the old value anyway, so the base row
       // is written materialized too (and deleted when it folds to the identity).
-      // folded is in memcmp order and the 'd' prefix keeps it: sorted_input
-      // spares rocksdb its per-call sort of the whole batch
+      // folded is in memcmp order: sorted_input spares rocksdb its per-call
+      // sort of the whole batch
       std::vector<rocksdb::PinnableSlice> oldValues(folded.size());
       std::vector<rocksdb::Status> readResult(folded.size());
-      db->MultiGet(rocksdb::ReadOptions(), db->DefaultColumnFamily(), keySlices.size(),
+      db->MultiGet(rocksdb::ReadOptions(), dataCf, keySlices.size(),
                    keySlices.data(), oldValues.data(), readResult.data(),
                    /*sorted_input=*/true);
       for (size_t i = 0; i < folded.size(); i++) {
@@ -443,9 +502,9 @@ private:
         bool hasRow = !newValue.isNull();
 
         if (hasRow)
-          batch.Put(keySlices[i], rocksdb::Slice(reinterpret_cast<const char*>(&newValue), sizeof(CValue)));
+          batch.Put(dataCf, keySlices[i], rocksdb::Slice(reinterpret_cast<const char*>(&newValue), sizeof(CValue)));
         else
-          batch.Delete(keySlices[i]);
+          batch.Delete(dataCf, keySlices[i]);
 
         for (const auto &index: ActiveIndexes_) {
           UInt<128> oldMetric = metricOf(index.Def, oldValue);
@@ -462,11 +521,11 @@ private:
           uint8_t rowKey[IndexRowKeyMax];
           if (hadIndexRow && !sameKey) {
             size_t size = buildIndexRowKey(rowKey, index, oldMetric, *folded[i].first);
-            batch.Delete(rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size));
+            batch.Delete(index.Cf[shardIndex], rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size));
           }
           if (hasIndexRow) {
             size_t size = buildIndexRowKey(rowKey, index, newMetric, *folded[i].first);
-            batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size),
+            batch.Put(index.Cf[shardIndex], rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size),
                       rocksdb::Slice(reinterpret_cast<const char*>(&newValue), sizeof(CValue)));
           }
         }
@@ -520,7 +579,6 @@ private:
                     std::vector<std::pair<CKey, CValue>> &candidates,
                     std::vector<UInt<128>> &tails) const {
     const auto &shard = this->Engine_.shard(guard, shardIndex);
-    const uint8_t seekPrefix[2] = {'i', index.Id};
     const size_t rowKeySize = indexRowKeySize(index.Def);
 
     rocksdb::ReadOptions readOptions;
@@ -533,14 +591,10 @@ private:
     bool exhausted = true;
     size_t unreadable = 0;
 
-    std::unique_ptr<rocksdb::Iterator> It(shard.Disk.get()->Db->NewIterator(readOptions));
-    for (It->Seek(rocksdb::Slice(reinterpret_cast<const char*>(seekPrefix), sizeof(seekPrefix)));
-         It->Valid();
-         It->Next()) {
+    std::unique_ptr<rocksdb::Iterator> It(shard.Disk.get()->Db->NewIterator(readOptions, index.Cf[shardIndex]));
+    for (It->SeekToFirst(); It->Valid(); It->Next()) {
       rocksdb::Slice key = It->key();
-      if (key.size() < sizeof(seekPrefix) || memcmp(key.data(), seekPrefix, sizeof(seekPrefix)) != 0)
-        break;
-      // Nothing else lives under the 'i' prefix, the size check is a guard
+      // The family holds index rows and nothing else, the size check is a guard
       if (key.size() != rowKeySize)
         continue;
       if (selection.size() == depth) {
@@ -548,7 +602,7 @@ private:
         break;
       }
 
-      tail = decodeInvertedMetric(reinterpret_cast<const uint8_t*>(key.data()) + 2, index.Def.Width);
+      tail = decodeInvertedMetric(reinterpret_cast<const uint8_t*>(key.data()), index.Def.Width);
 
       // A row without its covering value is a row of a layout that is not this
       // one: it stays out of the selection, so the shard is not read to the end
@@ -560,7 +614,7 @@ private:
       }
 
       auto &row = selection.emplace_back();
-      memcpy(static_cast<void*>(&row.first), key.data() + 2 + index.Def.Width, sizeof(CKey));
+      memcpy(static_cast<void*>(&row.first), key.data() + index.Def.Width, sizeof(CKey));
       memcpy(&row.second, It->value().data(), sizeof(CValue));
       position.emplace(row.first, selection.size() - 1);
     }
@@ -630,16 +684,16 @@ private:
       // Every extra needs its base read: a key can be outside the index and
       // still have a data row - that is what a zero metric looks like. The
       // pruning above is what keeps this off the whole window
-      std::vector<CDataRowKey> rowKeys;
-      rowKeys.reserve(extras.size());
-      for (const auto &extra: extras)
-        makeDataRowKey(rowKeys.emplace_back(), extra.first);
       std::vector<rocksdb::Slice> keySlices;
-      keySlices.reserve(rowKeys.size());
-      for (const auto &rowKey: rowKeys)
-        keySlices.emplace_back(reinterpret_cast<const char*>(&rowKey), sizeof(rowKey));
+      std::vector<rocksdb::ColumnFamilyHandle*> families;
+      keySlices.reserve(extras.size());
+      families.reserve(extras.size());
+      for (const auto &extra: extras) {
+        keySlices.emplace_back(reinterpret_cast<const char*>(&extra.first), sizeof(CKey));
+        families.push_back(DataCf_[shardIndex]);
+      }
       std::vector<std::string> values;
-      std::vector<rocksdb::Status> readResult = shard.Disk.get()->Db->MultiGet(readOptions, keySlices, &values);
+      std::vector<rocksdb::Status> readResult = shard.Disk.get()->Db->MultiGet(readOptions, families, keySlices, &values);
 
       for (size_t i = 0; i < extras.size(); i++) {
         // Nothing on disk is a legal base: the key is new in the windows
@@ -653,8 +707,8 @@ private:
     }
 
     if (unreadable)
-      LOG_F(ERROR, "%s: index '%u' of shard %zu has %zu rows in a foreign layout, rebuild the database",
-            this->Name_.c_str(), index.Id, shardIndex, unreadable);
+      LOG_F(ERROR, "%s: index '%s' of shard %zu has %zu rows in a foreign layout, rebuild the database",
+            this->Name_.c_str(), index.Def.Name.c_str(), shardIndex, unreadable);
 
     candidates.insert(candidates.end(), merged.begin(), merged.end());
     if (!exhausted)
@@ -669,29 +723,7 @@ private:
     return writeOptions;
   }
 
-  // The regions are disjoint, so one index is exactly the range ['i' id, next)
-  bool dropIndexRows(size_t shardIndex, uint8_t id) {
-    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
-    const uint8_t begin[2] = {'i', id};
-    const uint8_t end[2] = {'i', static_cast<uint8_t>(id + 1)};
-    const uint8_t endAll = 'i' + 1;
-    rocksdb::Slice endSlice = id != 0xFF ?
-      rocksdb::Slice(reinterpret_cast<const char*>(end), sizeof(end)) :
-      rocksdb::Slice(reinterpret_cast<const char*>(&endAll), sizeof(endAll));
-    return storage->DeleteRange(transitionWriteOptions(), storage->DefaultColumnFamily(),
-                                rocksdb::Slice(reinterpret_cast<const char*>(begin), sizeof(begin)), endSlice).ok();
-  }
-
-  bool dropAllIndexRows(size_t shardIndex) {
-    rocksdb::DB *storage = this->OnDiskStorage_[shardIndex].get();
-    const uint8_t begin = 'i';
-    const uint8_t end = 'i' + 1;
-    return storage->DeleteRange(transitionWriteOptions(), storage->DefaultColumnFamily(),
-                                rocksdb::Slice(reinterpret_cast<const char*>(&begin), sizeof(begin)),
-                                rocksdb::Slice(reinterpret_cast<const char*>(&end), sizeof(end))).ok();
-  }
-
-  // Build the rows of the given indexes by a single scan of the data region.
+  // Build the rows of the given indexes by a single scan of the data family.
   // A crash in the middle repeats the build on restart: "xcfg" is written only
   // after success, and re-putting an existing row is legal (last write wins)
   bool buildIndexes(size_t shardIndex, const std::vector<const CActiveIndex*> &indexes) {
@@ -713,15 +745,10 @@ private:
     };
 
     bool writeOk = true;
-    const uint8_t dataPrefix = 'd';
-    std::unique_ptr<rocksdb::Iterator> It(storage->NewIterator(scanOptions));
-    for (It->Seek(rocksdb::Slice(reinterpret_cast<const char*>(&dataPrefix), sizeof(dataPrefix)));
-         It->Valid() && writeOk;
-         It->Next()) {
+    std::unique_ptr<rocksdb::Iterator> It(storage->NewIterator(scanOptions, DataCf_[shardIndex]));
+    for (It->SeekToFirst(); It->Valid() && writeOk; It->Next()) {
       rocksdb::Slice key = It->key();
-      if (key.empty() || static_cast<uint8_t>(key[0]) != dataPrefix)
-        break;
-      if (key.size() != sizeof(CDataRowKey))
+      if (key.size() != sizeof(CKey))
         continue;
       rocksdb::Slice value = It->value();
       if (value.size() != sizeof(CValue))
@@ -731,14 +758,14 @@ private:
       if (baseValue.isNull())
         continue;
       CKey baseKey;
-      memcpy(static_cast<void*>(&baseKey), key.data() + offsetof(CDataRowKey, Key), sizeof(CKey));
+      memcpy(static_cast<void*>(&baseKey), key.data(), sizeof(CKey));
       for (const CActiveIndex *index: indexes) {
         UInt<128> metric = metricOf(index->Def, baseValue);
         if (metric.isZero())
           continue;
         uint8_t rowKey[IndexRowKeyMax];
         size_t size = buildIndexRowKey(rowKey, *index, metric, baseKey);
-        batch.Put(rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size),
+        batch.Put(index->Cf[shardIndex], rocksdb::Slice(reinterpret_cast<const char*>(rowKey), size),
                   rocksdb::Slice(reinterpret_cast<const char*>(&baseValue), sizeof(CValue)));
         batchSize++;
         rows++;
@@ -759,7 +786,12 @@ private:
 
 private:
   std::vector<CIndexDef> RegisteredIndexes_;
+  // The data family of every shard, cached: every read and every flush wants it
+  std::vector<rocksdb::ColumnFamilyHandle*> DataCf_;
   std::vector<CActiveIndex> ActiveIndexes_;
+  // Configured but not maintained yet: the initial catch-up runs without them
+  std::vector<CActiveIndex> DeferredIndexes_;
+  std::string DeferredCfg_;
 };
 
 }

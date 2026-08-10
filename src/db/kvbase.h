@@ -23,6 +23,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <map>
 #include <thread>
 
 namespace BC {
@@ -33,9 +34,15 @@ class CKvDatabase : public BaseInterface, public IKvSegmentWriter<CKey> {
 public:
   CKvDatabase(const std::string &name) { Name_ = name; }
 
-  // Shutdown order: the engine waits out the readers still inside a call, then
-  // the shards below it close with this object
-  ~CKvDatabase() override { Engine_.shutdown(); }
+  // Shutdown order: the engine waits out the readers still inside a call, the
+  // handles of the named families go next, and the shards close with this object
+  ~CKvDatabase() override {
+    Engine_.shutdown();
+    for (size_t i = 0; i < ColumnFamilies_.size(); i++) {
+      for (auto &entry: ColumnFamilies_[i])
+        OnDiskStorage_[i]->DestroyColumnFamilyHandle(entry.second);
+    }
+  }
 
   // Empty name keeps rocksdb's own default; an unknown one is a config typo
   // and must not silently fall back to something else
@@ -63,6 +70,7 @@ public:
 
     BC::Common::BlockIndex *bestIndex = blockIndex.best();
     OnDiskStorage_.resize(BaseCfg_.ShardsNum);
+    ColumnFamilies_.resize(BaseCfg_.ShardsNum);
     *forConnect = nullptr;
 
     // Open all shards
@@ -129,8 +137,27 @@ public:
       unsigned cores = std::max(std::thread::hardware_concurrency(), 4u);
       options.max_background_jobs = cfg->lookupInt("rocksdb", "backgroundJobs", std::clamp(cores / 4, 4u, 16u));
       options.max_subcompactions = cfg->lookupInt("rocksdb", "subcompactions", std::clamp(cores / 8, 1u, 8u));
+
+      // Nothing here is journalled: only a joint flush keeps a batch spanning
+      // families from surviving in one of them and being lost in another
+      options.atomic_flush = usesColumnFamilies();
+
+      // Which named families this database wants is known after configure()
+      // only - whatever is on disk is opened as it is found, and initializeImpl
+      // creates and drops from there
       std::string shardPathUtf8 = pathToUtf8(shardPath);
-      rocksdb::Status status = rocksdb::DB::Open(options, shardPathUtf8, &db);
+      BlockCache_ = blockCache;
+      BaseCfOptions_ = rocksdb::ColumnFamilyOptions(options);
+      std::vector<std::string> cfNames;
+      rocksdb::DB::ListColumnFamilies(options, shardPathUtf8, &cfNames);
+      if (cfNames.empty())
+        cfNames.push_back(rocksdb::kDefaultColumnFamilyName);
+      std::vector<rocksdb::ColumnFamilyDescriptor> descriptors;
+      for (const std::string &name: cfNames)
+        descriptors.emplace_back(name, columnFamilyOptionsFor(name));
+
+      std::vector<rocksdb::ColumnFamilyHandle*> handles;
+      rocksdb::Status status = rocksdb::DB::Open(options, shardPathUtf8, descriptors, &handles, &db);
       if (!status.ok()) {
         LOG_F(ERROR, "Can't open or create %s database at %s", Name_.c_str(), shardPathUtf8.c_str());
         return false;
@@ -138,6 +165,8 @@ public:
 
       OnDiskStorage_[i].reset(db);
       shards.push_back(db);
+      for (size_t h = 0; h < handles.size(); h++)
+        ColumnFamilies_[i][cfNames[h]] = handles[h];
 
       bool isEmpty = false;
 
@@ -266,6 +295,16 @@ public:
   virtual uint32_t version() = 0;
   // Family-level knobs, read before initializeImpl - the leaves override that one
   virtual void configure(config4cpp::Configuration*) {}
+
+  // Whether this database splits its key space into column families at all -
+  // what a batch has to be made atomic across
+  virtual bool usesColumnFamilies() { return false; }
+
+  // What a named family wants that the database-wide options do not give it.
+  // Called both at open and at create, so a family is the same however it came
+  // to be; the default one carries the service keys and needs nothing
+  virtual void columnFamilyOptions(const std::string&, rocksdb::ColumnFamilyOptions&,
+                                   const std::shared_ptr<rocksdb::Cache>&) {}
   virtual bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) = 0;
 
   // Only the families whose fold needs one (merge, array) return an operator
@@ -306,6 +345,61 @@ protected:
     db->Write(writeOptions, &batch);
   }
 
+  // Named families of a shard: what exists, what has to appear, what is gone.
+  // Names alone are the on-disk inventory - a family that is there and a family
+  // this database still wants are two different questions
+  rocksdb::ColumnFamilyHandle *columnFamily(size_t shardIndex, const std::string &name) const {
+    auto It = ColumnFamilies_[shardIndex].find(name);
+    return It != ColumnFamilies_[shardIndex].end() ? It->second : nullptr;
+  }
+
+  void columnFamilyNames(size_t shardIndex, std::vector<std::string> &names) const {
+    for (const auto &entry: ColumnFamilies_[shardIndex])
+      names.push_back(entry.first);
+  }
+
+  rocksdb::ColumnFamilyHandle *createColumnFamily(size_t shardIndex, const std::string &name) {
+    rocksdb::ColumnFamilyHandle *handle = columnFamily(shardIndex, name);
+    if (handle)
+      return handle;
+    rocksdb::Status status =
+      OnDiskStorage_[shardIndex]->CreateColumnFamily(columnFamilyOptionsFor(name), name, &handle);
+    if (!status.ok()) {
+      LOG_F(ERROR, "%s: can't create column family '%s': %s", Name_.c_str(), name.c_str(), status.ToString().c_str());
+      return nullptr;
+    }
+    ColumnFamilies_[shardIndex][name] = handle;
+    return handle;
+  }
+
+  bool dropColumnFamily(size_t shardIndex, const std::string &name) {
+    rocksdb::ColumnFamilyHandle *handle = columnFamily(shardIndex, name);
+    if (!handle)
+      return true;
+    rocksdb::DB *db = OnDiskStorage_[shardIndex].get();
+    ColumnFamilies_[shardIndex].erase(name);
+    // The files go away with the last handle, so the order is drop then destroy
+    bool ok = db->DropColumnFamily(handle).ok();
+    db->DestroyColumnFamilyHandle(handle);
+    return ok;
+  }
+
+  // Every family of the shard, at once: atomic_flush is what makes a batch
+  // spanning them durable as one, and a per-family flush is not that
+  bool flushColumnFamilies(size_t shardIndex) {
+    std::vector<rocksdb::ColumnFamilyHandle*> handles;
+    for (const auto &entry: ColumnFamilies_[shardIndex])
+      handles.push_back(entry.second);
+    return OnDiskStorage_[shardIndex]->Flush(rocksdb::FlushOptions(), handles).ok();
+  }
+
+private:
+  rocksdb::ColumnFamilyOptions columnFamilyOptionsFor(const std::string &name) {
+    rocksdb::ColumnFamilyOptions cfOptions = BaseCfOptions_;
+    columnFamilyOptions(name, cfOptions, BlockCache_);
+    return cfOptions;
+  }
+
 protected:
   // Configuration
   CBaseCfg BaseCfg_;
@@ -316,6 +410,12 @@ protected:
 
   // Owned here, handed to the engine as raw pointers: must outlive it
   std::vector<std::unique_ptr<rocksdb::DB>> OnDiskStorage_;
+
+  // Per shard, by name, the default one included. Handles are destroyed by
+  // hand in the destructor - they belong to a database still open at that point
+  std::vector<std::map<std::string, rocksdb::ColumnFamilyHandle*>> ColumnFamilies_;
+  rocksdb::ColumnFamilyOptions BaseCfOptions_;
+  std::shared_ptr<rocksdb::Cache> BlockCache_;
 
   CKvEngine<CKey> Engine_;
 };
@@ -353,7 +453,13 @@ protected:
     size_t annihilated = 0;
     for (size_t b = 0; b < KvScatterBuckets && !layer->Scattered.empty(); b++) {
       kvSortBucket(layer->Scattered, layer->Bounds, b);
+      const uint32_t total = static_cast<uint32_t>(layer->Scattered.size());
       for (uint32_t k = b ? layer->Bounds[b - 1] : 0, end = layer->Bounds[b]; k < end; k++) {
+        if (k + KvPrefetchDistance < total) {
+          const CKvSortedRef<CKey> &ahead = layer->Scattered[k + KvPrefetchDistance];
+          kvPrefetch(ahead.Entry);
+          kvPrefetch(ahead.Key);
+        }
         const CKvSortedRef<CKey> &ref = layer->Scattered[k];
         const CGenRecord *rec = static_cast<const CGenRecord*>(ref.Entry);
 

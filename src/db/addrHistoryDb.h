@@ -8,6 +8,8 @@
 #include "db/common.h"
 #include "db/kvarray.h"
 
+#include "thirdparty/ankerl/unordered_dense.h"
+
 namespace BC {
 namespace DB {
 
@@ -43,6 +45,32 @@ public:
                       CKvWriter<BC::Script::CAddress> &writer,
                       BlockInMemoryIndex &blockIndex,
                       BlockDatabase &blockDb);
+
+private:
+  struct CTouch {
+    uint32_t KeyId;
+    CAddrHistoryItem Item;
+  };
+
+  // Net balance delta of one transaction per affected address
+  struct CTxTouch {
+    uint32_t KeyId;
+    BC::Proto::BalanceType Delta;
+  };
+
+  // The scratch of one connect, kept between calls: the database is mutated by
+  // one thread, so clearing beats rebuilding - the capacity and the pages of
+  // the previous batch stay, and a batch of a segment is millions of touches
+  ankerl::unordered_dense::map<BC::Script::CAddress, uint32_t> KeyIds_;
+  std::vector<BC::Script::CAddress> KeyById_;
+  std::vector<uint32_t> Counts_;
+  std::vector<CTouch> Touches_;
+  std::vector<uint64_t> TouchEpoch_;  // per id: serial of the tx that touched it last
+  std::vector<uint32_t> TxSlot_;      // per id: the touch's slot within that tx
+  std::vector<CTxTouch> TxTouches_;   // current tx, insertion order
+  std::vector<CTailWriter> Cursors_;
+  // Never restarts: an epoch of a fresh id is zero, so any live serial differs
+  uint64_t TxSerial_ = 0;
 };
 
 }

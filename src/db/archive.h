@@ -76,6 +76,23 @@ public:
       db->flush();
   }
 
+  // What a database put off until it had the data - rank indexes today. In
+  // parallel: each one scans only its own shards
+  bool finishInitialBuild() {
+    std::atomic<bool> ok = true;
+    std::vector<std::thread> workers;
+    for (auto &db: AllDb_) {
+      BC::DB::BaseInterface *base = db.get();
+      workers.emplace_back([base, &ok]() {
+        if (!base->finishInitialBuild())
+          ok = false;
+      });
+    }
+    for (auto &worker: workers)
+      worker.join();
+    return ok;
+  }
+
   // Databases settle in parallel - each one waits on its own debt, and they
   // share the background pool anyway
   void settle() {

@@ -40,7 +40,7 @@ __NO_DEPRECATED_END
 #endif
 
 static int gReindex = 0;
-static int gReindexOnly = 0;
+static int gExitAfterResync = 0;
 static int gResync = 0;
 static int gWatchLog = 0;
 static const char *gNetwork = "main";
@@ -58,7 +58,7 @@ static option cmdLineOpts[] = {
   {"datadir", required_argument, nullptr, clOptDataDir},
   {"network", required_argument, nullptr, clOptNetwork},
   {"reindex", no_argument, &gReindex, 1},
-  {"reindex-only", no_argument, &gReindexOnly, 1},
+  {"exit-after-resync", no_argument, &gExitAfterResync, 1},
   {"resync", no_argument, &gResync, 1},
   {"watchlog", no_argument, &gWatchLog, 1},
   {nullptr, 0, nullptr, 0}
@@ -132,7 +132,7 @@ void printHelpMessage()
   fprintf(stdout, "  --datadir:\t\tpath of data directory (default: %s)\n", pathToUtf8(defaultPath).c_str());
   puts("  --network:\t\tnetwork name (main, testnet, etc)");
   puts("  --reindex:\t\trebuild block index");
-  puts("  --reindex-only:\trebuild block index and exit");
+  puts("  --exit-after-resync:\texit once the databases are up to date, without starting the network");
   puts("  --resync:\t\tdelete whole database and re-download it (not supported now)");
   puts("  --watchlog:\t\tview log in current terminal");
   puts("");
@@ -390,7 +390,9 @@ int main(int argc, char **argv)
   constexpr unsigned lookupThreadsNum = 16;
   std::vector<HostAddress> seeds[lookupThreadsNum];
   std::future<bool> workers[lookupThreadsNum];
-  if (!gReindexOnly) {
+  // A run that ends with the databases never dials anyone: the lookup is the
+  // first thing that would touch the network
+  if (!gExitAfterResync) {
     for (unsigned i = 0; i < lookupThreadsNum; i++)
       workers[i] = std::async(std::launch::async, LookupPeers, std::ref(addressesForLookup), context.ChainParams.DefaultPort, std::ref(seeds[i]), i, lookupThreadsNum);
   }
@@ -398,8 +400,6 @@ int main(int argc, char **argv)
   // Handling special modes:
   //   - resync
   //   - reindex
-  if (gReindexOnly)
-    gReindex = 1;
   if (gReindex)
     gResync = 1;
 
@@ -479,12 +479,14 @@ int main(int argc, char **argv)
       postQuitOperation(context.MainBase);
       return 1;
     }
+  }
 
-    if (gReindexOnly) {
-      context.Pipeline.stop();
-      LOG_F(INFO, "Reindex done, exiting");
-      return 0;
-    }
+  // Both ways in are behind us: the catch-up of the databases above, and the
+  // reindex that feeds them from the block files
+  if (gExitAfterResync) {
+    context.Pipeline.stop();
+    LOG_F(INFO, "Resync done, exiting");
+    return 0;
   }
 
   // Starting daemon

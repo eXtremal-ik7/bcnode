@@ -345,10 +345,11 @@ public:
     for (size_t i = 0; i < ShardsNum_; i++) {
       CLayer<CKey> *era = ActiveEra_[i].get();
       if (!era) {
-        // Sized once for the whole era: the arena to its freeze threshold, the
-        // map to the keys such an arena can hold (~48 bytes per record) - a
-        // growth under readers is legal but copies the table
-        era = new CLayer<CKey>(EraBytes_, EraBytes_ / 48);
+        // Sized once for the era: the map by what the previous full era of the
+        // shard held, doubled. A fixed guess per byte of arena misses by an
+        // order of magnitude either way - tails and records are not the same
+        const size_t records = LastEraUsed_[i] ? LastEraUsed_[i] * 2 : EraBytes_ / 48;
+        era = new CLayer<CKey>(EraBytes_, records);
         ActiveEra_[i] = era;
       }
       writer.Layers_[i] = era;
@@ -549,6 +550,11 @@ private:
       return;
     }
     era->Bytes = era->bytes();
+    // What the next era of this shard sizes its map by. Only an era that
+    // filled counts: one cut short by a checkpoint holds a fraction of the
+    // keys and would size the next map for a fraction of what it needs
+    if (era->Bytes >= EraBytes_)
+      LastEraUsed_[i] = era->used();
     // release: a flusher that reads this seq through an older view must see
     // every record and the metadata written above
     era->Seq.store(NextSeq_++, std::memory_order_release);
@@ -661,6 +667,8 @@ private:
   // The active era per shard, mutator thread only: views hold their own
   // references, the flusher meets an era only through a view, once frozen
   std::array<intrusive_ptr<CLayer<CKey>>, MaxShards> ActiveEra_;
+  // Keys the last frozen era of the shard held, zero until there was one
+  std::array<size_t, MaxShards> LastEraUsed_{};
   size_t EraBytes_ = 256u << 20;
 
   // Whose fold turns those layers into rows - the database class

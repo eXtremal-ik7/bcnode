@@ -177,6 +177,12 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
 
   LOG_F(INFO, "100%% done");
 
+  // Before the compaction wait, so the rows it writes are part of the same
+  // debt - and inside the measure, because the archive is not caught up until
+  // what the catch-up put off has been built
+  if (archive && !archive->finishInitialBuild())
+    return false;
+
   // The databases still owe the backend a compaction here, and until it is paid
   // the speed below counts megabytes nobody has finished writing
   if (archive && archive->compactAfterSync()) {
