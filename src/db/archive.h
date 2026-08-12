@@ -20,14 +20,15 @@ namespace DB {
 
 class Archive {
 public:
-  // One batch on its way to every database. The refs, and whatever keeps the
-  // data they point at alive, belong to the submitter: a worker only reads
-  // them and drops Pending when done, so the submitter may reuse the storage
-  // once wait() has returned
+  // One batch on its way to every database. The refs belong to the submitter:
+  // a worker only reads them and drops Pending when done, so the submitter may
+  // reuse the storage once wait() has returned. Segment, when set, is the data
+  // behind those refs: each worker owns a share and drops it as it finishes
   struct CConnectTask {
     CBlockBatch Batch;
     BlockInMemoryIndex *BlockIndex = nullptr;
     BlockDatabase *BlockDb = nullptr;
+    CSegment *Segment = nullptr;
     uint32_t FirstHeight = 0;
     size_t Pending = 0;   // ConnectMutex_
   };

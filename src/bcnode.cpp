@@ -157,7 +157,7 @@ struct Context {
   // Storage manager
   BC::DB::Storage Storage;
 
-  // Pull pipeline (shared by the reindex reader and network catch-up)
+  // Shared block pipeline
   CBlockPipeline Pipeline;
 
   // Network
@@ -227,8 +227,9 @@ int main(int argc, char **argv)
     genesisIndex->Header = context.ChainParams.GenesisBlock.header;
     genesisIndex->ChainWork = BC::Common::GetBlockProof(genesisIndex->Header, context.ChainParams);
     genesisIndex->OnChain = true;
-    // The walk from a candidate stops at the connected chain, and this is where it starts
-    genesisIndex->Prepared = true;
+    genesisIndex->WorkChecked = true;
+    genesisIndex->HeaderReady = true;
+    genesisIndex->DataReady = true;
     {
       xmstream stream;
       BTC::serialize(stream, context.ChainParams.GenesisBlock);
@@ -308,8 +309,6 @@ int main(int argc, char **argv)
   unsigned waveThreadsNum = 0;
   // Parsed block data waiting to connect; the reindex reader throttles on it
   size_t blockCacheSize = BC::Configuration::DefaultBlockCacheSize;
-  // Block data connected and waiting for the storage thread; 0 - same as the block cache
-  size_t storageBacklogSize = 0;
   CBlockPipeline::CParams pipelineParams;
   if (std::filesystem::exists(configPath)) {
     try {
@@ -335,7 +334,7 @@ int main(int argc, char **argv)
       outgoingConnectionsLimit = cfg->lookupInt("bcnode", "outgoingConnectionsLimit", 16);
       incomingConnectionsLimit = cfg->lookupInt("bcnode", "incomingConnectionsLimit", std::numeric_limits<unsigned>::max());
 
-      // Pull pipeline
+      // Block pipeline
       waveThreadsNum = cfg->lookupInt("bcnode", "waveThreadsNum", 0);
       pipelineParams.SegmentSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "segmentSizeMb", static_cast<int>(pipelineParams.SegmentSizeLimit / 1048576))) * 1048576;
       pipelineParams.SegmentBlocksLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "segmentBlocks", static_cast<int>(pipelineParams.SegmentBlocksLimit)));
@@ -343,10 +342,8 @@ int main(int argc, char **argv)
       pipelineParams.BiteFloorBlocks = static_cast<size_t>(cfg->lookupInt("bcnode", "biteFloorBlocks", static_cast<int>(pipelineParams.BiteFloorBlocks)));
       pipelineParams.ReadyQueueDepth = static_cast<size_t>(cfg->lookupInt("bcnode", "readyQueueDepth", static_cast<int>(pipelineParams.ReadyQueueDepth)));
       pipelineParams.PrepLanes = static_cast<size_t>(cfg->lookupInt("bcnode", "prepLanes", static_cast<int>(pipelineParams.PrepLanes)));
-      pipelineParams.RawSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "readAheadMb", static_cast<int>(pipelineParams.RawSizeLimit / 1048576))) * 1048576;
       pipelineParams.PreparedSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "preparedMb", static_cast<int>(pipelineParams.PreparedSizeLimit / 1048576))) * 1048576;
       pipelineParams.Prefetch = cfg->lookupBoolean("bcnode", "prefetch", pipelineParams.Prefetch);
-      storageBacklogSize = static_cast<size_t>(cfg->lookupInt("bcnode", "storageBacklogMb", 0)) * 1048576;
       blockCacheSize = static_cast<size_t>(cfg->lookupInt("bcnode", "blockCacheSizeMb", static_cast<int>(blockCacheSize / 1048576))) * 1048576;
 
       {
@@ -382,8 +379,6 @@ int main(int argc, char **argv)
   unsigned totalThreadsNum = workerThreadsNum + rtThreadsNum;
 
   context.Storage.cache().setLimit(blockCacheSize);
-  // Same budget for what waits to be written: it is the same block data, one step further on
-  pipelineParams.StorageBacklogLimit = storageBacklogSize ? storageBacklogSize : blockCacheSize;
 
   // Lookup peers (DNS seeds and user defined nodes)
   // TODO: do it asynchronously (now using std::async)
@@ -435,9 +430,7 @@ int main(int argc, char **argv)
   if (!loadingBlockIndex(context.BlockIndex, context.BlocksDir, context.IndexDir))
     return 1;
 
-  // Pull pipeline: shared by the reindex reader, the network catch-up and the database catch-up
-  // below - the chain is settled at this point, so its selector has nothing to bite and only the
-  // lanes and the ordering are in use
+  // Shared validation/connect pipeline. Database catch-up enters its ordered stage directly.
   pipelineParams.WaveThreads = waveThreadsNum;
   if (!context.Pipeline.start(context.BlockIndex, context.ChainParams, context.Storage, pipelineParams))
     return 1;
@@ -445,15 +438,15 @@ int main(int argc, char **argv)
   // Initialize databases
   if (!archiveEnabled) {
     // Archive disabled, processing UTXO database
-    BC::Common::BlockIndex *utxoBestBlock;
+    BC::Common::BlockIndex *utxoFirstBlock = nullptr;
     std::vector<BC::Common::BlockIndex*> forDisconnect;
 
-    if (!context.Storage.utxodb().initialize(context.BlockIndex, context.UtxoDir, context.Storage, cfg, &utxoBestBlock, forDisconnect))
+    if (!context.Storage.utxodb().initialize(context.BlockIndex, context.UtxoDir, context.Storage, cfg, &utxoFirstBlock, forDisconnect))
       return 1;
     if (!BC::DB::dbDisconnectBlocks(context.Storage.utxodb(), context.BlockIndex, context.ChainParams, context.Storage, forDisconnect))
       return 1;
-    if (!BC::DB::dbConnectBlocks(context.Storage.utxodb(), utxoBestBlock, {}, nullptr,
-                                 context.BlockIndex, context.Storage, context.Pipeline,
+    if (!BC::DB::dbConnectBlocks(context.Storage.utxodb(), utxoFirstBlock, {}, nullptr,
+                                 context.BlockIndex, context.ChainParams, context.Storage, context.Pipeline,
                                  pipelineParams, "UTXO database"))
       return 1;
   } else {

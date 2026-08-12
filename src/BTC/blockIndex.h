@@ -9,10 +9,9 @@
 #include <chrono>
 #include <memory>
 
-struct CBlockRawData;
-
 enum BlockStatus {
   BSEmpty = 0,  // stub for a block known only as someone's predecessor: no header yet
+  BSClaimed,    // a producer is filling the index; other producers wait for the final state
   BSHeader,     // header accepted, no block data
   BSData,       // block data attached and waiting for the batch pipeline, nothing validated yet
   BSBlock,      // block data unpacked and accepted (failed checks stay here: not asked again)
@@ -20,20 +19,10 @@ enum BlockStatus {
 };
 
 // Block data is here or on its way through the pipeline: don't ask peers for it again
-static inline bool haveBlockData(BlockStatus state) { return state == BSData || state == BSBlock; }
+static inline bool haveBlockData(BlockStatus state) { return state >= BSData; }
 
 namespace BTC {
 namespace Common {
-
-template<typename T>
-struct alignas(8) BlockAcceptDataTy {
-  typename T::BlockValidationData ValidationData;
-  atomic_tagged_ptr<BlockAcceptDataTy, 3> SuccessorHeaders;
-  atomic_tagged_ptr<BlockAcceptDataTy, 3> SuccessorBlocks;
-  atomic_tagged_ptr<BlockAcceptDataTy, 3> ConcurrentHeaderNext;
-  atomic_tagged_ptr<BlockAcceptDataTy, 3> ConcurrentBlockNext;
-  BlockAcceptDataTy *CombinerNext;
-};
 
 class alignas(512) CIndexCacheObject {
 private:
@@ -42,6 +31,7 @@ private:
   // What this object currently contributes to Info_: it grows once preparation fills the
   // validation data and the linked outputs
   size_t Accounted_ = 0;
+  bool Relay_ = false;
 
   SerializedDataObject BlockData_;
   Proto::CBlockValidationData ValidationData_;
@@ -52,14 +42,16 @@ public:
   uintptr_t ref_fetch_sub(uintptr_t count) const { return Refs_.fetch_sub(count); }
 
 public:
-  CIndexCacheObject() {}
+  CIndexCacheObject() = default;
   CIndexCacheObject(CAllocationInfo *allocationInfo,
                     void *data,
                     size_t dataSize,
                     size_t memorySize,
                     void *unpackedData,
-                    size_t unpackedMemorySize) :
+                    size_t unpackedMemorySize,
+                    bool relay = false) :
     Info_(allocationInfo),
+    Relay_(relay),
     BlockData_(data, dataSize, memorySize, unpackedData, unpackedMemorySize)
   {
     Accounted_ = BlockData_.memorySize();
@@ -87,6 +79,7 @@ public:
 
   const SerializedDataObject &blockData() const { return BlockData_; }
   BC::Proto::Block *block() const { return static_cast<BC::Proto::Block*>(BlockData_.unpackedData()); }
+  bool relay() const { return Relay_; }
   Proto::CBlockValidationData &validationData() { return ValidationData_; }
   const Proto::CBlockValidationData &validationDataConst() const { return ValidationData_; }
   Proto::CBlockLinkedOutputs &linkedOutputs() { return LinkedOutputs_; }
@@ -115,15 +108,16 @@ public:
   // On the best chain: written by connect/disconnect, read from network threads (the block source
   // decides by it what is left to download)
   std::atomic<bool> OnChain = false;
-  // Block data went into a segment: it is the preparation frontier or below it, and the walk
-  // from a candidate stops here. Cleared when the block is disconnected or its segment is
-  // thrown away
-  std::atomic<bool> Prepared = false;
+  // The header PoW was checked either by the headers-first batch or by a preparation wave.
+  std::atomic<bool> WorkChecked = false;
+  // The independent topology walks may finish in either order. HeaderReady publishes
+  // Height/ChainWork; DataReady publishes a complete block-data path to genesis. Neither goes
+  // back: an evicted object can be rebuilt from its disk coordinates.
+  std::atomic<bool> HeaderReady = false;
+  std::atomic<bool> DataReady = false;
 
   UInt<256> ChainWork;
   atomic_intrusive_ptr<CIndexCacheObject> Serialized;
-  // Raw block data waiting for a preparation wave; owned by whoever takes it out
-  std::atomic<CBlockRawData*> Raw = nullptr;
   // TODO: make union with other field for save memory
   std::chrono::time_point<std::chrono::steady_clock> DownloadingStartTime = std::chrono::time_point<std::chrono::steady_clock>::max();
 
@@ -148,18 +142,32 @@ public:
     return index;
   }
 
-  bool isOrphan() { return Height == std::numeric_limits<uint32_t>::max(); }
-  bool blockStored() {
+  bool isOrphan() const { return Height == std::numeric_limits<uint32_t>::max(); }
+  bool blockStored() const {
     return FileNo != std::numeric_limits<uint32_t>::max() &&
            FileOffset != std::numeric_limits<uint32_t>::max() &&
            SerializedBlockSize != std::numeric_limits<uint32_t>::max();
   }
 
-  bool indexStored() {
+  bool indexStored() const {
     return LinkedOutputsFileNo != std::numeric_limits<uint32_t>::max() &&
            LinkedOutputsFileOffset != std::numeric_limits<uint32_t>::max() &&
            LinkedOutputsSerializedSize != std::numeric_limits<uint32_t>::max();
   }
+
+  bool ready() const {
+    return HeaderReady.load(std::memory_order_acquire) &&
+           DataReady.load(std::memory_order_acquire);
+  }
+
+  uint32_t knownHeight() const {
+    return HeaderReady.load(std::memory_order_acquire) ?
+           Height : std::numeric_limits<uint32_t>::max();
+  }
+
+  BlockIndexTy *next() { return CombinerNext; }
+  void setNext(BlockIndexTy *index) { CombinerNext = index; }
+  void release() {}
 };
 
 }

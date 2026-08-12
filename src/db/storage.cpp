@@ -56,12 +56,6 @@ bool Storage::run(std::function<void()> errorHandler)
   return true;
 }
 
-static size_t blockMemory(BC::Common::BlockIndex *index)
-{
-  BC::Common::CIndexCacheObject *object = index->Serialized.get();
-  return object ? object->blockData().memorySize() : 0;
-}
-
 void Storage::connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, bool wakeUp)
 {
   if (batch.empty())
@@ -71,12 +65,8 @@ void Storage::connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, bool wa
 
   // The archive databases get the same unit, the mark on the last block telling the
   // storage thread where it ends
-  for (size_t i = 0; i < batch.size(); i++) {
-    BC::Common::BlockIndex *index = batch[i].Index;
-    const size_t memory = blockMemory(index);
-    QueuedMemory_.fetch_add(memory, std::memory_order_relaxed);
-    Queue_.emplace(Connect, index, memory, i + 1 == batch.size());
-  }
+  for (size_t i = 0; i < batch.size(); i++)
+    Queue_.emplace(Connect, batch[i].Index, i + 1 == batch.size());
 
   if (wakeUp)
     userEventActivate(NewTaskEvent_);
@@ -91,9 +81,7 @@ void Storage::disconnect(BC::Common::BlockIndex *index,
 {
   UTXODb_.disconnect(index, block, linkedOutputs, validationData, blockIndex, *BlockDb_);
 
-  const size_t memory = blockMemory(index);
-  QueuedMemory_.fetch_add(memory, std::memory_order_relaxed);
-  Queue_.emplace(Disconnect, index, memory);
+  Queue_.emplace(Disconnect, index);
 
   if (wakeUp)
     userEventActivate(NewTaskEvent_);
@@ -135,8 +123,6 @@ void Storage::applyBatch()
   if (needFlush)
     flush();
 
-  QueuedMemory_.fetch_sub(BatchMemory_, std::memory_order_relaxed);
-  BatchMemory_ = 0;
   Batch_.clear();
   // Only now: the refs above point into these
   BatchObjects_.clear();
@@ -161,7 +147,6 @@ void Storage::onQueuePush()
         CachedBlocks_.push_back(task.Index);
       }
 
-      QueuedMemory_.fetch_sub(task.Memory, std::memory_order_relaxed);
       if (needFlush)
         flush();
       continue;
@@ -171,7 +156,6 @@ void Storage::onQueuePush()
     assert(object.get());
     Batch_.push_back(CBlockRef{task.Index, object.get()->block(), &object.get()->linkedOutputs(), &object.get()->validationDataConst()});
     BatchObjects_.push_back(object);
-    BatchMemory_ += task.Memory;
 
     if (task.BatchEnd)
       applyBatch();

@@ -122,12 +122,15 @@ Peer::~Peer()
 {
   std::vector<BC::Proto::BlockHashTy> hashes;
   uint32_t sub = 0x10;
-  if ((blockDownloading.fetch_add(sub) & 0xF) == 2) {
+  bool downloadActive = (blockDownloading.fetch_add(sub) & 0xF) == 2;
+  if (downloadActive) {
     for (auto &hash: ScheduledToDownload_)
       hashes.push_back(hash);
   }
 
   blockDownloading.fetch_sub(sub);
+  if (downloadActive)
+    ParentNode->setBulkFeed(false);
   if (!hashes.empty())
     ParentNode->Sync(hashes);
 
@@ -260,7 +263,7 @@ void Peer::onMessage(AsyncOpStatus status)
       // (async) Receive next message
       aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
 
-      // Block data is not parsed here: in sync mode it goes to the pipeline as it came
+      // Defer block deserialization to a worker, outside the receive callback.
       if (startHeavyOperation(&heavyOperation, &heavyOperationStarted))
         onBlockData(data, size, msize, std::chrono::steady_clock::now());
       else
@@ -355,11 +358,8 @@ void Peer::onVersion(BC::Proto::MessageVersion &version)
   Services = version.services;
   UserAgent_ = version.user_agent;
 
-  VersionReceived = true;
-  if (!IsConnected && (VersionReceived & VerackReceived)) {
-    IsConnected = true;
-    ParentNode->OnPeerConnected(this);
-  }
+  VersionReceived.store(true, std::memory_order_release);
+  finishHandshake();
 
   LOG_F(INFO, "Received version message from %s; user agent: %s, protocol: %u, start height: %u", Name.c_str(), version.user_agent.c_str(), version.version, StartHeight.load());
   sendMessage(MessageTy::verack, nullptr, 0);
@@ -367,10 +367,17 @@ void Peer::onVersion(BC::Proto::MessageVersion &version)
 
 void Peer::onVerAck()
 {
-  VerackReceived = true;
-  if (!IsConnected && (VersionReceived & VerackReceived)) {
-    IsConnected = true;
-    ParentNode->OnPeerConnected(this);
+  VerackReceived.store(true, std::memory_order_release);
+  finishHandshake();
+}
+
+void Peer::finishHandshake()
+{
+  if (VersionReceived.load(std::memory_order_acquire) &&
+      VerackReceived.load(std::memory_order_acquire)) {
+    bool expected = false;
+    if (IsConnected.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+      ParentNode->OnPeerConnected(this);
   }
 }
 
@@ -576,8 +583,12 @@ void Peer::onBlockData(void *data, size_t size, size_t memorySize, std::chrono::
     }
   }
 
+  // All scheduled handlers enter bulk mode before dropping their in-flight count. Therefore the
+  // handler that observes zero below is also the last one that can precede the final bulk=false.
+  if (scheduledBlock)
+    ParentNode->setBulkFeed(true);
   bool downloadFinished = (blockDownloading.fetch_sub(sub) - sub) == 0;
-  if (downloadFinished & scheduledBlock) {
+  if (downloadFinished && scheduledBlock) {
     // No concurrency here
     auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(receivedTime - BlockDownloadingStartTime_).count();
     BlockDownloadingStartTime_ = TimeUnknown;
@@ -585,7 +596,7 @@ void Peer::onBlockData(void *data, size_t size, size_t memorySize, std::chrono::
       DownloadTimes_[DownloadTimesIdx_++ % AvgWindowSize] = static_cast<unsigned>(interval);
   }
 
-  ParentNode->Sync(this, header, hash, data, size, memorySize, scheduledBlock, downloadFinished);
+  ParentNode->Sync(this, hash, data, size, memorySize, scheduledBlock, downloadFinished);
 }
 
 void Peer::onReject(BC::Proto::MessageReject &reject)
@@ -694,6 +705,7 @@ void Peer::downloadBlocks(std::vector<BC::Proto::BlockHashTy> &hashes)
 void Peer::cancelDownloadBlocks()
 {
   blockDownloading = 0;
+  ParentNode->setBulkFeed(false);
 }
 
 void Peer::ping()
@@ -963,7 +975,7 @@ void Node::Sync()
         peer->cancelDownloadBlocks();
     }
 
-    if (peer->IsConnected) {
+    if (peer->IsConnected.load(std::memory_order_acquire)) {
       hasConnectedPeers = true;
       if (!peer->BlockSource_.get() && peer->StartHeight > best->Height)
         candidatesForSync.push_back(peer);
@@ -1030,35 +1042,61 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
     currentPeer->downloadHeaders({hash}, hashStop);
     LOG_F(INFO, "Continue headers downloading from %s (start from %s)", currentPeer->Name.c_str(), hash.getHexLE().c_str());
 
-    // Accept received headers
+    // Verify the whole message in one multi-way call. For scrypt chains this is the SIMD path;
+    // every accepted index records that its work is already paid for.
     BC::Common::CheckConsensusCtx ccCtx;
     BC::Common::checkConsensusInitialize(ccCtx);
+    std::vector<const BC::Proto::BlockHeader*> headersToCheck;
+    std::vector<size_t> checkPositions;
+    headersToCheck.reserve(headers.size());
+    checkPositions.reserve(headers.size());
+    std::unique_ptr<bool[]> workValid(new bool[headers.size()]);
     BC::Proto::BlockHashTy prevHash;
-    BC::Common::BlockIndex *index = nullptr;
-    bool firstIteration = true;
     for (size_t i = 0, ie = headers.size(); i != ie; i++) {
       const BC::Proto::BlockHeader &header = headers[i].header;
-      if (!firstIteration && header.hashPrevBlock != prevHash) {
+      if (i && header.hashPrevBlock != prevHash) {
         // TODO: stop downloading process using this peer
         LOG_F(INFO, "%s: invalid header sequence received", currentPeer->Name.c_str());
         disconnectPeerFromBlockSource(currentPeer, blockSourcePtr);
         return;
       }
 
-      index = AddHeader(*BlockIndex_, *ChainParams_, header, ccCtx);
-      if (!index) {
-        LOG_F(INFO, "%s: invalid header with hash %s received", currentPeer->Name.c_str(), header.GetHash().getHexLE().c_str());
+      // An index that already paid for this header is not asked to pay again: without this a
+      // replayed headers message costs a peer nothing and this node a full batch of hashes
+      const BC::Proto::BlockHashTy hash = header.GetHash();
+      auto It = BlockIndex_->blockIndex().find(hash);
+      workValid[i] = It != BlockIndex_->blockIndex().end() &&
+                     It->second->WorkChecked.load(std::memory_order_acquire);
+      if (!workValid[i]) {
+        headersToCheck.push_back(&header);
+        checkPositions.push_back(i);
+      }
+
+      prevHash = hash;
+    }
+
+    if (!headersToCheck.empty()) {
+      std::unique_ptr<bool[]> checked(new bool[headersToCheck.size()]);
+      BC::Common::checkConsensusMulti(headersToCheck.data(), headersToCheck.size(), ccCtx,
+                                      *ChainParams_, checked.get());
+      for (size_t i = 0; i < headersToCheck.size(); i++)
+        workValid[checkPositions[i]] = checked[i];
+    }
+
+    // Work is the only thing a header can fail on, and it is already known for all of them
+    BC::Common::BlockIndex *index = nullptr;
+    for (size_t i = 0; i < headers.size(); i++) {
+      if (!workValid[i]) {
+        LOG_F(INFO, "%s: invalid header with hash %s received", currentPeer->Name.c_str(), headers[i].header.GetHash().getHexLE().c_str());
         disconnectPeerFromBlockSource(currentPeer, blockSourcePtr);
         return;
       }
 
+      index = AddHeader(*BlockIndex_, *ChainParams_, headers[i].header);
       indexes[i] = index;
-
-      prevHash = header.GetHash();
-      firstIteration = false;
     }
 
-    currentPeer->noteHeight(index->Height);
+    currentPeer->noteHeight(index->knownHeight());
     blockSource->enqueue(std::move(indexes), token.consume(blockSource));
   } else {
     if (headers.empty())
@@ -1074,7 +1112,7 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
       if (I != BlockIndex_->blockIndex().end()) {
         BC::Common::BlockIndex *index = currentPeer->LastAskedBlock_;
         BC::Common::BlockIndex *receivedIndex = I->second;
-        while (index && index->Height > receivedIndex->Height)
+        while (index && index->knownHeight() > receivedIndex->knownHeight())
           index = index->Prev;
 
         if (index == receivedIndex) {
@@ -1097,7 +1135,6 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
 }
 
 void Node::Sync(Peer *peer,
-                const BC::Proto::BlockHeader &header,
                 const BC::Proto::BlockHashTy &hash,
                 void *data,
                 size_t size,
@@ -1105,41 +1142,60 @@ void Node::Sync(Peer *peer,
                 bool scheduledBlock,
                 bool downloadFinished)
 {
-  // One path for everything: the data is attached to its index and the pipeline decides what to
-  // connect and when. A block relayed at the tip becomes a segment of its own, so the verdict
-  // takes a wave over one block instead of a single thread walking it
-  // Scheduled means a catch-up download: more blocks are right behind, so the selector may
-  // hold out for a bigger bite; the peer running dry lets the tail through
-  if (scheduledBlock)
-    Pipeline_->setBulkFeed(!downloadFinished);
+  // Network workers deserialize before publication. Scheduled downloads build bulk segments;
+  // live relay remains an immediate one-block segment.
   BC::Common::BlockIndex *attached = nullptr;
-  CBlockPipeline::EResult result =
-    Pipeline_->attachFromNetwork(data, static_cast<uint32_t>(size), static_cast<uint32_t>(memorySize),
-                                 header, hash, !scheduledBlock, &attached);
-  if (result == CBlockPipeline::Staged) {
-    peer->noteHeight(attached->Height);
+  EBlockDataResult result = acceptNetworkBlock(*BlockIndex_,
+                                               *ChainParams_,
+                                               *Storage_,
+                                               data,
+                                               size,
+                                               memorySize,
+                                               !scheduledBlock,
+                                               &attached);
+  if (scheduledBlock && downloadFinished)
+    Pipeline_->setBulkFeed(false);
+
+  if (result == EBlockDataResult::Invalid) {
+    // The header unserialized in onBlockData, the body did not: nothing of the block survived,
+    // and the stalled-block collector asks somebody else for it
+    LOG_F(ERROR, "%s: can't unserialize block %s, stop downloading blocks from this peer",
+          peer->Name.c_str(), hash.getHexLE().c_str());
+    intrusive_ptr<BlockSource> blockSourcePtr(peer->BlockSource_);
+    if (blockSourcePtr.get())
+      disconnectPeerFromBlockSource(peer, blockSourcePtr);
+    // Same reason as in scheduleBlocksDownload: a peer left without a source keeps the loop flag
+    // raised, and the next connect can't start downloading
+    peer->cancelDownloadBlocks();
+    return;
+  }
+
+  const uint32_t attachedHeight = result == EBlockDataResult::Accepted ?
+                                  attached->knownHeight() : std::numeric_limits<uint32_t>::max();
+  if (result == EBlockDataResult::Accepted) {
+    peer->noteHeight(attachedHeight);
 
     // Anchor for the stalled-block collector: survives source restarts, so holes below anything
     // ever received stay requestable during cache overflow. Scheduled blocks only: a relayed tip
     // during catch-up sits far above the download window and would turn the walk into the whole chain
-    if (scheduledBlock && attached->Height != std::numeric_limits<uint32_t>::max()) {
-      BC::Common::BlockIndex *frontier = ReceivedFrontier_.load(std::memory_order_relaxed);
-      while ((!frontier || attached->Height > frontier->Height) &&
-             !ReceivedFrontier_.compare_exchange_weak(frontier, attached, std::memory_order_relaxed))
+    if (scheduledBlock && attachedHeight != std::numeric_limits<uint32_t>::max()) {
+      BC::Common::BlockIndex *frontier = ReceivedFrontier_.load(std::memory_order_acquire);
+      while ((!frontier || attachedHeight > frontier->knownHeight()) &&
+             !ReceivedFrontier_.compare_exchange_weak(frontier,
+                                                       attached,
+                                                       std::memory_order_release,
+                                                       std::memory_order_acquire))
         ;
     }
-  } else {
-    // Already have this block
-    operator delete(data);
   }
 
   if (downloadFinished) {
-    if (result == CBlockPipeline::Staged) {
+    if (result == EBlockDataResult::Accepted) {
       // Best chain lags the received block here: blocks are still in the pipeline
       auto best = BlockIndex_->best();
       LOG_F(INFO, "Best chain: %s(%u); Last received: %s(%u); cache: %.3lfM",
             best->Header.GetHash().getHexLE().c_str(), best->Height,
-            hash.getHexLE().c_str(), attached->Height,
+            hash.getHexLE().c_str(), attachedHeight,
             Storage_->cache().size() / 1048576.0f);
     }
 
@@ -1149,10 +1205,10 @@ void Node::Sync(Peer *peer,
       scheduleBlocksDownload(peer);
   }
 
-  if (result == CBlockPipeline::Staged) {
+  if (result == EBlockDataResult::Accepted) {
     // Nothing of the block is known yet, its predecessor included: ask for the chain it hangs on
-    if (!scheduledBlock && attached->Height == std::numeric_limits<uint32_t>::max()) {
-      LOG_F(INFO, "%s: orhpan block %s received, node possible not synchronized", peer->Name.c_str(), hash.getHexLE().c_str());
+    if (!scheduledBlock && attachedHeight == std::numeric_limits<uint32_t>::max()) {
+      LOG_F(INFO, "%s: orphan block %s received, node may not be synchronized", peer->Name.c_str(), hash.getHexLE().c_str());
 
       bool newSourceCreated = false;
       auto blockSource = BlockSources_.head(ThreadsNum_, true, newSourceCreated);
@@ -1314,7 +1370,7 @@ bool Node::scheduleBlocksDownload(Peer *slave)
     // Block source is empty at this moment
     if (blockSource.headersDownloadingFinished() || blockCacheOverflow) {
       // Collect stalled blocks
-      blockSource.processStalledBlocks(ReceivedFrontier_.load(std::memory_order_relaxed));
+      blockSource.processStalledBlocks(ReceivedFrontier_.load(std::memory_order_acquire));
       if (!blockSource.dequeue(indexes, batchSize, blockCacheOverflow)) {
         slave->scheduleBlocksDownload(1*1000000);
         return false;
@@ -1334,7 +1390,7 @@ bool Node::scheduleBlocksDownload(Peer *slave)
   if (!slave->IsProducerPeer_ && blockSource.lastKnownIndex()) {
     // lastKnownIndex is null until the first headers batch lands: the retry queue can feed a
     // fresh source before that, and the probe makes no sense without a master header anyway
-    if (!slave->LastKnownBlock_ || indexes.back()->Height > slave->LastKnownBlock_->Height) {
+    if (!slave->LastKnownBlock_ || indexes.back()->knownHeight() > slave->LastKnownBlock_->knownHeight()) {
       // Master peer contains last received header, we can build block locator based on this header
       // and use getheaders message for checking slave peer chain
       slave->LastAskedBlock_ = blockSource.lastKnownIndex();

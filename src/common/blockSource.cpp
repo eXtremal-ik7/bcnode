@@ -94,7 +94,7 @@ void BlockSource::processTask(TaskHP *task)
     // dequeue drags them below the holes, and a fresh source after a restart has none at all
     BC::Common::BlockIndex *index = task->Frontier;
     for (unsigned i = 0; i < ThreadsNum_; i++) {
-      if (LastDequeued_[i] && (!index || LastDequeued_[i]->Height > index->Height))
+      if (LastDequeued_[i] && (!index || LastDequeued_[i]->knownHeight() > index->knownHeight()))
         index = LastDequeued_[i];
     }
 
@@ -115,9 +115,9 @@ void BlockSource::processTask(TaskHP *task)
       LOG_F(INFO, "Retry download %zu blocks in range %s(%u): %s(%u)",
             stalledBlocks.size(),
             stalledBlocks.front()->Header.GetHash().getHexLE().c_str(),
-            stalledBlocks.front()->Height,
+            stalledBlocks.front()->knownHeight(),
             stalledBlocks.back()->Header.GetHash().getHexLE().c_str(),
-            stalledBlocks.back()->Height);
+            stalledBlocks.back()->knownHeight());
 
     for (auto index: stalledBlocks)
       HighPriorityDownloadQueue_.push(index);

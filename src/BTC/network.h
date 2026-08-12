@@ -223,9 +223,9 @@ private:
   char Command[12];
 
   bool Incoming = false;
-  bool VersionReceived = false;
-  bool VerackReceived = false;
-  bool IsConnected = false;
+  std::atomic<bool> VersionReceived = false;
+  std::atomic<bool> VerackReceived = false;
+  std::atomic<bool> IsConnected = false;
 
   // Peer height: the version message gives the value at handshake, noteHeight keeps it current
   std::atomic<uint32_t> StartHeight = 0;
@@ -267,6 +267,7 @@ private:
   std::unique_ptr<std::atomic<uint64_t>[]> SentCommands_;
 
   bool isAlive();
+  void finishHandshake();
 
   // Sync candidates are chosen by peer height, so a peer that moved on while connected must not
   // look like it stayed at its handshake height
@@ -448,7 +449,6 @@ public:
   void Sync(Peer *peer, const xvector<BC::Proto::BlockHeaderNet> &headers, unsigned downloadTimeInMilliSeconds, HeadersMessageToken &&token);
   // Takes ownership of the serialized block data; header and hash are parsed from it
   void Sync(Peer *peer,
-            const BC::Proto::BlockHeader &header,
             const BC::Proto::BlockHashTy &hash,
             void *data,
             size_t size,
@@ -456,6 +456,7 @@ public:
             bool scheduledBlock,
             bool downloadFinished);
   void Sync(std::vector<BC::Proto::BlockHashTy> &hashes);
+  void setBulkFeed(bool bulk) { Pipeline_->setBulkFeed(bulk); }
 
   // API
   void enumeratePeers(std::function<void(Peer*)> callback) {

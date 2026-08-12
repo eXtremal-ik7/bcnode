@@ -7,12 +7,11 @@
 
 #include "BC/bc.h"
 #include "common/blockPipeline.h"
+#include "common/combiner.h"
 #include "common/linearDataStorage.h"
-#include <tbb/concurrent_queue.h>
 #include <tbb/concurrent_unordered_map.h>
 #include <filesystem>
 #include <functional>
-#include <thread>
 
 struct BCNodeContext;
 struct asyncBase;
@@ -33,29 +32,47 @@ BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
 
 BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex,
                                   BC::Common::ChainParams &chainParams,
-                                  const BC::Proto::BlockHeader &header,
-                                  BC::Common::CheckConsensusCtx &ccCtx);
+                                  const BC::Proto::BlockHeader &header);
 
-// attachBlockData - reserve an index for block data: the index, the header chain and nothing
-// else (the data is not parsed here). *checkWork is set when the header work was never
-// verified. Returns nullptr when the block can't get an index of its own (already have it)
-BC::Common::BlockIndex *attachBlockData(BlockInMemoryIndex &blockIndex,
-                                        BC::Common::ChainParams &chainParams,
-                                        const BC::Proto::BlockHeader &header,
-                                        const BC::Proto::BlockHashTy &hash,
-                                        bool *checkWork);
+enum class EBlockDataResult {
+  Accepted,
+  Duplicate,
+  Invalid
+};
 
-// Everything a segment needs before the chain state matters: proof of work, unpack, standalone
-// and contextual checks in parallel waves, then the linking of its inputs - what a block of the
+// Publish a decoded block. The index owns a reference to object after Accepted; file coordinates
+// are present for disk blocks and absent for network blocks.
+EBlockDataResult acceptBlockData(BlockInMemoryIndex &blockIndex,
+                                 BC::Common::ChainParams &chainParams,
+                                 const intrusive_ptr<BC::Common::CIndexCacheObject> &object,
+                                 uint32_t fileNo,
+                                 uint32_t fileOffset,
+                                 BC::Common::BlockIndex **accepted);
+
+// Takes ownership of data in every result. Network blocks keep it in CIndexCacheObject so the
+// storage thread can append exactly the received serialization.
+EBlockDataResult acceptNetworkBlock(BlockInMemoryIndex &blockIndex,
+                                    BC::Common::ChainParams &chainParams,
+                                    BC::DB::Storage &storage,
+                                    void *data,
+                                    size_t size,
+                                    size_t memorySize,
+                                    bool relay,
+                                    BC::Common::BlockIndex **accepted);
+
+// Rare path after a rejected candidate: find the strongest fully data-reachable branch with no
+// invalid ancestor.
+BC::Common::BlockIndex *bestReadyBlock(BlockInMemoryIndex &blockIndex);
+
+// Everything a segment needs before the chain state matters: proof of work, standalone and
+// contextual checks in parallel waves, then the linking of its inputs - what a block of the
 // segment answers for itself, what an earlier block of the segment answers, and what only the
 // state right before the segment can answer (the residual list). A block that fails its own
 // checks cuts the segment short. False when nothing of it is left
-bool prepareSegment(BlockInMemoryIndex &blockIndex,
-                    BC::Common::ChainParams &chainParams,
+bool prepareSegment(BC::Common::ChainParams &chainParams,
                     BC::DB::Storage &storage,
                     CParallelRunner &runner,
                     CSegment &segment,
-                    CPipelineCounters &counters,
                     bool prefetch);
 
 // Connect of a prepared segment: rebase if needed, the existence wave over the residual inputs,
@@ -84,10 +101,12 @@ class BlockInMemoryIndex {
 public:
   BlockInMemoryIndex() {}
 
-  BC::Common::BlockIndex *best() { return BestIndex_.load(std::memory_order_relaxed); }
+  // A best pointer publishes the complete index record it names (in particular Height and
+  // ChainWork). Network and API threads may immediately dereference the returned pointer.
+  BC::Common::BlockIndex *best() { return BestIndex_.load(std::memory_order_acquire); }
   BC::Common::BlockIndex *genesis() { return GenesisIndex_; }
   BC::Proto::Block &genesisBlock() { return GenesisBlock_; }
-  void setBest(BC::Common::BlockIndex *index) { BestIndex_.store(index); }
+  void setBest(BC::Common::BlockIndex *index) { BestIndex_.store(index, std::memory_order_release); }
   void setGenesis(BC::Common::BlockIndex *index, const BC::Proto::Block &block) {
     GenesisIndex_ = index;
     GenesisBlock_ = block;
@@ -103,13 +122,23 @@ public:
     return It != BlockHeightIndex_.end() ? It->second : nullptr;
   }
 
-  // Old-style accessors
   auto &blockIndex() { return BlockIndex_; }
   auto &blockHeightIndex() { return BlockHeightIndex_; }
-  CCandidateTracker &candidateTracker() { return CandidateTracker_; }
+  auto &combiner() { return ReadyCombiner_; }
+
+  void notifyReady(BC::Common::BlockIndex *index) {
+    CBlockPipeline *pipeline = ReadyPipeline_.load(std::memory_order_acquire);
+    if (pipeline)
+      pipeline->submit(index);
+  }
+
+  void setReadyPipeline(CBlockPipeline *pipeline) {
+    ReadyPipeline_.store(pipeline, std::memory_order_release);
+  }
 
 private:
-  CCandidateTracker CandidateTracker_;
+  Combiner<BC::Common::BlockIndex> ReadyCombiner_;
+  std::atomic<CBlockPipeline*> ReadyPipeline_ = nullptr;
   tbb::concurrent_unordered_map<BC::Proto::BlockHashTy, BC::Common::BlockIndex*, std::hash<BC::Proto::BlockHashTy>> BlockIndex_;
   tbb::concurrent_unordered_map<uint32_t, BC::Common::BlockIndex*, std::hash<uint32_t>> BlockHeightIndex_;
   std::atomic<BC::Common::BlockIndex*> BestIndex_ = nullptr;
@@ -178,7 +207,7 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndex(BC::Common::BlockInde
 
 // The single definition of what a stored block must become before a database may connect or
 // disconnect it: linked outputs and validation data (txids, consensus exemptions) filled in.
-// objectByIndex reads the bytes itself, the catch-up preparation brings them from a combined
+// objectByIndex reads the bytes itself, the catch-up reader brings them from a combined
 // read. 'info' accounts the result, null for a block nobody budgets for
 intrusive_ptr<BC::Common::CIndexCacheObject> objectFromStoredBytes(BC::Common::BlockIndex *index,
                                                                    BC::Common::ChainParams &chainParams,
@@ -189,17 +218,19 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectFromStoredBytes(BC::Common::B
                                                                    CAllocationInfo *info);
 
 // Reads blocks back in chain order for a database that is behind, a batch at a time: a block
-// and its linked outputs come from one combined read, and the batch goes on as a catch-up
-// segment for the pipeline to prepare
+// and its linked outputs come from one combined read, then a persistent worker pool decodes the
+// whole wave before the batch enters the ordered pipeline stage.
 class CCatchUpReader {
 public:
   // batchSizeLimit/batchBlocksLimit cut the batch, same meaning as the segment limits of the
   // pipeline; the disk read stays combined across whatever piece of it is contiguous
   CCatchUpReader(BlockDatabase &blockDb,
+                 BC::Common::ChainParams &chainParams,
+                 CAllocationInfo &allocationInfo,
                  BC::Common::BlockIndex *first,
                  size_t batchSizeLimit,
-                 size_t batchBlocksLimit) :
-    BlockDb_(blockDb), Cursor_(first), BatchSizeLimit_(batchSizeLimit), BatchBlocksLimit_(batchBlocksLimit) {}
+                 size_t batchBlocksLimit,
+                 unsigned waveThreads);
 
   // Null at the end of the chain, and when the block database does not hold what the index
   // says it holds - failed() tells the two apart
@@ -218,6 +249,9 @@ private:
 
 private:
   BlockDatabase &BlockDb_;
+  BC::Common::ChainParams &ChainParams_;
+  CAllocationInfo &AllocationInfo_;
+  CParallelRunner Runner_;
   BC::Common::BlockIndex *Cursor_ = nullptr;
   size_t BatchSizeLimit_ = 0;
   size_t BatchBlocksLimit_ = 0;

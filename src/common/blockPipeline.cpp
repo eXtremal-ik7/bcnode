@@ -10,7 +10,6 @@
 #include "loguru.hpp"
 
 #include <algorithm>
-#include <chrono>
 
 bool CBlockPipeline::start(BlockInMemoryIndex &blockIndex,
                            BC::Common::ChainParams &chainParams,
@@ -21,17 +20,15 @@ bool CBlockPipeline::start(BlockInMemoryIndex &blockIndex,
   ChainParams_ = &chainParams;
   Storage_ = &storage;
   Params_ = params;
+  Frontier_ = blockIndex.best();
+  Candidate_ = blockIndex.best();
 
   unsigned threadsNum = Params_.WaveThreads;
   if (!threadsNum)
     threadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
 
-  Frontier_ = blockIndex.best();
-  blockIndex.candidateTracker().setListener([this]() { wakeSelector(); });
-  blockIndex.candidateTracker().update(blockIndex.best());
-
   LOG_F(INFO,
-        "Pull pipeline: %u wave threads, %zu preparation lanes, segment %.1lfMb (%zu blocks), bite floor %.1lfMb (%zu blocks), ready queue %zu, read ahead %.1lfMb, prepared %.1lfMb",
+        "Block pipeline: %u wave threads, %zu preparation lanes, segment %.1lfMb (%zu blocks), bulk floor %.1lfMb (%zu blocks), ready queue %zu, prepared %.1lfMb",
         threadsNum,
         Params_.PrepLanes,
         Params_.SegmentSizeLimit / 1048576.0,
@@ -39,16 +36,15 @@ bool CBlockPipeline::start(BlockInMemoryIndex &blockIndex,
         Params_.BiteFloorSize / 1048576.0,
         Params_.BiteFloorBlocks,
         Params_.ReadyQueueDepth,
-        Params_.RawSizeLimit / 1048576.0,
         Params_.PreparedSizeLimit / 1048576.0);
 
-  // One helper less than the pool width: the wave owner takes a share itself
   Runner_.start(threadsNum > 1 ? threadsNum - 1 : 0);
   SerialThread_ = std::thread([this]() { serial(); });
   for (size_t i = 0; i < std::max<size_t>(Params_.PrepLanes, 1); i++)
     PrepThreads_.emplace_back([this]() { prepare(); });
-  SelectorThread_ = std::thread([this]() { selector(); });
+
   Started_ = true;
+  blockIndex.setReadyPipeline(this);
   return true;
 }
 
@@ -57,208 +53,112 @@ void CBlockPipeline::stop()
   if (!Started_)
     return;
 
+  BlockIndex_->setReadyPipeline(nullptr);
   {
     std::lock_guard lock(Mutex_);
     Stopped_ = true;
+    TailWaiting_ = false;
+    FlushBulk_ = false;
   }
-  SelectorCV_.notify_all();
   PrepCV_.notify_all();
   SerialCV_.notify_all();
   DrainCV_.notify_all();
 
-  SelectorThread_.join();
-  for (auto &thread: PrepThreads_)
+  for (std::thread &thread: PrepThreads_)
     thread.join();
   PrepThreads_.clear();
+  SerialCV_.notify_all();
   SerialThread_.join();
   Runner_.stop();
   Started_ = false;
 }
 
-void CBlockPipeline::wakeSelector()
+void CBlockPipeline::submit(BC::Common::BlockIndex *candidate)
 {
-  // The lock is what makes the wakeup safe against a selector about to sleep; taking it for
-  // every attached block would serialize the readers, so the flag filters the common case
-  if (SelectorWaiting_.load(std::memory_order_acquire)) {
-    std::lock_guard lock(Mutex_);
-    SelectorCV_.notify_one();
-  }
-}
+  if (!candidate || !candidate->ready())
+    return;
 
-CBlockPipeline::EResult CBlockPipeline::attachFromFile(const intrusive_ptr<CRawBlockData> &buffer,
-                                                       uint32_t offset,
-                                                       uint32_t size,
-                                                       uint32_t fileNo,
-                                                       uint32_t fileOffset)
-{
-  // Header is all that is parsed here: it names the index the data is attached to
-  BC::Proto::BlockHeader header;
+  // The cheap filter first: the walk below is as long as the backlog no segment has been cut
+  // from yet, and most offers lose to the tip already admitted
+  BC::Common::BlockIndex *checked = nullptr;
   {
-    xmstream stream(static_cast<uint8_t*>(buffer.get()->data()) + offset, size);
-    if (!BC::unserializeAndCheck(stream, header))
-      return Invalid;
+    std::lock_guard lock(Mutex_);
+    if (Stopped_)
+      return;
+    if (Candidate_ && !(candidate->ChainWork > Candidate_->ChainWork))
+      return;
+    checked = Candidate_;
   }
 
-  bool checkWork = true;
-  BC::Common::BlockIndex *index = attachBlockData(*BlockIndex_, *ChainParams_, header, header.GetHash(), &checkWork);
-  // Already have this block: the block files hold it twice, or it came from the network first
-  if (!index)
-    return NotStaged;
+  // A late child of a rejected branch can still reach the data combiner. The path below the tip
+  // already admitted passed this same check back then, and every BSInvalid drops Candidate_
+  // through resetLocked - so this is one block on a growing chain, the fork depth on a reorg
+  for (BC::Common::BlockIndex *index = candidate;
+       index && index != checked && !index->OnChain.load(std::memory_order_relaxed);
+       index = index->Prev) {
+    if (index->IndexState.load(std::memory_order_relaxed) == BSInvalid)
+      return;
+  }
 
-  std::unique_ptr<CBlockRawData> raw(new CBlockRawData);
-  raw->Buffer = buffer;
-  raw->Offset = offset;
-  raw->Size = size;
-  raw->FileNo = fileNo;
-  raw->FileOffset = fileOffset;
-  raw->CheckWork = checkWork;
+  std::lock_guard lock(Mutex_);
+  if (Stopped_)
+    return;
+  if (Candidate_ && !(candidate->ChainWork > Candidate_->ChainWork))
+    return;
 
-  Counters_.RawBytes.fetch_add(size, std::memory_order_relaxed);
-  index->Raw.store(raw.release(), std::memory_order_release);
-  FileBlocks_.push_back(index);
-
-  // Only now may the selector see the block: the data must be there before the topology says
-  // it is
-  ArrivalGen_.fetch_add(1, std::memory_order_release);
-  BlockIndex_->candidateTracker().update(index);
-  wakeSelector();
-  return Staged;
-}
-
-CBlockPipeline::EResult CBlockPipeline::attachFromNetwork(void *data,
-                                                          uint32_t size,
-                                                          uint32_t memorySize,
-                                                          const BC::Proto::BlockHeader &header,
-                                                          const BC::Proto::BlockHashTy &hash,
-                                                          bool relay,
-                                                          BC::Common::BlockIndex **attached)
-{
-  bool checkWork = true;
-  BC::Common::BlockIndex *index = attachBlockData(*BlockIndex_, *ChainParams_, header, hash, &checkWork);
-  if (!index)
-    return NotStaged;
-  *attached = index;
-
-  std::unique_ptr<CBlockRawData> raw(new CBlockRawData);
-  // Accounted in the block cache: the getdata scheduler throttles on it
-  raw->Buffer = intrusive_ptr<CRawBlockData>(new CRawBlockData(data, memorySize, &Storage_->cache()));
-  raw->Size = size;
-  raw->Exclusive = true;
-  raw->CheckWork = checkWork;
-  raw->Relay = relay;
-
-  Counters_.RawBytes.fetch_add(size, std::memory_order_relaxed);
-  index->Raw.store(raw.release(), std::memory_order_release);
-
-  ArrivalGen_.fetch_add(1, std::memory_order_release);
-  BlockIndex_->candidateTracker().update(index);
-  wakeSelector();
-  return Staged;
+  Candidate_ = candidate;
+  scheduleLocked();
+  DrainCV_.notify_all();
 }
 
 void CBlockPipeline::feed(std::unique_ptr<CSegment> segment)
 {
-  if (segment->Objects.empty())
+  if (!segment || segment->Objects.empty())
     return;
 
   std::unique_lock lock(Mutex_);
-  // The admission the selector obeys, for a feeder that has none. This is the whole backpressure
-  // of a catch-up run: the next batch is read only once this returns
-  DrainCV_.wait(lock, [this]() {
-    return Stopped_ || InFlight_ + Ready_.size() < Params_.ReadyQueueDepth + Params_.PrepLanes;
-  });
+  const size_t limit = std::max<size_t>(1, Params_.ReadyQueueDepth + std::max<size_t>(Params_.PrepLanes, 1));
+  DrainCV_.wait(lock, [this, limit]() { return Stopped_ || queuedLocked() < limit; });
   if (Stopped_)
     return;
 
-  Counters_.RawBytes.fetch_add(segment->RawBytes, std::memory_order_relaxed);
+  segment->CatchUp = true;
   segment->Seq = NextSeq_++;
-  segment->Gen = ResetGen_;
-  Pending_.push_back(std::move(segment));
-  InFlight_++;
-  PrepCV_.notify_one();
+  segment->Gen = Generation_;
+  Reorder_[segment->Seq] = std::move(segment);
+  publishReadyLocked();
 }
 
 bool CBlockPipeline::throttled() const
 {
-  // What the storage thread has to write and has not written yet: the archive is ten times
-  // slower than the chain advance, and without this the whole block file set ended up parsed
-  // in memory (6.9 GB on the LTC stand). Nothing to escape here - the storage thread drains it
-  if (Storage_->queuedMemory() >= Params_.StorageBacklogLimit)
+  // The serial stage reads utxo on every spend, and every unflushed layer is one more probe per
+  // lookup: this bounds the stack under the reader. The archive is not asked - its connect only
+  // writes, so its layers cost memory and no reads
+  if (Storage_->utxodb().pipelineFull())
     return true;
 
-  // Windows attached to an engine but not flushed yet: attach cannot refuse, so this is the
-  // only bound on them - the utxo engine fed by the serial thread and every archive engine
-  // fed by the storage queue. Nothing to escape either - the flushers drain them on their own
-  if (Storage_->utxodb().pipelineFull() || Storage_->archive().pipelineFull())
-    return true;
-
-  // Raw data waiting for preparation. A block whose predecessor is in an unread file waits for
-  // the reader, so a reader stopped while the pipeline idles would stall the chain
-  if (Counters_.RawBytes.load(std::memory_order_relaxed) >= Params_.RawSizeLimit)
-    return !starving();
-
-  // Prepared blocks the chain has not taken yet. Same escape: an idle pipeline is waiting for
-  // a block only the reader can bring, and holding the reader there deadlocks the chain
-  if (Storage_->cache().size() >= Params_.PreparedSizeLimit)
-    return !starving();
-
-  return false;
-}
-
-bool CBlockPipeline::starving() const
-{
-  std::lock_guard lock(Mutex_);
-  return drainedLocked();
-}
-
-// A block file buffer is shared by every block of it, so one block left raw (a fork block never
-// gets prepared) keeps all 128 Mb alive. After a few files of grace the rest gets private copies
-void CBlockPipeline::rotateFile()
-{
-  std::lock_guard lock(Mutex_);
-  RecentFiles_.emplace_back(std::move(FileBlocks_));
-  FileBlocks_.clear();
-  while (RecentFiles_.size() > FileGrace) {
-    Stragglers_.insert(Stragglers_.end(), RecentFiles_.front().begin(), RecentFiles_.front().end());
-    RecentFiles_.pop_front();
-  }
-  SelectorCV_.notify_one();
+  // No escape needed: the cache is released by whoever finishes with the blocks - a database
+  // dropping its share, the storage thread flushing what it wrote - never by the reader itself
+  return Storage_->cache().size() >= Params_.PreparedSizeLimit;
 }
 
 void CBlockPipeline::setBulkFeed(bool bulk)
 {
-  if (BulkFeed_.exchange(bulk, std::memory_order_acq_rel) && !bulk) {
-    // A held-back tail is waiting for exactly this
-    std::lock_guard lock(Mutex_);
-    SelectorCV_.notify_one();
+  if (BulkFeed_.exchange(bulk, std::memory_order_acq_rel) == bulk)
+    return;
+
+  std::lock_guard lock(Mutex_);
+  // Another edge may have won the mutex first. Only the current state is allowed to touch the
+  // queue; a stale edge can return because the newer one performs the same scheduling step.
+  if (Stopped_ || BulkFeed_.load(std::memory_order_acquire) != bulk)
+    return;
+
+  if (!bulk) {
+    FlushBulk_ = true;
+    TailWaiting_ = false;
   }
-}
-
-void CBlockPipeline::releaseStragglers()
-{
-  std::vector<BC::Common::BlockIndex*> stragglers;
-  {
-    std::lock_guard lock(Mutex_);
-    if (Stragglers_.empty())
-      return;
-    stragglers.swap(Stragglers_);
-  }
-
-  for (BC::Common::BlockIndex *index: stragglers) {
-    // In a segment: the preparation owns its data, and it is about to be parsed anyway
-    if (index->Prepared.load(std::memory_order_relaxed))
-      continue;
-
-    std::unique_ptr<CBlockRawData> raw(index->Raw.exchange(nullptr, std::memory_order_acq_rel));
-    if (!raw)
-      continue;
-
-    void *copy = operator new(raw->Size);
-    memcpy(copy, raw->data(), raw->Size);
-    raw->Buffer = intrusive_ptr<CRawBlockData>(new CRawBlockData(copy, raw->Size, nullptr));
-    raw->Offset = 0;
-    index->Raw.store(raw.release(), std::memory_order_release);
-  }
+  scheduleLocked();
+  DrainCV_.notify_all();
 }
 
 void CBlockPipeline::waitDrained()
@@ -267,156 +167,117 @@ void CBlockPipeline::waitDrained()
   DrainCV_.wait(lock, [this]() { return Stopped_ || drainedLocked(); });
 }
 
-// Data of a block is here, or can be brought back from disk
-static bool haveBlockData(BC::Common::BlockIndex *index)
+size_t CBlockPipeline::queuedLocked() const
 {
-  return index->Raw.load(std::memory_order_acquire) != nullptr ||
-         index->Serialized.get() != nullptr ||
-         (index->blockStored() && index->indexStored());
+  return Pending_.size() + Preparing_ + Reorder_.size() + Ready_.size();
 }
 
-static uint32_t blockRawSize(BC::Common::BlockIndex *index)
+bool CBlockPipeline::idleLocked() const
 {
-  if (CBlockRawData *raw = index->Raw.load(std::memory_order_acquire))
-    return raw->Size;
-  return index->SerializedBlockSize != std::numeric_limits<uint32_t>::max() ? index->SerializedBlockSize : 0;
-}
-
-// Path of the best candidate down to the preparation frontier, cut to the segment limits. The
-// index is the whole topology: what the arrival order of the data was does not matter here
-std::unique_ptr<CSegment> CBlockPipeline::bite(BC::Common::BlockIndex *frontier, bool floorActive, bool *deferred)
-{
-  *deferred = false;
-  CCandidateTracker &tracker = BlockIndex_->candidateTracker();
-
-  for (unsigned attempt = 0; attempt < 64; attempt++) {
-    BC::Common::BlockIndex *candidate = tracker.best();
-    if (!candidate || candidate == frontier)
-      return nullptr;
-
-    // Path from the candidate down. A block with no data takes everything above it: that part
-    // cannot connect before the hole is filled
-    std::vector<BC::Common::BlockIndex*> path;
-    BC::Common::BlockIndex *anchor = nullptr;
-    BC::Common::BlockIndex *invalid = nullptr;
-
-    for (BC::Common::BlockIndex *index = candidate; index; index = index->Prev) {
-      if (index == frontier || index->Prepared.load(std::memory_order_relaxed)) {
-        anchor = index;
-        break;
-      }
-      if (index->IndexState.load(std::memory_order_relaxed) == BSInvalid) {
-        invalid = index;
-        break;
-      }
-
-      if (haveBlockData(index))
-        path.push_back(index);
-      else
-        path.clear();
-    }
-
-    if (invalid) {
-      // Everything walked sits above a rejected block, so it is rejected too - otherwise the
-      // tracker hands the same dead tip back forever
-      size_t dropped = 0;
-      for (BC::Common::BlockIndex *index = candidate; index != invalid; index = index->Prev) {
-        index->IndexState.store(BSInvalid);
-        dropped++;
-      }
-      LOG_F(WARNING,
-            "Pull pipeline: %zu blocks above the rejected block %s dropped",
-            dropped,
-            invalid->Header.GetHash().getHexLE().c_str());
-      rescanCandidate();
-      continue;
-    }
-
-    if (!anchor || path.empty())
-      return nullptr;
-
-    // Collected top down
-    std::reverse(path.begin(), path.end());
-
-    // The bulk feed sends more right behind this run: below the floor it is dust that costs a
-    // serial pass per crumb, so leave it for a later bite
-    if (floorActive && path.size() < Params_.BiteFloorBlocks) {
-      size_t runBytes = 0;
-      for (BC::Common::BlockIndex *index: path) {
-        runBytes += blockRawSize(index);
-        if (runBytes >= Params_.BiteFloorSize)
-          break;
-      }
-      if (runBytes < Params_.BiteFloorSize) {
-        *deferred = true;
-        return nullptr;
-      }
-    }
-
-    auto segment = std::make_unique<CSegment>();
-    segment->Anchor = anchor;
-    segment->Reanchor = (anchor != frontier);
-    for (BC::Common::BlockIndex *index: path) {
-      uint32_t size = blockRawSize(index);
-
-      if (!segment->Objects.empty() &&
-          (segment->RawBytes + size > Params_.SegmentSizeLimit ||
-           segment->Objects.size() >= Params_.SegmentBlocksLimit))
-        break;
-
-      segment->Objects.emplace_back();
-      segment->Objects.back().Index = index;
-      segment->RawBytes += size;
-      index->Prepared.store(true, std::memory_order_relaxed);
-    }
-
-    return segment;
-  }
-
-  LOG_F(ERROR, "Pull pipeline: can't find a candidate to connect");
-  return nullptr;
-}
-
-// The tracker only ever hears about blocks as they arrive; after a rejection the tip it holds
-// may be gone, and the alternative is somewhere in the index
-void CBlockPipeline::rescanCandidate()
-{
-  BC::Common::BlockIndex *best = BlockIndex_->best();
-  for (const auto &entry: BlockIndex_->blockIndex()) {
-    BC::Common::BlockIndex *index = entry.second;
-    if (index->Height == std::numeric_limits<uint32_t>::max() ||
-        index->IndexState.load(std::memory_order_relaxed) == BSInvalid)
-      continue;
-    if (!index->Prepared.load(std::memory_order_relaxed) && !haveBlockData(index))
-      continue;
-    if (!best || index->ChainWork > best->ChainWork)
-      best = index;
-  }
-
-  BlockIndex_->candidateTracker().reset(best);
-}
-
-void CBlockPipeline::discard(CSegment &segment)
-{
-  for (CSegment::CObject &object: segment.Objects) {
-    if (object.Object.get())
-      object.Object.get()->validationData().dropPairs();
-    // A catch-up segment never took its blocks off the chain: clearing the mark would offer
-    // connected blocks to the selector again
-    if (!segment.CatchUp)
-      object.Index->Prepared.store(false, std::memory_order_relaxed);
-  }
-}
-
-bool CBlockPipeline::pipelineIdleLocked() const
-{
-  return Pending_.empty() && Reorder_.empty() && Ready_.empty() && !PrepBusy_ && !SerialBusy_;
+  return queuedLocked() == 0 && !SerialBusy_;
 }
 
 bool CBlockPipeline::drainedLocked() const
 {
-  return pipelineIdleLocked() && !SelectorBusy_ && !FloorWait_ &&
-         IdleAt_ == ArrivalGen_.load(std::memory_order_acquire);
+  return idleLocked() && !TailWaiting_ && !FlushBulk_ && !Resetting_;
+}
+
+std::unique_ptr<CSegment> CBlockPipeline::makeSegmentLocked()
+{
+  if (!Candidate_ || !Frontier_ || Candidate_ == Frontier_)
+    return nullptr;
+
+  // Down from the candidate to whichever comes first: the frontier it extends, or the connected
+  // chain it forks off. Both terminators bound the walk - without them an offer from another
+  // branch reaches the genesis block, once per offer and with a chain-sized vector behind it
+  std::vector<BC::Common::BlockIndex*> &path = Path_;
+  BC::Common::BlockIndex *index = Candidate_;
+  path.clear();
+  while (index && index != Frontier_ && !index->OnChain.load(std::memory_order_relaxed)) {
+    if (index->IndexState.load(std::memory_order_relaxed) == BSInvalid) {
+      // The branch died under us. Back to the settled chain, so its work stops being the bar
+      // every later offer has to clear: the rescan that follows a rejection brings the next one
+      Candidate_ = BlockIndex_->best();
+      TailWaiting_ = false;
+      return nullptr;
+    }
+    path.push_back(index);
+    index = index->Prev;
+  }
+
+  // Ended on the connected chain instead of the frontier: a fork, and one branch is not prepared
+  // while another is in flight. Frontier_ moves only when a segment is actually cut, below, so a
+  // walk that ends empty leaves it where it was
+  if (!index || (index != Frontier_ && !idleLocked()))
+    return nullptr;
+
+  if (path.empty())
+    return nullptr;
+  std::reverse(path.begin(), path.end());
+
+  const bool bulkFeed = BulkFeed_.load(std::memory_order_acquire);
+  const bool bulk = bulkFeed || FlushBulk_;
+  if (bulkFeed && !FlushBulk_ && path.size() < Params_.BiteFloorBlocks) {
+    size_t bytes = 0;
+    for (BC::Common::BlockIndex *entry: path)
+      bytes += entry->SerializedBlockSize;
+    if (bytes < Params_.BiteFloorSize) {
+      TailWaiting_ = true;
+      return nullptr;
+    }
+  }
+
+  auto segment = std::make_unique<CSegment>();
+  const size_t blocksLimit = bulk ? std::max<size_t>(Params_.SegmentBlocksLimit, 1) : 1;
+  for (BC::Common::BlockIndex *entry: path) {
+    const uint32_t size = entry->SerializedBlockSize;
+    if (!segment->Objects.empty() &&
+        (segment->Objects.size() >= blocksLimit ||
+         (bulk && segment->Size + size > Params_.SegmentSizeLimit)))
+      break;
+
+    segment->Objects.emplace_back().Index = entry;
+    segment->Size += size;
+  }
+
+  Frontier_ = segment->Objects.back().Index;
+  TailWaiting_ = false;
+  if (FlushBulk_ && Frontier_ == Candidate_)
+    FlushBulk_ = false;
+  return segment;
+}
+
+void CBlockPipeline::scheduleLocked()
+{
+  if (Stopped_)
+    return;
+
+  if (Resetting_) {
+    if (Preparing_ || SerialBusy_)
+      return;
+    // Both are read from the settled chain here: a best snapshot taken at reset time goes stale
+    // if the serial stage was still connecting. A submit that arrived meanwhile keeps its offer
+    BC::Common::BlockIndex *best = BlockIndex_->best();
+    Frontier_ = best;
+    if (!Candidate_ || best->ChainWork > Candidate_->ChainWork)
+      Candidate_ = best;
+    Resetting_ = false;
+  }
+
+  const size_t limit = std::max<size_t>(1, Params_.ReadyQueueDepth + std::max<size_t>(Params_.PrepLanes, 1));
+  while (queuedLocked() < limit) {
+    std::unique_ptr<CSegment> segment = makeSegmentLocked();
+    if (!segment)
+      break;
+
+    segment->Seq = NextSeq_++;
+    segment->Gen = Generation_;
+    Pending_.push_back(std::move(segment));
+    PrepCV_.notify_one();
+  }
+
+  if (FlushBulk_ && Candidate_ == Frontier_)
+    FlushBulk_ = false;
 }
 
 void CBlockPipeline::publishReadyLocked()
@@ -429,117 +290,42 @@ void CBlockPipeline::publishReadyLocked()
   }
 }
 
-// A segment that falls apart takes the ones bitten after it with it: they continue a chain that
-// is not going to happen. Whoever is preparing one right now sees the generation move and drops
-// its result, so the sequence can start over from here
-void CBlockPipeline::resetLocked(BC::Common::BlockIndex *frontier, std::vector<std::unique_ptr<CSegment>> &dropped)
+void CBlockPipeline::resetLocked(std::vector<std::unique_ptr<CSegment>> &dropped)
 {
-  ResetGen_++;
-  Frontier_ = frontier;
-  FloorWait_ = false;
+  Generation_++;
+  // Dropped, not snapshotted: the tip that led here may be the rejected branch, and holding it
+  // would make its work the bar every later offer has to clear. scheduleLocked picks up the
+  // settled chain once the queues run out
+  Candidate_ = nullptr;
+  Frontier_ = nullptr;
+  TailWaiting_ = false;
+  Resetting_ = true;
 
-  for (auto &entry: Pending_) {
-    InFlight_--;
-    dropped.push_back(std::move(entry));
-  }
+  for (auto &segment: Pending_)
+    dropped.push_back(std::move(segment));
   Pending_.clear();
   for (auto &entry: Reorder_)
     dropped.push_back(std::move(entry.second));
   Reorder_.clear();
-  for (auto &entry: Ready_)
-    dropped.push_back(std::move(entry));
+  for (auto &segment: Ready_)
+    dropped.push_back(std::move(segment));
   Ready_.clear();
 
   NextSeq_ = 0;
   PublishSeq_ = 0;
 }
 
-void CBlockPipeline::selector()
+void CBlockPipeline::discard(CSegment &segment)
 {
-  loguru::set_thread_name("selector");
-
-  BC::Common::BlockIndex *frontier = nullptr;
-  uint64_t gen = std::numeric_limits<uint64_t>::max();
-
-  for (;;) {
-    uint64_t arrival;
-    bool floorActive;
-    {
-      std::unique_lock lock(Mutex_);
-      for (;;) {
-        if (Stopped_)
-          return;
-        if (InFlight_ + Ready_.size() < Params_.ReadyQueueDepth + Params_.PrepLanes &&
-            (IdleAt_ != ArrivalGen_.load(std::memory_order_acquire) ||
-             (FloorWait_ && pipelineIdleLocked())))
-          break;
-
-        SelectorWaiting_.store(true, std::memory_order_release);
-        DrainCV_.notify_all();
-        SelectorCV_.wait(lock);
-        SelectorWaiting_.store(false, std::memory_order_release);
-      }
-
-      if (gen != ResetGen_) {
-        gen = ResetGen_;
-        frontier = Frontier_;
-      }
-      arrival = ArrivalGen_.load(std::memory_order_acquire);
-      FloorWait_ = false;
-      // An idle pipeline takes anything: connecting dust beats connecting nothing. A busy one
-      // holds the floor even with empty queues - dust accumulates into a segment while the
-      // serial stage chews, and that is the whole point
-      floorActive = BulkFeed_.load(std::memory_order_relaxed) && !pipelineIdleLocked();
-      SelectorBusy_ = true;
-    }
-    releaseStragglers();
-
-    bool deferred = false;
-    std::unique_ptr<CSegment> segment = bite(frontier, floorActive, &deferred);
-
-    // The candidate is not on the chain the queue was built for: what is in flight would be
-    // connected only to be disconnected again. Let the pipeline run out first, then take the
-    // fork from the settled chain
-    if (segment && segment->Reanchor) {
-      std::unique_lock lock(Mutex_);
-      if (!pipelineIdleLocked()) {
-        SelectorBusy_ = false;
-        SelectorWaiting_.store(true, std::memory_order_release);
-        DrainCV_.notify_all();
-        lock.unlock();
-        discard(*segment);
-        segment.reset();
-        lock.lock();
-        DrainCV_.wait(lock, [this]() { return Stopped_ || pipelineIdleLocked(); });
-        SelectorWaiting_.store(false, std::memory_order_release);
-        gen = ResetGen_;
-        frontier = Frontier_;
-        continue;
-      }
-    }
-
-    std::lock_guard lock(Mutex_);
-    if (segment && gen == ResetGen_) {
-      frontier = segment->Objects.back().Index;
-      segment->Seq = NextSeq_++;
-      segment->Gen = gen;
-      Pending_.push_back(std::move(segment));
-      InFlight_++;
-      PrepCV_.notify_one();
-    } else if (segment) {
-      // The chain moved while this one was being bitten
-      discard(*segment);
-      segment.reset();
-    } else if (gen == ResetGen_) {
-      // A deferred run still sleeps until the next arrival, but the pipeline going idle also
-      // wakes it up - and drainedLocked() knows the data is not connected yet
-      IdleAt_ = arrival;
-      FloorWait_ = deferred;
-    }
-
-    SelectorBusy_ = false;
-    DrainCV_.notify_all();
+  for (CSegment::CObject &entry: segment.Objects) {
+    if (entry.Object.get())
+      entry.Object.get()->validationData().dropPairs();
   }
+}
+
+void CBlockPipeline::rescanCandidate()
+{
+  submit(bestReadyBlock(*BlockIndex_));
 }
 
 void CBlockPipeline::prepare()
@@ -553,51 +339,36 @@ void CBlockPipeline::prepare()
       PrepCV_.wait(lock, [this]() { return Stopped_ || !Pending_.empty(); });
       if (Pending_.empty())
         return;
-
       segment = std::move(Pending_.front());
       Pending_.pop_front();
-      PrepBusy_++;
+      Preparing_++;
     }
 
-    bool ok = prepareSegment(*BlockIndex_, *ChainParams_, *Storage_, Runner_, *segment, Counters_, Params_.Prefetch);
-
+    const bool ok = prepareSegment(*ChainParams_, *Storage_, Runner_, *segment, Params_.Prefetch);
+    bool needRescan = false;
     std::vector<std::unique_ptr<CSegment>> dropped;
     {
       std::lock_guard lock(Mutex_);
-      PrepBusy_--;
-      InFlight_--;
-
-      if (segment->Gen != ResetGen_) {
-        // Prepared against a chain that is not there any more
+      Preparing_--;
+      if (segment->Gen != Generation_) {
         dropped.push_back(std::move(segment));
       } else if (ok) {
         Reorder_[segment->Seq] = std::move(segment);
         publishReadyLocked();
-      } else if (segment->CatchUp) {
-        // A stored block that does not rebuild means a damaged block database, and there is no
-        // fork to fall back to. Published all the same: a hole in the sequence would leave
-        // everything after it waiting forever. The sink drops it once it sees the flag
-        CatchUpFailed_.store(true, std::memory_order_relaxed);
-        Reorder_[segment->Seq] = std::move(segment);
-        publishReadyLocked();
       } else {
-        // Something in the segment was rejected by its own checks; the block is BSInvalid now,
-        // so the next bite stops before it and the good part comes back as a segment of its own
-        BC::Common::BlockIndex *anchor = segment->Anchor;
         dropped.push_back(std::move(segment));
-        resetLocked(anchor, dropped);
+        resetLocked(dropped);
+        needRescan = true;
       }
+      scheduleLocked();
+      DrainCV_.notify_all();
+      SerialCV_.notify_all();
     }
 
     for (auto &entry: dropped)
       discard(*entry);
-    dropped.clear();
-
-    {
-      std::lock_guard lock(Mutex_);
-      DrainCV_.notify_all();
-    }
-    SelectorCV_.notify_one();
+    if (needRescan)
+      rescanCandidate();
   }
 }
 
@@ -609,78 +380,66 @@ void CBlockPipeline::serial()
     std::unique_ptr<CSegment> segment;
     {
       std::unique_lock lock(Mutex_);
-      SerialCV_.wait(lock, [this]() { return Stopped_ || !Ready_.empty(); });
+      SerialCV_.wait(lock, [this]() {
+        return !Ready_.empty() ||
+               (Stopped_ && Pending_.empty() && Preparing_ == 0 && Reorder_.empty());
+      });
       if (Ready_.empty())
         return;
-
       segment = std::move(Ready_.front());
       Ready_.pop_front();
       SerialBusy_ = true;
-      // Room for one more: a feeder on the admission need not wait for this one to be applied
+      scheduleLocked();
       DrainCV_.notify_all();
     }
-    SelectorCV_.notify_one();
 
-    // Blocks the chain already holds: nothing to connect or rebase, they only have to reach the
-    // databases that missed them in this order - the one thing this stage is for here
-    if (segment->CatchUp) {
-      CatchUpSink_(std::move(segment));
-
-      {
-        std::lock_guard lock(Mutex_);
-        SerialBusy_ = false;
-        DrainCV_.notify_all();
-      }
-      SelectorCV_.notify_one();
-      continue;
-    }
-
-    size_t failedAt = 0;
-    bool ok = connectSegment(*BlockIndex_, *ChainParams_, *Storage_, Runner_, *segment, &failedAt);
-
-    // Whatever the advance did, it queued it here: a disconnect leaves no connected block
-    // behind, and a task nobody wakes the storage thread for waits for the next one forever
-    Storage_->wakeUp();
-
+    bool needRescan = false;
     std::vector<std::unique_ptr<CSegment>> dropped;
-    if (ok) {
-      if (Callback_) {
-        std::vector<BC::Common::BlockIndex*> relay;
-        for (const CSegment::CObject &object: segment->Objects) {
-          if (object.Relay)
-            relay.push_back(object.Index);
-        }
-        if (!relay.empty())
-          Callback_(relay);
-      }
-      segment.reset();
+
+    if (segment->CatchUp) {
+      if (CatchUpSink_)
+        CatchUpSink_(std::move(segment));
     } else {
-      BC::Common::BlockIndex *bad = segment->Objects[failedAt].Index;
-      LOG_F(ERROR,
-            "Block %s (%u) rejected by the chain state",
-            bad->Header.GetHash().getHexLE().c_str(),
-            bad->Height);
-      bad->IndexState.store(BSInvalid);
+      size_t failedAt = 0;
+      const bool ok = connectSegment(*BlockIndex_, *ChainParams_, *Storage_, Runner_, *segment, &failedAt);
+      Storage_->wakeUp();
 
-      dropped.push_back(std::move(segment));
-      {
+      if (ok) {
+        if (Callback_) {
+          std::vector<BC::Common::BlockIndex*> relay;
+          for (const CSegment::CObject &entry: segment->Objects) {
+            if (entry.Relay)
+              relay.push_back(entry.Index);
+          }
+          if (!relay.empty())
+            Callback_(relay);
+        }
+      } else {
+        BC::Common::BlockIndex *bad = segment->Objects[failedAt].Index;
+        LOG_F(ERROR,
+              "Block %s (%u) rejected by the chain state",
+              bad->Header.GetHash().getHexLE().c_str(),
+              bad->Height);
+        bad->IndexState.store(BSInvalid);
+        dropped.push_back(std::move(segment));
+
         std::lock_guard lock(Mutex_);
-        resetLocked(BlockIndex_->best(), dropped);
+        resetLocked(dropped);
+        needRescan = true;
       }
-
-      for (auto &entry: dropped)
-        discard(*entry);
-      dropped.clear();
-      rescanCandidate();
     }
+
+    for (auto &entry: dropped)
+      discard(*entry);
 
     {
       std::lock_guard lock(Mutex_);
       SerialBusy_ = false;
+      scheduleLocked();
       DrainCV_.notify_all();
+      SerialCV_.notify_all();
     }
-    SelectorCV_.notify_one();
+    if (needRescan)
+      rescanCandidate();
   }
 }
-
-

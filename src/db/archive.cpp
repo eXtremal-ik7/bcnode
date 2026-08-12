@@ -59,6 +59,9 @@ void Archive::submit(CConnectTask &task)
   {
     std::lock_guard lock(ConnectMutex_);
     task.Pending = AllDb_.size();
+    // A share of the data for every worker, taken before they can see the task
+    if (task.Segment)
+      task.Segment->shareAdd(AllDb_.size());
     for (auto &queue: ConnectQueues_)
       queue.push_back(&task);
   }
@@ -98,6 +101,10 @@ void Archive::connectWorker(size_t slot)
     }
 
     connectSlot(slot, *task);
+
+    // Done reading the batch: nothing below may touch Batch or Segment again
+    if (task->Segment)
+      CSegment::shareRelease(task->Segment);
 
     bool done;
     {
@@ -181,26 +188,23 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   AddrDb_ = setupHandler<IAddrDb>(cfg, "addr", EIQueryAddr, dbIndexMap, AllDb_);
   SpentDb_ = setupHandler<ISpentDb>(cfg, "spent", EIQuerySpent, dbIndexMap, AllDb_);
 
-  BC::Common::BlockIndex *utxoBestBlock;
+  BC::Common::BlockIndex *utxoFirstBlock = nullptr;
   std::vector<BC::Common::BlockIndex*> utxoDisconnect;
   std::vector<std::vector<BC::Common::BlockIndex*>> archiveDisconnect;
-  std::vector<BaseWithBest> archiveDatabases;
+  std::vector<BC::Common::BlockIndex*> archiveFirstBlocks;
   archiveDisconnect.resize(AllDb_.size());
-  archiveDatabases.resize(AllDb_.size());
+  archiveFirstBlocks.resize(AllDb_.size());
 
   // Initialize all databases
-  if (!storage.utxodb().initialize(blockIndex, utxoPath, storage, cfg, &utxoBestBlock, utxoDisconnect))
+  if (!storage.utxodb().initialize(blockIndex, utxoPath, storage, cfg, &utxoFirstBlock, utxoDisconnect))
     return false;
   for (size_t i = 0; i < AllDb_.size(); i++) {
-    BaseWithBest &current = archiveDatabases[i];
-    current.Base = AllDb_[i].get();
-
     // Get custom database path from config
     std::string scope = "archive." + AllDb_[i]->name();
     const char *p = cfg->lookupString(scope.c_str(), "path", nullptr);
     std::filesystem::path dbPath = p ? p : dataDir / AllDb_[i]->name();
 
-    if (!AllDb_[i]->initialize(blockIndex, dbPath, storage, cfg, &current.BestBlock, archiveDisconnect[i]))
+    if (!AllDb_[i]->initialize(blockIndex, dbPath, storage, cfg, &archiveFirstBlocks[i], archiveDisconnect[i]))
       return false;
   }
 
@@ -221,12 +225,12 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   // Connect. The databases wake up at different heights, so the catch-up feeds
   // one batch to all of them and each takes the tail that is new to it
   for (size_t i = 0; i < AllDb_.size(); i++) {
-    setConnectFrom(i, archiveDatabases[i].BestBlock ? archiveDatabases[i].BestBlock->Height
-                                                    : std::numeric_limits<uint32_t>::max());
+    setConnectFrom(i, archiveFirstBlocks[i] ? archiveFirstBlocks[i]->Height
+                                            : std::numeric_limits<uint32_t>::max());
   }
 
-  bool connected = dbConnectBlocks(storage.utxodb(), utxoBestBlock, archiveDatabases, this,
-                                   blockIndex, storage, pipeline, params,
+  bool connected = dbConnectBlocks(storage.utxodb(), utxoFirstBlock, archiveFirstBlocks, this,
+                                   blockIndex, chainParams, storage, pipeline, params,
                                    "utxo & archive databases");
 
   // Everyone is level from here on: a batch goes to every database whole

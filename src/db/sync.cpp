@@ -35,50 +35,50 @@ static size_t tailFrom(uint32_t connectHeight, uint32_t firstHeight)
   return connectHeight > firstHeight ? connectHeight - firstHeight : 0;
 }
 
-// A batch the databases are still reading: submit() does not wait, so it has to outlive the call
-// that posted it. Everything the refs point at lives in the segment
+// A batch the databases are still reading: submit() does not wait, so the refs have to outlive
+// the call that posted it. The blocks they point at do not - those go with the last share
 struct CInFlightBatch {
-  std::unique_ptr<CSegment> Segment;
   std::vector<BC::DB::CBlockRef> Refs;
   BC::DB::Archive::CConnectTask Task;
 };
 
 bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
-                     BC::Common::BlockIndex *utxoBestBlock,
-                     std::vector<BaseWithBest> archiveDatabases,
+                     BC::Common::BlockIndex *utxoFirstBlock,
+                     const std::vector<BC::Common::BlockIndex*> &archiveFirstBlocks,
                      BC::DB::Archive *archive,
                      BlockInMemoryIndex &blockIndex,
+                     BC::Common::ChainParams &chainParams,
                      BC::DB::Storage &storage,
                      CBlockPipeline &pipeline,
                      const CBlockPipeline::CParams &params,
                      const char *name)
 {
-  uint32_t utxoBestHeight = utxoBestBlock ? utxoBestBlock->Height : std::numeric_limits<uint32_t>::max();
+  const uint32_t utxoFirstHeight = utxoFirstBlock ?
+                                   utxoFirstBlock->Height :
+                                   std::numeric_limits<uint32_t>::max();
 
-  BC::Common::BlockIndex *firstCommon = utxoBestBlock;
-  uint32_t firstCommonHeight = utxoBestHeight;
+  BC::Common::BlockIndex *firstNeeded = utxoFirstBlock;
+  uint32_t firstNeededHeight = utxoFirstHeight;
 
-  for (size_t i = 0; i < archiveDatabases.size(); i++) {
-    BC::Common::BlockIndex *best = archiveDatabases[i].BestBlock;
-    if (best && best->Height < firstCommonHeight) {
-      firstCommon = best;
-      firstCommonHeight = firstCommon->Height;
+  for (BC::Common::BlockIndex *first: archiveFirstBlocks) {
+    if (first && first->Height < firstNeededHeight) {
+      firstNeeded = first;
+      firstNeededHeight = first->Height;
     }
   }
 
   // A database opened empty asks to start at the genesis block, which is in no block file and
   // which no path ever connects - the chain starts above it
-  if (firstCommon && firstCommon == blockIndex.genesis())
-    firstCommon = firstCommon->Next;
+  if (firstNeeded == blockIndex.genesis())
+    firstNeeded = firstNeeded->Next;
 
-  if (!firstCommon) {
+  if (!firstNeeded) {
     LOG_F(INFO, "%s is up to date", name);
     return true;
   }
 
   BC::Common::BlockIndex *best = blockIndex.best();
-  // firstCommon is the first block to connect, not the one already applied
-  uint32_t count = best->Height - firstCommon->Height + 1;
+  const uint32_t count = best->Height - firstNeeded->Height + 1;
   LOG_F(INFO, "Update %s: connecting %u blocks", name, count);
 
   // As deep as the pipeline admits work: inside this window a fast database is free to run
@@ -95,19 +95,19 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
 
   // Called by the serial stage, in chain order, one batch at a time
   pipeline.setCatchUpSink([&](std::unique_ptr<CSegment> segment) {
-    // Something earlier did not rebuild: the rest only passes through so the ordering can drain
-    if (pipeline.catchUpFailed())
-      return;
-
     auto entry = std::make_unique<CInFlightBatch>();
-    entry->Segment = std::move(segment);
-    entry->Refs.reserve(entry->Segment->Objects.size());
-    for (CSegment::CObject &object: entry->Segment->Objects) {
+    entry->Refs.reserve(segment->Objects.size());
+    for (CSegment::CObject &object: segment->Objects) {
       BC::Common::CIndexCacheObject *cached = object.Object.get();
       entry->Refs.push_back(BC::DB::CBlockRef{object.Index, cached->block(), &cached->linkedOutputs(), &cached->validationData()});
     }
 
     const uint32_t firstHeight = entry->Refs.front().Index->Height;
+
+    // This thread reads the batch below, so it takes a share of its own; submit() takes one more
+    // for every database
+    CSegment *data = segment.release();
+    data->shareAdd(1);
 
     // Archive first and without waiting: its workers chew while this thread takes the utxo and
     // the lanes prepare the next batch
@@ -115,24 +115,28 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
       entry->Task.Batch = entry->Refs;
       entry->Task.BlockIndex = &blockIndex;
       entry->Task.BlockDb = &storage.blockDb();
+      entry->Task.Segment = data;
       entry->Task.FirstHeight = firstHeight;
       archive->submit(entry->Task);
     }
 
     // utxo has no worker of its own: it belongs to this thread
-    const size_t utxoSkip = tailFrom(utxoBestHeight, firstHeight);
+    const size_t utxoSkip = tailFrom(utxoFirstHeight, firstHeight);
     if (utxoSkip < entry->Refs.size())
       utxoDb.connect(BC::DB::CBlockBatch(entry->Refs).subspan(utxoSkip), blockIndex, storage.blockDb());
 
     fed += static_cast<uint32_t>(entry->Refs.size());
-    fedBytes += entry->Segment->RawBytes;
+    fedBytes += data->Size;
     while (portionNum < 20 && fed >= (portionNum + 1) * portionSize) {
       portionNum++;
       LOG_F(INFO, "%u%% done, block %u, %.1lf MB", portionNum*5, entry->Refs.back().Index->Height, fedBytes / 1048576.0);
     }
 
-    // Without an archive the batch is done the moment utxo took it; with one, the ring is how
-    // far the feed may run ahead of the slowest worker
+    // This thread is done with the blocks; whichever database finishes last frees them
+    CSegment::shareRelease(data);
+
+    // The ring is how far the feed may run ahead of the slowest worker. It holds the refs the
+    // workers still read, not the blocks - those are gone by then
     if (archive) {
       ring.push_back(std::move(entry));
       while (ring.size() > ringDepth) {
@@ -145,10 +149,16 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
   auto startTime = std::chrono::steady_clock::now();
   uint64_t totalBytesRead = 0;
 
-  CCatchUpReader reader(storage.blockDb(), firstCommon, params.SegmentSizeLimit, params.SegmentBlocksLimit);
+  CCatchUpReader reader(storage.blockDb(),
+                        chainParams,
+                        storage.cache(),
+                        firstNeeded,
+                        params.SegmentSizeLimit,
+                        params.SegmentBlocksLimit,
+                        params.WaveThreads);
   for (;;) {
-    // The limits the reindex reader obeys too: engines over their admission limit, prepared and
-    // raw data waiting to be taken
+    // The same limits the reindex reader obeys: the utxo engine over its admission limit, and
+    // decoded blocks the chain has not taken yet
     while (pipeline.throttled())
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
@@ -156,11 +166,9 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
     if (!segment)
       break;
 
-    totalBytesRead += segment->RawBytes;
+    totalBytesRead += segment->Size;
     // Returns once the pipeline has room for it
     pipeline.feed(std::move(segment));
-    if (pipeline.catchUpFailed())
-      break;
   }
 
   pipeline.waitDrained();
@@ -172,7 +180,7 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
   }
   pipeline.setCatchUpSink(nullptr);
 
-  if (reader.failed() || pipeline.catchUpFailed())
+  if (reader.failed())
     return false;
 
   LOG_F(INFO, "100%% done");

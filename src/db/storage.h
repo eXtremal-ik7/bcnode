@@ -29,13 +29,11 @@ enum ActionTy {
 struct Task {
   ActionTy Type = Connect;
   BC::Common::BlockIndex *Index = nullptr;
-  // Block data the task keeps alive until it is written; the reader throttles on the sum
-  size_t Memory = 0;
   // Last block of the batch the mutator handed over: where the storage thread cuts its own
   bool BatchEnd = false;
   Task() {};
-  Task(ActionTy type, BC::Common::BlockIndex *index, size_t memory, bool batchEnd = false) :
-    Type(type), Index(index), Memory(memory), BatchEnd(batchEnd) {}
+  Task(ActionTy type, BC::Common::BlockIndex *index, bool batchEnd = false) :
+    Type(type), Index(index), BatchEnd(batchEnd) {}
 };
 
 
@@ -72,10 +70,6 @@ public:
   void flush();
 
   tbb::concurrent_queue<Task> &queue() { return Queue_; }
-  // Parsed block data of tasks queued but not processed yet. The block cache cannot serve as
-  // the read ahead measure: it counts the data the pipeline itself holds in flight, and a
-  // reader throttled on that runs in lockstep with the chain
-  size_t queuedMemory() const { return QueuedMemory_.load(std::memory_order_relaxed); }
 
 private:
   static void timerCb(aioUserEvent*, void *arg) { static_cast<Storage*>(arg)->onTimer(); }
@@ -103,12 +97,10 @@ private:
   // parsed block data the refs point into, so both live exactly as long as the batch does
   std::vector<CBlockRef> Batch_;
   std::vector<intrusive_ptr<BC::Common::CIndexCacheObject>> BatchObjects_;
-  size_t BatchMemory_ = 0;
 
   std::vector<BC::Common::BlockIndex*> CachedBlocks_;
   std::chrono::time_point<std::chrono::steady_clock> LastFlushTime_ = std::chrono::steady_clock::now();
 
-  std::atomic<size_t> QueuedMemory_ = 0;
   CAllocationInfo BlockCache;
   UTXODb UTXODb_;
 };
