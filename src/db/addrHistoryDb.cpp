@@ -22,13 +22,14 @@ bool AddrHistoryDb::queryAddrHistory(const BC::Script::CAddress &address, size_t
   return false;
 }
 
-bool AddrHistoryDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
+bool AddrHistoryDb::initializeImpl(config4cpp::Configuration*)
 {
   return true;
 }
 
-void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddress> &writer, BlockInMemoryIndex&, BlockDatabase&)
+void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
+  dbengine::CKvWriter<BC::Script::CAddress> writer = liveWriter();
   // Two passes over the batch, and the blocks are walked in the first one only.
   // A tail is allocated once at its final length, so the window ends up holding
   // exactly what these blocks add - growing tails in place recopied them on
@@ -161,18 +162,22 @@ void AddrHistoryDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddres
 
   for (const CTouch &touch: touches)
     cursors[touch.KeyId].append(touch.Item);
+  commit(writer, batch.back().Index->Header.GetHash());
 }
 
-void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex*,
+void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
                                    const BC::Proto::Block &block,
                                    const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                                    const BC::Proto::CBlockValidationData&,
-                                   CKvWriter<BC::Script::CAddress> &writer,
                                    BlockInMemoryIndex&,
                                    BlockDatabase&)
 {
-  if (block.vtx.empty())
+  dbengine::CKvWriter<BC::Script::CAddress> writer = liveWriter();
+  // Nothing to undo, but the position still moves off this block
+  if (block.vtx.empty()) {
+    commit(writer, index->Header.hashPrevBlock);
     return;
+  }
 
   std::unordered_map<BC::Script::CAddress, size_t> txMap;
 
@@ -219,6 +224,7 @@ void AddrHistoryDb::disconnectImpl(const BC::Common::BlockIndex*,
 
   for (const auto &addr: txMap)
     this->truncate(writer, addr.first, addr.second);
+  commit(writer, index->Header.hashPrevBlock);
 }
 
 }

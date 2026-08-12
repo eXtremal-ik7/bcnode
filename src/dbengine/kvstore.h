@@ -5,44 +5,68 @@
 
 #pragma once
 
-// The database half of the engine: shards, base configuration, stamp and
-// chain position - everything CKvEngine deliberately does not know. connect()
-// hands a CKvWriter over the active eras down and commits the unit's
-// watermark; what a layer becomes on disk is the family fold below -
-// CKvBase is the KV one (last write wins), merge/array bring their own.
+// The database half of the engine: shards, column families, base configuration
+// and the position stamp - everything CKvEngine deliberately does not know, and
+// nothing at all about what the records mean. The stamp is opaque here: bytes
+// read back at open and written down at every flush. Who turns them into a
+// place in a chain is chaindb.h, one level up.
+//
+// A mutation takes a CKvWriter over the active eras and ends with commit(),
+// which publishes the unit as one revision; what a layer becomes on disk is the
+// family fold below - CKvBase is the KV one (last write wins), merge and array
+// bring their own.
 
 #include "common/utils.h"
-#include "db/common.h"
-#include "db/kvview.h"
+#include "dbengine/kvview.h"
 
+#include "config4cpp/Configuration.h"
 #include <rocksdb/cache.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/merge_operator.h>
 #include <rocksdb/slice_transform.h>
 #include <rocksdb/table.h>
 
-#include <chrono>
 #include <algorithm>
+#include <filesystem>
 #include <map>
+#include <string>
 #include <thread>
+#include <vector>
 
-namespace BC {
-namespace DB {
+namespace dbengine {
+
+#pragma pack(push, 1)
+struct CBaseCfg {
+  uint32_t Version;
+  uint32_t ShardsNum;
+};
+#pragma pack(pop)
 
 template<typename CKey>
-class CKvDatabase : public BaseInterface, public IKvSegmentWriter<CKey> {
+class CKvStore : public IKvSegmentWriter<CKey> {
 public:
-  CKvDatabase(const std::string &name) { Name_ = name; }
+  using KeyType = CKey;
+
+  CKvStore(const std::string &name) : Name_(name) {}
 
   // Shutdown order: the engine waits out the readers still inside a call, the
   // handles of the named families go next, and the shards close with this object
-  ~CKvDatabase() override {
+  ~CKvStore() override {
     Engine_.shutdown();
     for (size_t i = 0; i < ColumnFamilies_.size(); i++) {
       for (auto &entry: ColumnFamilies_[i])
         OnDiskStorage_[i]->DestroyColumnFamilyHandle(entry.second);
     }
   }
+
+  // What open() found on disk. The stamp is not interpreted here - the caller
+  // knows what those bytes stand for
+  struct COpenResult {
+    // Some shard carried no stamp: this database has no position at all
+    bool Fresh = false;
+    // The position every shard agreed on; meaningless when Fresh
+    BaseBlob<256> Stamp;
+  };
 
   // Empty name keeps rocksdb's own default; an unknown one is a config typo
   // and must not silently fall back to something else
@@ -59,22 +83,17 @@ public:
     return defaultValue;
   }
 
-  bool initialize(BlockInMemoryIndex &blockIndex,
-                  const std::filesystem::path &dbPath,
-                  BC::DB::Storage &storage,
-                  config4cpp::Configuration *cfg,
-                  BC::Common::BlockIndex **forConnect,
-                  std::vector<BC::Common::BlockIndex*> &forDisconnect) final {
+  // Opens every shard, checks the base configuration against this build, reads
+  // back the stamp the last flush left and starts the engine over the result
+  bool open(const std::filesystem::path &dbPath, config4cpp::Configuration *cfg, COpenResult &result) {
     BaseCfg_.ShardsNum = static_cast<unsigned>(cfg->lookupInt(Name_.c_str(), "shardsNum", 1));
     BaseCfg_.Version = version();
 
-    BC::Common::BlockIndex *bestIndex = blockIndex.best();
     OnDiskStorage_.resize(BaseCfg_.ShardsNum);
     ColumnFamilies_.resize(BaseCfg_.ShardsNum);
-    *forConnect = nullptr;
 
     // Open all shards
-    BC::Proto::BlockHashTy stamp;
+    BaseBlob<256> stamp;
     std::vector<rocksdb::DB*> shards;
     for (size_t i = 0; i < BaseCfg_.ShardsNum; i++) {
       auto shardPath = dbPath / std::to_string(i);
@@ -198,39 +217,28 @@ public:
       // Check stamp (last known block)
       std::string stampData;
       if (!isEmpty && db->Get(rocksdb::ReadOptions(), rocksdb::Slice("stamp"), &stampData).ok()) {
-        if (stampData.size() != sizeof(BC::Proto::BlockHashTy)) {
+        if (stampData.size() != sizeof(BaseBlob<256>)) {
           LOG_F(ERROR, "%s is corrupted: invalid stamp size (%s)", Name_.c_str(), shardPathUtf8.c_str());
           return false;
         }
 
         FreshAtOpen_ = false;
-        BC::Proto::BlockHashTy shardStamp;
-        memcpy(shardStamp.begin(), stampData.data(), sizeof(BC::Proto::BlockHashTy));
+        BaseBlob<256> shardStamp;
+        memcpy(shardStamp.begin(), stampData.data(), sizeof(BaseBlob<256>));
         if (i == 0) {
           stamp = shardStamp;
-          auto It = blockIndex.blockIndex().find(stamp);
-          if (It == blockIndex.blockIndex().end()) {
-            LOG_F(ERROR,
-                  "%s is corrupted: stamp %s not exists in block index (%s)",
-                  Name_.c_str(),
-                  stamp.getHexLE().c_str(),
-                  shardPathUtf8.c_str());
-            return false;
-          }
+          result.Stamp = shardStamp;
 
-          // flushAll() stamps every shard with CurrentBlock_, so the position
-          // must be known right after open, before any block is connected
-          CurrentBlock_ = stamp;
-
-          // Build connect and disconnect block set if need
-          *forConnect = It->second == bestIndex ? nullptr : rebaseChain(bestIndex, It->second, forDisconnect);
+          // flushAll() stamps every shard with it, so the position must be
+          // known right after open, before any unit is written
+          Stamp_ = shardStamp;
         } else if (shardStamp != stamp) {
           LOG_F(ERROR, "%s is corrupted: shard %zu has different stamp", Name_.c_str(), i);
           return false;
         }
       } else {
-        // database is empty, run full rescanning
-        *forConnect = blockIndex.genesis();
+        // nothing stored yet: whoever opened this has to fill it from scratch
+        result.Fresh = true;
       }
     }
 
@@ -239,7 +247,7 @@ public:
     // Before the engine takes its initial snapshots: initializeImpl writes to
     // the shards directly (the merge family rebuilds index rows), and a write
     // landing after a snapshot stays invisible to reads until the first flush
-    if (!initializeImpl(cfg, storage))
+    if (!initializeImpl(cfg))
       return false;
 
     typename CKvEngine<CKey>::CConfig engineCfg;
@@ -248,40 +256,19 @@ public:
     return Engine_.initialize(engineCfg, shards, this);
   }
 
-  // One write set per unit, published as one revision: the unit is a run of
-  // blocks, a block connected on its own is a batch of one
-  void connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, BlockDatabase &blockDb) final {
-    if (batch.empty())
-      return;
-    CKvWriter<CKey> writer = Engine_.liveWriter();
-    connectImpl(batch, writer, blockIndex, blockDb);
-    finishMutation(writer, batch.back().Index->Header.GetHash());
-  }
-
-  void disconnect(const BC::Common::BlockIndex *index,
-                  const BC::Proto::Block &block,
-                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                  const BC::Proto::CBlockValidationData &validationData,
-                  BlockInMemoryIndex &blockIndex,
-                  BlockDatabase &blockDb) final {
-    CKvWriter<CKey> writer = Engine_.liveWriter();
-    disconnectImpl(index, block, linkedOutputs, validationData, writer, blockIndex, blockDb);
-    finishMutation(writer, index->Header.hashPrevBlock);
-  }
-
   // Frozen eras waiting for the flusher: the commit cannot refuse, so the
   // pipeline stops admitting work on this instead (blockPipeline throttled())
-  bool pipelineFull() const final { return Engine_.isPipelineFull(); }
+  bool pipelineFull() const { return Engine_.isPipelineFull(); }
 
   // Checkpoint: everything attached reaches the disk, then every shard is
-  // stamped - including untouched ones, initialize() rejects disagreeing stamps
-  void flush() final { Engine_.flushAll(CurrentBlock_); }
+  // stamped - including untouched ones, open() rejects disagreeing stamps
+  void flush() { Engine_.flushAll(Stamp_); }
 
   // Waits for the automatic compaction to work off the debt, and not a forced
   // CompactRange: the run owes the levels it dirtied, not a rewrite of a
   // bottom level it never touched. flush() must have run first - what sits in
   // a memtable is not the backend's to compact
-  void settle() final {
+  void settle() {
     for (auto &shard: OnDiskStorage_) {
       rocksdb::WaitForCompactOptions options;
       options.flush = true;
@@ -291,6 +278,8 @@ public:
         LOG_F(ERROR, "%s: waiting for compaction failed: %s", Name_.c_str(), status.ToString().c_str());
     }
   }
+
+  const std::string &name() const { return Name_; }
 
   virtual uint32_t version() = 0;
   // Family-level knobs, read before initializeImpl - the leaves override that one
@@ -305,38 +294,31 @@ public:
   // to be; the default one carries the service keys and needs nothing
   virtual void columnFamilyOptions(const std::string&, rocksdb::ColumnFamilyOptions&,
                                    const std::shared_ptr<rocksdb::Cache>&) {}
-  virtual bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) = 0;
+  virtual bool initializeImpl(config4cpp::Configuration *cfg) = 0;
 
   // Only the families whose fold needs one (merge, array) return an operator
   virtual rocksdb::MergeOperator *mergeOperator() { return nullptr; }
 
-  // The write set is an argument, not state: this is the same set that will
-  // later be filled in prepare and brought here ready
-  virtual void connectImpl(CBlockBatch batch,
-                           CKvWriter<CKey> &writer,
-                           BlockInMemoryIndex &blockIndex,
-                           BlockDatabase &blockDb) = 0;
-
-  virtual void disconnectImpl(const BC::Common::BlockIndex *index,
-                              const BC::Proto::Block &block,
-                              const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                              const BC::Proto::CBlockValidationData &validationData,
-                              CKvWriter<CKey> &writer,
-                              BlockInMemoryIndex &blockIndex,
-                              BlockDatabase &blockDb) = 0;
+  // Second half of open, run once the startup catch-up is over: what a database
+  // is better off building from the finished data than maintaining unit by unit
+  virtual bool finishInitialBuild() { return true; }
 
 protected:
-  // Tail of every chain mutation, both directions: the position moves to where
-  // the operation left the database, and the commit publishes the unit's cut
-  void finishMutation(CKvWriter<CKey> &writer, const BC::Proto::BlockHashTy &newTip) {
-    CurrentBlock_ = newTip;
-    Engine_.commitLive(writer, newTip);
+  // A write set over the active eras. Ends at commit() or it never happened -
+  // an uncommitted writer discards its records on destruction
+  CKvWriter<CKey> liveWriter() { return Engine_.liveWriter(); }
+
+  // Tail of every mutation: the position moves to where the operation left the
+  // database, and the unit is published as one revision
+  void commit(CKvWriter<CKey> &writer, const BaseBlob<256> &stamp) {
+    Stamp_ = stamp;
+    Engine_.commitLive(writer, stamp);
   }
 
   // Every batch carries the stamp: without WAL a crash rolls data and position
   // back together
-  static void putStamp(rocksdb::WriteBatch &batch, const BC::Proto::BlockHashTy &stamp) {
-    batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(stamp.begin()), sizeof(BC::Proto::BlockHashTy)));
+  static void putStamp(rocksdb::WriteBatch &batch, const BaseBlob<256> &stamp) {
+    batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(stamp.begin()), sizeof(BaseBlob<256>)));
   }
 
   static void writeBatch(rocksdb::DB *db, rocksdb::WriteBatch &batch) {
@@ -401,6 +383,12 @@ private:
   }
 
 protected:
+  std::string Name_;
+
+  // Where the last committed unit left this database. Opaque bytes: what they
+  // point at is the caller's business
+  BaseBlob<256> Stamp_;
+
   // Configuration
   CBaseCfg BaseCfg_;
 
@@ -420,68 +408,4 @@ protected:
   CKvEngine<CKey> Engine_;
 };
 
-// Plain key-value: the newest record of a key wins, and a lookup stops at the
-// first layer that has it
-template<typename CKey>
-class CKvBase : public CKvDatabase<CKey> {
-public:
-  CKvBase(const std::string &name) : CKvDatabase<CKey>(name) {}
-
-  // The flusher dispatches the folds implemented at this level: stop it
-  // while the dispatch is still valid (~CKvDatabase's shutdown is a no-op then)
-  ~CKvBase() override { this->Engine_.shutdown(); }
-
-protected:
-  // The published revision and nothing else. One guard per call for now: the
-  // wave and the prefetch each holding one per pass is a pipeline change
-  template<typename F>
-  bool find(const CKey &key, F &&callback) const {
-    CKvGuard<CKey> guard = this->Engine_.guard();
-    return this->Engine_.find(guard, key, callback);
-  }
-
-  // One sealed layer, one batch, in memcmp order of keys (what the memtable
-  // insert hint wants): the newest record per key goes as a Put, a tombstone
-  // that may exist below as a Delete, a pair born and died here not at all
-  void writeLayer(rocksdb::DB *db, size_t shardIndex, const CLayer<CKey> *layer, const BC::Proto::BlockHashTy &stamp) final {
-    layer->buildScattered();
-
-    rocksdb::WriteBatch batch(layer->BatchBytesBound + 64);
-    this->putStamp(batch, stamp);
-
-    size_t written = 0;
-    size_t annihilated = 0;
-    for (size_t b = 0; b < KvScatterBuckets && !layer->Scattered.empty(); b++) {
-      kvSortBucket(layer->Scattered, layer->Bounds, b);
-      const uint32_t total = static_cast<uint32_t>(layer->Scattered.size());
-      for (uint32_t k = b ? layer->Bounds[b - 1] : 0, end = layer->Bounds[b]; k < end; k++) {
-        if (k + KvPrefetchDistance < total) {
-          const CKvSortedRef<CKey> &ahead = layer->Scattered[k + KvPrefetchDistance];
-          kvPrefetch(ahead.Entry);
-          kvPrefetch(ahead.Key);
-        }
-        const CKvSortedRef<CKey> &ref = layer->Scattered[k];
-        const CGenRecord *rec = static_cast<const CGenRecord*>(ref.Entry);
-
-        rocksdb::Slice keySlice(reinterpret_cast<const char*>(ref.Key), sizeof(CKey));
-        if (!rec->tombstone()) {
-          batch.Put(keySlice, rocksdb::Slice(static_cast<const char*>(rec->payload()), rec->size()));
-          written++;
-        } else if (rec->mayExistBelow()) {
-          batch.Delete(keySlice);
-          written++;
-        } else {
-          // born and died without the disk ever hearing about it
-          annihilated++;
-        }
-      }
-    }
-
-    this->writeBatch(db, batch);
-    LOG_F(1, "%s: shard %zu flushed %zu records, %zu pairs annihilated, %zu MB",
-          this->Name_.c_str(), shardIndex, written, annihilated, layer->Bytes >> 20);
-  }
-};
-
-}
 }

@@ -30,17 +30,16 @@
 // merge() commutative/associative, negate() gives the inverse delta for
 // disconnect.
 
-#include "db/kvbase.h"
+#include "dbengine/kvstore.h"
 
 #include "thirdparty/ankerl/unordered_dense.h"
 
 #include <chrono>
 
-namespace BC {
-namespace DB {
+namespace dbengine {
 
 template<typename CKey, typename CValue>
-class CKvMergeBase : public CKvDatabase<CKey> {
+class CKvMergeBase : public CKvStore<CKey> {
 protected:
   // Extract computes at full width; Width is the metric column's size in
   // bytes - what the key stores and what every comparison is canonical to
@@ -155,10 +154,10 @@ private:
   };
 
 public:
-  CKvMergeBase(const std::string &name) : CKvDatabase<CKey>(name) {}
+  CKvMergeBase(const std::string &name) : CKvStore<CKey>(name) {}
 
   // The flusher dispatches the folds implemented at this level: stop it
-  // while the dispatch is still valid (~CKvDatabase's shutdown is a no-op then)
+  // while the dispatch is still valid (~CKvStore's shutdown is a no-op then)
   ~CKvMergeBase() override { this->Engine_.shutdown(); }
 
   rocksdb::MergeOperator *mergeOperator() final { return new MergeOperator(); }
@@ -183,7 +182,7 @@ public:
 
   // The deferred half of initialize: the catch-up is over, the windows it left
   // go to disk and the rank rows are built from them in one scan per shard
-  bool finishInitialBuild() final {
+  bool finishInitialBuild() override {
     if (DeferredIndexes_.empty())
       return true;
 
@@ -214,7 +213,7 @@ public:
     return true;
   }
 
-  bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&) final {
+  bool initializeImpl(config4cpp::Configuration *cfg) final {
     // Resolve the configured index list against the set registered by the subclass
     config4cpp::StringVector names;
     cfg->lookupList(this->Name_.c_str(), "indexes", names, config4cpp::StringVector());
@@ -432,7 +431,7 @@ protected:
   // One sealed layer, one batch in memcmp order of keys: the newest record
   // per key is the cumulative delta of the whole layer - one operand per key,
   // the fold is just dropping the identities
-  void writeLayer(rocksdb::DB *db, size_t shardIndex, const CLayer<CKey> *layer, const BC::Proto::BlockHashTy &stamp) final {
+  void writeLayer(rocksdb::DB *db, size_t shardIndex, const CLayer<CKey> *layer, const BaseBlob<256> &stamp) final {
     layer->buildScattered();
 
     std::vector<std::pair<const CKey*, CValue>> folded;
@@ -458,7 +457,7 @@ private:
   void flushFolded(rocksdb::DB *db,
                    size_t shardIndex,
                    const std::vector<std::pair<const CKey*, CValue>> &folded,
-                   const BC::Proto::BlockHashTy &stamp) {
+                   const BaseBlob<256> &stamp) {
     rocksdb::ColumnFamilyHandle *dataCf = DataCf_[shardIndex];
 
     // Reserved once: without it the batch string of a whole layer doubles
@@ -794,5 +793,4 @@ private:
   std::string DeferredCfg_;
 };
 
-}
 }

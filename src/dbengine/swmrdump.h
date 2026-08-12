@@ -39,7 +39,7 @@
 // Condemned entries are dumped like any others: the floor restarts at zero
 // on load and the next maintain() re-derives it from the same population.
 
-#include "swmrcache.h"
+#include "dbengine/swmrcache.h"
 #include "common/file.h"
 
 #include <cstddef>
@@ -56,6 +56,8 @@
 #include <thread>
 #include <type_traits>
 #include <vector>
+
+namespace dbengine {
 
 struct SSwmrDumpStamp {
   uint64_t Height = 0;
@@ -608,4 +610,6 @@ bool swmrDumpLoad(CSwmrCache<ValueT> &cache,
     return false;
   }
   return true;
+}
+
 }

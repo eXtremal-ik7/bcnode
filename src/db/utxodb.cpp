@@ -4,7 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "utxodb.h"
-#include "db/swmrdump.h"
+#include "dbengine/swmrdump.h"
 #include "common/smallStream.h"
 #include "loguru.hpp"
 #include <chrono>
@@ -46,7 +46,7 @@ bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvecto
   });
 }
 
-bool UTXODb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
+bool UTXODb::initializeImpl(config4cpp::Configuration *cfg)
 {
   int cacheSizeMb = cfg->lookupInt("utxo", "cacheSizeMb", 0);
   if (cacheSizeMb <= 0)
@@ -57,10 +57,10 @@ bool UTXODb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
   if (CacheDumpThreads_ == 0)
     CacheDumpThreads_ = 1;
 
-  Cache_.init(CSwmrCache<CUtxoCacheValue>::limitForMemory(static_cast<size_t>(cacheSizeMb) << 20));
+  Cache_.init(dbengine::CSwmrCache<CUtxoCacheValue>::limitForMemory(static_cast<size_t>(cacheSizeMb) << 20));
   LOG_F(INFO, "utxo cache: limit %zu entries, table %zu MB (faulted lazily)", Cache_.limit(), Cache_.memoryBytes() >> 20);
 
-  if (CurrentBlock_.isNull())
+  if (Stamp_.isNull())
     return true;
 
   // Warm start: the dump is accepted only at the exact database position
@@ -68,19 +68,19 @@ bool UTXODb::initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage&)
   if (CacheBlockIndex_ && std::filesystem::exists(dumpPath)) {
     // The stamp always resolves: initialize() has already rejected a
     // database whose stamp is not in the block index
-    auto It = CacheBlockIndex_->blockIndex().find(CurrentBlock_);
+    auto It = CacheBlockIndex_->blockIndex().find(Stamp_);
     if (It != CacheBlockIndex_->blockIndex().end()) {
-      SSwmrDumpStamp stamp;
+      dbengine::SSwmrDumpStamp stamp;
       stamp.Height = It->second->Height;
-      memcpy(stamp.BlockHash, CurrentBlock_.begin(), sizeof(stamp.BlockHash));
+      memcpy(stamp.BlockHash, Stamp_.begin(), sizeof(stamp.BlockHash));
 
-      SSwmrDumpLoadOptions options;
+      dbengine::SSwmrDumpLoadOptions options;
       options.ValueVersion = version();
       options.Threads = CacheDumpThreads_;
 
       std::string error;
       auto startTime = std::chrono::steady_clock::now();
-      if (swmrDumpLoad(Cache_, dumpPath, stamp, options, &error)) {
+      if (dbengine::swmrDumpLoad(Cache_, dumpPath, stamp, options, &error)) {
         double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count() / 1000.0;
         LOG_F(INFO, "utxo cache: %zu entries loaded from dump (%.2lf seconds)", Cache_.size(), elapsed);
       } else {
@@ -142,24 +142,24 @@ void UTXODb::warmupFromDb()
 
 void UTXODb::saveCache()
 {
-  if (!Cache_.enabled() || !CacheBlockIndex_ || CurrentBlock_.isNull())
+  if (!Cache_.enabled() || !CacheBlockIndex_ || Stamp_.isNull())
     return;
 
-  auto It = CacheBlockIndex_->blockIndex().find(CurrentBlock_);
+  auto It = CacheBlockIndex_->blockIndex().find(Stamp_);
   if (It == CacheBlockIndex_->blockIndex().end())
     return;
 
-  SSwmrDumpStamp stamp;
+  dbengine::SSwmrDumpStamp stamp;
   stamp.Height = It->second->Height;
-  memcpy(stamp.BlockHash, CurrentBlock_.begin(), sizeof(stamp.BlockHash));
+  memcpy(stamp.BlockHash, Stamp_.begin(), sizeof(stamp.BlockHash));
 
-  SSwmrDumpSaveOptions options;
+  dbengine::SSwmrDumpSaveOptions options;
   options.ValueVersion = version();
   options.Threads = CacheDumpThreads_;
 
   std::string error;
   auto startTime = std::chrono::steady_clock::now();
-  if (swmrDumpSave(Cache_, CacheDir_ / CacheDumpFileName, stamp, options, &error)) {
+  if (dbengine::swmrDumpSave(Cache_, CacheDir_ / CacheDumpFileName, stamp, options, &error)) {
     double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count() / 1000.0;
     LOG_F(INFO, "utxo cache: %zu entries saved to dump (%.2lf seconds)", Cache_.size(), elapsed);
   } else {
@@ -169,8 +169,9 @@ void UTXODb::saveCache()
 
 // The connect walk. Honours the run pair marks: an output spent inside the
 // run is invisible outside it, so neither the log nor the cache ever sees it
-void UTXODb::connectImpl(CBlockBatch batch, CKvWriter<CUnspentOutputKey> &writer, BlockInMemoryIndex&, BlockDatabase&)
+void UTXODb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
+  dbengine::CKvWriter<CUnspentOutputKey> writer = liveWriter();
   for (const CBlockRef &ref: batch) {
     const BC::Proto::Block &block = *ref.Block;
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
@@ -231,6 +232,7 @@ void UTXODb::connectImpl(CBlockBatch batch, CKvWriter<CUnspentOutputKey> &writer
     assert(inOrdinal == validationData.InputLocalTx.size());
     assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
   }
+  commit(writer, batch.back().Index->Header.GetHash());
 }
 
 // The disconnect walk. It does not honour the run pair marks: a same-block
@@ -238,14 +240,14 @@ void UTXODb::connectImpl(CBlockBatch batch, CKvWriter<CUnspentOutputKey> &writer
 // the hiding ends - the input puts the output back although the connect never
 // took it away, and the marks are dropped right after, so from here both
 // blocks are plain
-void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
+void UTXODb::disconnect(const BC::Common::BlockIndex *index,
                             const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             const BC::Proto::CBlockValidationData &validationData,
-                            CKvWriter<CUnspentOutputKey> &writer,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
+  dbengine::CKvWriter<CUnspentOutputKey> writer = liveWriter();
   assert(validationData.TxIds.size() == block.vtx.size());
   assert(linkedOutputs.Tx.size() == block.vtx.size());
   // The creation height of a restored output is unknown here; the height of
@@ -301,6 +303,7 @@ void UTXODb::disconnectImpl(const BC::Common::BlockIndex *index,
   }
   assert(inOrdinal == validationData.InputLocalTx.size());
   assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
+  commit(writer, index->Header.hashPrevBlock);
 }
 
 }

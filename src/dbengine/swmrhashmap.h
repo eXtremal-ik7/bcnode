@@ -61,6 +61,8 @@
 #include <intrin.h>
 #endif
 
+namespace dbengine {
+
 template<typename CKey, typename CHasher = std::hash<CKey>>
 class CSwmrHashMap {
 private:
@@ -369,3 +371,5 @@ private:
     }
   }
 };
+
+}

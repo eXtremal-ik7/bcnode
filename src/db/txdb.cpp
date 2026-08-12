@@ -38,13 +38,14 @@ bool TxDb::queryTransaction(const BC::Proto::TxHashTy &txid,
   return true;
 }
 
-bool TxDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
+bool TxDb::initializeImpl(config4cpp::Configuration*)
 {
   return true;
 }
 
-void TxDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Proto::TxHashTy> &writer, BlockInMemoryIndex&, BlockDatabase&)
+void TxDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
+  dbengine::CKvWriter<BC::Proto::TxHashTy> writer = liveWriter();
   SmallStream<4096> stream;
   for (const CBlockRef &ref: batch) {
     const BC::Proto::Block &block = *ref.Block;
@@ -66,19 +67,21 @@ void TxDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Proto::TxHashTy> &writer
       writer.putNew(validationData.TxIds[i], stream.data(), stream.sizeOf());
     }
   }
+  commit(writer, batch.back().Index->Header.GetHash());
 }
 
-void TxDb::disconnectImpl(const BC::Common::BlockIndex*,
+void TxDb::disconnect(const BC::Common::BlockIndex *index,
                           const BC::Proto::Block &block,
                           const BC::Proto::CBlockLinkedOutputs&,
                           const BC::Proto::CBlockValidationData &validationData,
-                          CKvWriter<BC::Proto::TxHashTy> &writer,
                           BlockInMemoryIndex&,
                           BlockDatabase&)
 {
+  dbengine::CKvWriter<BC::Proto::TxHashTy> writer = liveWriter();
   assert(validationData.TxIds.size() == block.vtx.size());
   for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
     writer.erase(validationData.TxIds[i]);
+  commit(writer, index->Header.hashPrevBlock);
 }
 
 }

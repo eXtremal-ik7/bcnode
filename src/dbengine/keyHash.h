@@ -12,6 +12,8 @@
 #include <intrin.h>
 #endif
 
+namespace dbengine {
+
 // The one place where a key becomes a table position. A txid is already a cryptographic hash:
 // its words are uniform in every bit, so nothing here mixes them - it only folds vout in with
 // odd multipliers and hands the words out. A table keyed by a txid alone needs none of this and
@@ -43,4 +45,6 @@ inline size_t fastrange(uint64_t h, size_t n)
 #else
   return static_cast<size_t>((static_cast<unsigned __int128>(h) * n) >> 64);
 #endif
+}
+
 }

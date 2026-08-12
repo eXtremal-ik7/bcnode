@@ -20,10 +20,10 @@
 // reads, shutdown(), close the shards. shutdown() waits out readers still
 // inside a call, whose revisions hold snapshots.
 
-#include "common/blockDataBase.h"
 #include "common/intrusive_ptr.h"
-#include "db/keyHash.h"
-#include "db/kvlayer.h"
+#include "dbengine/keyHash.h"
+#include "dbengine/kvlayer.h"
+#include "loguru.hpp"
 
 #include <rocksdb/db.h>
 #include <rocksdb/write_batch.h>
@@ -37,8 +37,7 @@
 #include <thread>
 #include <vector>
 
-namespace BC {
-namespace DB {
+namespace dbengine {
 
 // Shards are fixed when the database is created, so the per-revision array is
 // too
@@ -243,7 +242,7 @@ public:
   virtual void writeLayer(rocksdb::DB *db,
                           size_t shardIndex,
                           const CLayer<CKey> *layer,
-                          const BC::Proto::BlockHashTy &stamp) = 0;
+                          const BaseBlob<256> &stamp) = 0;
 };
 
 template<typename CKey>
@@ -362,7 +361,7 @@ public:
   // watermark rides the revision swap; an era at its byte threshold freezes
   // right here. NOT thread-safe: one external mutator serializes every
   // commitLive() - readers and the flusher may run concurrently
-  void commitLive(CKvWriter<CKey> &writer, const BC::Proto::BlockHashTy &stamp) {
+  void commitLive(CKvWriter<CKey> &writer, const BaseBlob<256> &stamp) {
     assert(writer.shardsNum() == ShardsNum_);
     assert(!stopped());
     writer.Committed_ = true;
@@ -405,7 +404,7 @@ public:
   // Checkpoint and shutdown: everything committed reaches the disk, then every
   // shard - including those that never saw a write - gets the stamp, which
   // initialize() rejects the database for if the shards disagree
-  void flushAll(const BC::Proto::BlockHashTy &stamp) {
+  void flushAll(const BaseBlob<256> &stamp) {
     assert(!stopped());
     if (stamp.isNull())
       return;
@@ -432,7 +431,7 @@ public:
     writeOptions.disableWAL = true;
     for (size_t i = 0; i < ShardsNum_; i++) {
       rocksdb::WriteBatch batch;
-      batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(stamp.begin()), sizeof(BC::Proto::BlockHashTy)));
+      batch.Put(rocksdb::Slice("stamp"), rocksdb::Slice(reinterpret_cast<const char*>(stamp.begin()), sizeof(BaseBlob<256>)));
       guard.view()->Shards[i].Disk.get()->Db->Write(writeOptions, &batch);
     }
   }
@@ -706,5 +705,4 @@ private:
   std::thread FlushThread_;
 };
 
-}
 }

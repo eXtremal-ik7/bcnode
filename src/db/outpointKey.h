@@ -6,7 +6,7 @@
 #pragma once
 
 #include "BC/bc.h"
-#include "db/keyHash.h"
+#include "dbengine/keyHash.h"
 #include <functional>
 
 // One output of one transaction: the key of every database that answers a
@@ -28,6 +28,6 @@ template<>
 class std::hash<COutpointKey> {
 public:
   size_t operator()(const COutpointKey &key) const noexcept {
-    return static_cast<size_t>(hashOutpoint(key.Tx.begin(), key.Index).H1);
+    return static_cast<size_t>(dbengine::hashOutpoint(key.Tx.begin(), key.Index).H1);
   }
 };

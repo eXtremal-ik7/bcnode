@@ -441,7 +441,7 @@ int main(int argc, char **argv)
     BC::Common::BlockIndex *utxoFirstBlock = nullptr;
     std::vector<BC::Common::BlockIndex*> forDisconnect;
 
-    if (!context.Storage.utxodb().initialize(context.BlockIndex, context.UtxoDir, context.Storage, cfg, &utxoFirstBlock, forDisconnect))
+    if (!context.Storage.utxodb().initialize(context.BlockIndex, context.UtxoDir, cfg, &utxoFirstBlock, forDisconnect))
       return 1;
     if (!BC::DB::dbDisconnectBlocks(context.Storage.utxodb(), context.BlockIndex, context.ChainParams, context.Storage, forDisconnect))
       return 1;

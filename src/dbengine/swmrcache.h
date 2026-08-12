@@ -32,7 +32,7 @@
 //
 // ValueT must be trivially copyable and expose a public uint32_t Height.
 
-#include "db/keyHash.h"
+#include "dbengine/keyHash.h"
 #include <atomic>
 #include <algorithm>
 #include <cassert>
@@ -45,6 +45,8 @@
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
+
+namespace dbengine {
 
 template<typename ValueT>
 class CSwmrCache {
@@ -655,3 +657,5 @@ public:
   double sweepPasses() const { return NumBuckets_ ? static_cast<double>(SweptBucketCount_) / NumBuckets_ : 0.0; }
   uint64_t sweptBytes() const { return SweptBucketCount_ * (sizeof(uint64_t) + SLOTS_PER_BUCKET * sizeof(SSlot)); }
 };
+
+}

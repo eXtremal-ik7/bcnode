@@ -6,16 +6,18 @@
 #pragma once
 
 #include "db/common.h"
-#include "db/kvbase.h"
+#include "db/queries.h"
+#include "db/chaindb.h"
+#include "dbengine/kvbase.h"
 
 namespace BC {
 namespace DB {
 
 class TxDb :
-  public CKvBase<BC::Proto::TxHashTy>,
+  public CChainDb<dbengine::CKvBase<BC::Proto::TxHashTy>>,
   public ITransactionDb {
 public:
-  TxDb() : CKvBase<BC::Proto::TxHashTy>("txdb.full") {}
+  TxDb() : CChainDb<dbengine::CKvBase<BC::Proto::TxHashTy>>("txdb.full") {}
   virtual ~TxDb() {}
 
   void *interface(int interface) {
@@ -30,6 +32,17 @@ public:
                         BlockDatabase &blockDb,
                         CQueryTransactionResult &result);
 
+  void connect(CBlockBatch batch,
+               BlockInMemoryIndex &blockIndex,
+               BlockDatabase &blockDb) final;
+
+  void disconnect(const BC::Common::BlockIndex *index,
+                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  const BC::Proto::CBlockValidationData &validationData,
+                  BlockInMemoryIndex &blockIndex,
+                  BlockDatabase &blockDb) final;
+
 private:
   // The height and not the block hash: this database only ever holds rows of the
   // connected chain (disconnect erases them), so a height names one block
@@ -39,20 +52,7 @@ private:
   };
 
   uint32_t version() final { return 1; }
-  bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
-
-  void connectImpl(CBlockBatch batch,
-                   CKvWriter<BC::Proto::TxHashTy> &writer,
-                   BlockInMemoryIndex &blockIndex,
-                   BlockDatabase &blockDb);
-
-  void disconnectImpl(const BC::Common::BlockIndex *index,
-                      const BC::Proto::Block &block,
-                      const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                      const BC::Proto::CBlockValidationData &validationData,
-                      CKvWriter<BC::Proto::TxHashTy> &writer,
-                      BlockInMemoryIndex &blockIndex,
-                      BlockDatabase &blockDb);
+  bool initializeImpl(config4cpp::Configuration *cfg);
 };
 
 }

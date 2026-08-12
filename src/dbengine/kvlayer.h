@@ -13,9 +13,9 @@
 // outgrown table misses only keys inserted after the swap, all above any
 // watermark it can hold.
 
-#include "common/blockDataBase.h"
+#include "common/baseBlob.h"
 #include "common/mlog.h"
-#include "db/swmrhashmap.h"
+#include "dbengine/swmrhashmap.h"
 
 #include <p2putils/strExtras.h>
 
@@ -25,8 +25,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace BC {
-namespace DB {
+namespace dbengine {
 
 // One version of one key: payload follows the header, the previous version's
 // pointer - when one exists - precedes it
@@ -243,7 +242,7 @@ public:
   uintptr_t ref_fetch_add(uintptr_t n) const { return Refs_.fetch_add(n, std::memory_order_relaxed); }
   uintptr_t ref_fetch_sub(uintptr_t n) const { return Refs_.fetch_sub(n, std::memory_order_acq_rel); }
 
-  BC::Proto::BlockHashTy Stamp;
+  BaseBlob<256> Stamp;
   size_t Bytes = 0;
 
   // The freeze handshake: zero while the layer is the live era, its place in
@@ -329,5 +328,4 @@ private:
   std::atomic<uint32_t> Watermark_{0};
 };
 
-}
 }

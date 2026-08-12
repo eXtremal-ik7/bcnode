@@ -6,10 +6,11 @@
 #pragma once
 
 #include "db/common.h"
-#include "db/keyHash.h"
-#include "db/kvbase.h"
+#include "dbengine/keyHash.h"
+#include "db/chaindb.h"
+#include "dbengine/kvbase.h"
 #include "db/outpointKey.h"
-#include "db/swmrcache.h"
+#include "dbengine/swmrcache.h"
 #include "BTC/script.h"
 
 // The key is the outpoint shared with spentdb; the name says what it means here
@@ -33,9 +34,9 @@ struct CUtxoCacheValue {
 // packing (creationHeight << 1) | isCoinbase, the Core-style coin metadata
 // (coinbase maturity, BIP68, warmup scan by height). query() strips the
 // suffix: every consumer above sees pure UnspentOutputInfo bytes
-class UTXODb : public CKvBase<CUnspentOutputKey> {
+class UTXODb : public CChainDb<dbengine::CKvBase<CUnspentOutputKey>> {
 public:
-  UTXODb() : CKvBase<CUnspentOutputKey>("utxo") {}
+  UTXODb() : CChainDb<dbengine::CKvBase<CUnspentOutputKey>>("utxo") {}
   virtual ~UTXODb() {}
   void *interface(int) final { return nullptr; }
   // Seqlock cache probe, then shard logs and RocksDB. Concurrent loaders
@@ -57,22 +58,20 @@ public:
   // matches the database stamp
   void saveCache();
 
+  void connect(CBlockBatch batch,
+               BlockInMemoryIndex &blockIndex,
+               BlockDatabase &blockDb) final;
+
+  void disconnect(const BC::Common::BlockIndex *index,
+                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  const BC::Proto::CBlockValidationData &validationData,
+                  BlockInMemoryIndex &blockIndex,
+                  BlockDatabase &blockDb) final;
+
 private:
   uint32_t version() final { return 1; }
-  bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) override;
-
-  void connectImpl(CBlockBatch batch,
-                   CKvWriter<CUnspentOutputKey> &writer,
-                   BlockInMemoryIndex &blockIndex,
-                   BlockDatabase &blockDb) override;
-
-  void disconnectImpl(const BC::Common::BlockIndex *index,
-                      const BC::Proto::Block &block,
-                      const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                      const BC::Proto::CBlockValidationData &validationData,
-                      CKvWriter<CUnspentOutputKey> &writer,
-                      BlockInMemoryIndex &blockIndex,
-                      BlockDatabase &blockDb) override;
+  bool initializeImpl(config4cpp::Configuration *cfg) override;
 
   // No-dump warmup: one streaming pass over the shards, inserting every
   // record with its true creation height; the floor eviction keeps roughly
@@ -97,7 +96,7 @@ private:
   }
 
 private:
-  CSwmrCache<CUtxoCacheValue> Cache_;
+  dbengine::CSwmrCache<CUtxoCacheValue> Cache_;
   std::filesystem::path CacheDir_;
   BlockInMemoryIndex *CacheBlockIndex_ = nullptr;
   unsigned CacheDumpThreads_ = 1;

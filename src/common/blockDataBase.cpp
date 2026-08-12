@@ -4,7 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "blockDataBase.h"
-#include "db/keyHash.h"
+#include "dbengine/keyHash.h"
 #include "db/storage.h"
 #include "common/fopen.h"
 #include "common/parallelRunner.h"
@@ -511,7 +511,7 @@ inline uint64_t txidHash(const BC::Proto::TxHashTy &txid) { return occupied(txid
 
 inline uint64_t outpointHash(const BC::Proto::TxHashTy &txid, uint32_t index)
 {
-  return occupied(hashOutpoint(txid.begin(), index).H1);
+  return occupied(dbengine::hashOutpoint(txid.begin(), index).H1);
 }
 
 // Load factor 1/2

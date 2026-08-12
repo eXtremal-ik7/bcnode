@@ -92,8 +92,9 @@ bool AddrDb::queryTop(const std::string &index, size_t offset, size_t limit,
   return this->top(index, offset, limit, result);
 }
 
-void AddrDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddress> &writer, BlockInMemoryIndex&, BlockDatabase&)
+void AddrDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
+  dbengine::CKvWriter<BC::Script::CAddress> writer = liveWriter();
   ankerl::unordered_dense::map<BC::Script::CAddress, CAddrValue> deltaMap;
   for (const CBlockRef &ref: batch) {
     if (ref.Block->vtx.empty())
@@ -105,18 +106,22 @@ void AddrDb::connectImpl(CBlockBatch batch, CKvWriter<BC::Script::CAddress> &wri
     for (const auto &addr: deltaMap)
       this->merge(writer, addr.first, addr.second);
   }
+  commit(writer, batch.back().Index->Header.GetHash());
 }
 
-void AddrDb::disconnectImpl(const BC::Common::BlockIndex*,
+void AddrDb::disconnect(const BC::Common::BlockIndex *index,
                             const BC::Proto::Block &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             const BC::Proto::CBlockValidationData &validationData,
-                            CKvWriter<BC::Script::CAddress> &writer,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
-  if (block.vtx.empty())
+  dbengine::CKvWriter<BC::Script::CAddress> writer = liveWriter();
+  // Nothing to undo, but the position still moves off this block
+  if (block.vtx.empty()) {
+    commit(writer, index->Header.hashPrevBlock);
     return;
+  }
 
   ankerl::unordered_dense::map<BC::Script::CAddress, CAddrValue> deltaMap;
   buildBlockDelta(block, linkedOutputs, validationData.CoinbaseRepeat, deltaMap);
@@ -125,6 +130,7 @@ void AddrDb::disconnectImpl(const BC::Common::BlockIndex*,
     addr.second.negate();
     this->merge(writer, addr.first, addr.second);
   }
+  commit(writer, index->Header.hashPrevBlock);
 }
 
 }

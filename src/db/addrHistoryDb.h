@@ -6,7 +6,9 @@
 #pragma once
 
 #include "db/common.h"
-#include "db/kvarray.h"
+#include "db/queries.h"
+#include "db/chaindb.h"
+#include "dbengine/kvarray.h"
 
 #include "thirdparty/ankerl/unordered_dense.h"
 
@@ -14,11 +16,11 @@ namespace BC {
 namespace DB {
 
 class AddrHistoryDb :
-  public CKvArrayBase<BC::Script::CAddress, CAddrHistoryItem>,
+  public CChainDb<dbengine::CKvArrayBase<BC::Script::CAddress, CAddrHistoryItem>>,
   public IAddrHistoryDb {
 
 public:
-  AddrHistoryDb() : CKvArrayBase<BC::Script::CAddress, CAddrHistoryItem>("addrhistorydb", 64) {}
+  AddrHistoryDb() : CChainDb<dbengine::CKvArrayBase<BC::Script::CAddress, CAddrHistoryItem>>("addrhistorydb", 64) {}
   virtual ~AddrHistoryDb() {}
 
   void *interface(int interface) {
@@ -31,20 +33,18 @@ public:
   bool queryAddrHistory(const BC::Script::CAddress &address, size_t from, size_t count, CQueryAddrHistory &result) final;
 
   uint32_t version() final { return 1; }
-  bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage);
+  bool initializeImpl(config4cpp::Configuration *cfg);
 
-  void connectImpl(CBlockBatch batch,
-                   CKvWriter<BC::Script::CAddress> &writer,
-                   BlockInMemoryIndex &blockIndex,
-                   BlockDatabase &blockDb);
+  void connect(CBlockBatch batch,
+               BlockInMemoryIndex &blockIndex,
+               BlockDatabase &blockDb) final;
 
-  void disconnectImpl(const BC::Common::BlockIndex *index,
-                      const BC::Proto::Block &block,
-                      const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                      const BC::Proto::CBlockValidationData &validationData,
-                      CKvWriter<BC::Script::CAddress> &writer,
-                      BlockInMemoryIndex &blockIndex,
-                      BlockDatabase &blockDb);
+  void disconnect(const BC::Common::BlockIndex *index,
+                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  const BC::Proto::CBlockValidationData &validationData,
+                  BlockInMemoryIndex &blockIndex,
+                  BlockDatabase &blockDb) final;
 
 private:
   struct CTouch {

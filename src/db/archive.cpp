@@ -196,7 +196,7 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
   archiveFirstBlocks.resize(AllDb_.size());
 
   // Initialize all databases
-  if (!storage.utxodb().initialize(blockIndex, utxoPath, storage, cfg, &utxoFirstBlock, utxoDisconnect))
+  if (!storage.utxodb().initialize(blockIndex, utxoPath, cfg, &utxoFirstBlock, utxoDisconnect))
     return false;
   for (size_t i = 0; i < AllDb_.size(); i++) {
     // Get custom database path from config
@@ -204,7 +204,7 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
     const char *p = cfg->lookupString(scope.c_str(), "path", nullptr);
     std::filesystem::path dbPath = p ? p : dataDir / AllDb_[i]->name();
 
-    if (!AllDb_[i]->initialize(blockIndex, dbPath, storage, cfg, &archiveFirstBlocks[i], archiveDisconnect[i]))
+    if (!AllDb_[i]->initialize(blockIndex, dbPath, cfg, &archiveFirstBlocks[i], archiveDisconnect[i]))
       return false;
   }
 

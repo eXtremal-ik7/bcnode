@@ -6,6 +6,7 @@
 #pragma once
 
 #include "db/common.h"
+#include "db/queries.h"
 #include "db/sync.h"
 
 #include <condition_variable>

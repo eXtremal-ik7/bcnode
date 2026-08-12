@@ -40,13 +40,14 @@ bool SpentDb::querySpentOutputs(const BC::Proto::TxHashTy &txid, uint32_t count,
   return true;
 }
 
-bool SpentDb::initializeImpl(config4cpp::Configuration*, BC::DB::Storage&)
+bool SpentDb::initializeImpl(config4cpp::Configuration*)
 {
   return true;
 }
 
-void SpentDb::connectImpl(CBlockBatch batch, CKvWriter<COutpointKey> &writer, BlockInMemoryIndex&, BlockDatabase&)
+void SpentDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
+  dbengine::CKvWriter<COutpointKey> writer = liveWriter();
   COutpointKey key;
   CSpentValue value;
 
@@ -76,16 +77,17 @@ void SpentDb::connectImpl(CBlockBatch batch, CKvWriter<COutpointKey> &writer, Bl
       }
     }
   }
+  commit(writer, batch.back().Index->Header.GetHash());
 }
 
-void SpentDb::disconnectImpl(const BC::Common::BlockIndex*,
+void SpentDb::disconnect(const BC::Common::BlockIndex *index,
                              const BC::Proto::Block &block,
                              const BC::Proto::CBlockLinkedOutputs&,
                              const BC::Proto::CBlockValidationData&,
-                             CKvWriter<COutpointKey> &writer,
                              BlockInMemoryIndex&,
                              BlockDatabase&)
 {
+  dbengine::CKvWriter<COutpointKey> writer = liveWriter();
   COutpointKey key;
 
   // Only the marks this block wrote go away. Its own outputs cannot be spent
@@ -98,6 +100,7 @@ void SpentDb::disconnectImpl(const BC::Common::BlockIndex*,
       writer.erase(key);
     }
   }
+  commit(writer, index->Header.hashPrevBlock);
 }
 
 }

@@ -6,7 +6,9 @@
 #pragma once
 
 #include "db/common.h"
-#include "db/kvbase.h"
+#include "db/queries.h"
+#include "db/chaindb.h"
+#include "dbengine/kvbase.h"
 #include "db/outpointKey.h"
 
 namespace config4cpp {
@@ -21,9 +23,9 @@ namespace DB {
 // space - an output the chain created is either there (unspent) or here
 // (spent). Pure append on the write path: connect writes marks from data it
 // already holds and reads nothing back
-class SpentDb : public CKvBase<COutpointKey>, public ISpentDb {
+class SpentDb : public CChainDb<dbengine::CKvBase<COutpointKey>>, public ISpentDb {
 public:
-  SpentDb() : CKvBase<COutpointKey>("spentdb") {}
+  SpentDb() : CChainDb<dbengine::CKvBase<COutpointKey>>("spentdb") {}
   virtual ~SpentDb() {}
 
   void *interface(int interface) final {
@@ -36,22 +38,20 @@ public:
   bool querySpent(const BC::Proto::TxHashTy &txid, uint32_t index, CQuerySpentResult &result) final;
   bool querySpentOutputs(const BC::Proto::TxHashTy &txid, uint32_t count, std::vector<CQuerySpentResult> &result) final;
 
+  void connect(CBlockBatch batch,
+               BlockInMemoryIndex &blockIndex,
+               BlockDatabase &blockDb) final;
+
+  void disconnect(const BC::Common::BlockIndex *index,
+                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  const BC::Proto::CBlockValidationData &validationData,
+                  BlockInMemoryIndex &blockIndex,
+                  BlockDatabase &blockDb) final;
+
 private:
   uint32_t version() final { return 1; }
-  bool initializeImpl(config4cpp::Configuration *cfg, BC::DB::Storage &storage) final;
-
-  void connectImpl(CBlockBatch batch,
-                   CKvWriter<COutpointKey> &writer,
-                   BlockInMemoryIndex &blockIndex,
-                   BlockDatabase &blockDb) final;
-
-  void disconnectImpl(const BC::Common::BlockIndex *index,
-                      const BC::Proto::Block &block,
-                      const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                      const BC::Proto::CBlockValidationData &validationData,
-                      CKvWriter<COutpointKey> &writer,
-                      BlockInMemoryIndex &blockIndex,
-                      BlockDatabase &blockDb) final;
+  bool initializeImpl(config4cpp::Configuration *cfg) final;
 };
 
 }

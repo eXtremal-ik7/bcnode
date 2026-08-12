@@ -6,17 +6,19 @@
 #pragma once
 
 #include "db/common.h"
-#include "db/kvmerge.h"
+#include "db/queries.h"
+#include "db/chaindb.h"
+#include "dbengine/kvmerge.h"
 
 namespace BC {
 namespace DB {
 
 class AddrDb :
-  public CKvMergeBase<BC::Script::CAddress, CAddrValue>,
+  public CChainDb<dbengine::CKvMergeBase<BC::Script::CAddress, CAddrValue>>,
   public IAddrDb {
 
 public:
-  AddrDb() : CKvMergeBase<BC::Script::CAddress, CAddrValue>("addrdb") {
+  AddrDb() : CChainDb<dbengine::CKvMergeBase<BC::Script::CAddress, CAddrValue>>("addrdb") {
     // The metric width is the column's own - per-coin for the balance. New
     // indexes register at the end: the order is the stored id, and shifting
     // it degenerates the xcfg diff to drop-all+rebuild
@@ -42,18 +44,16 @@ public:
 
   uint32_t version() final { return 1; }
 
-  void connectImpl(CBlockBatch batch,
-                   CKvWriter<BC::Script::CAddress> &writer,
-                   BlockInMemoryIndex &blockIndex,
-                   BlockDatabase &blockDb);
+  void connect(CBlockBatch batch,
+               BlockInMemoryIndex &blockIndex,
+               BlockDatabase &blockDb) final;
 
-  void disconnectImpl(const BC::Common::BlockIndex *index,
-                      const BC::Proto::Block &block,
-                      const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                      const BC::Proto::CBlockValidationData &validationData,
-                      CKvWriter<BC::Script::CAddress> &writer,
-                      BlockInMemoryIndex &blockIndex,
-                      BlockDatabase &blockDb);
+  void disconnect(const BC::Common::BlockIndex *index,
+                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                  const BC::Proto::CBlockValidationData &validationData,
+                  BlockInMemoryIndex &blockIndex,
+                  BlockDatabase &blockDb) final;
 };
 
 }

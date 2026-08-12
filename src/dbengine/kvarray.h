@@ -23,17 +23,16 @@
 // CItem requirements: trivially copyable, fixed size, public Aggregate field
 // with the semantics above - additive, default state is the zero.
 
-#include "db/kvbase.h"
+#include "dbengine/kvstore.h"
 
 #include "thirdparty/ankerl/unordered_dense.h"
 
 #include <deque>
 
-namespace BC {
-namespace DB {
+namespace dbengine {
 
 template<typename CKey, typename CItem>
-class CKvArrayBase : public CKvDatabase<CKey> {
+class CKvArrayBase : public CKvStore<CKey> {
 private:
   using CAggregate = decltype(CItem::Aggregate);
 
@@ -121,10 +120,10 @@ private:
 
 public:
   CKvArrayBase(const std::string &name, size_t chunkSize) :
-    CKvDatabase<CKey>(name), ChunkSize_(chunkSize) {}
+    CKvStore<CKey>(name), ChunkSize_(chunkSize) {}
 
   // The flusher dispatches the folds implemented at this level: stop it
-  // while the dispatch is still valid (~CKvDatabase's shutdown is a no-op then)
+  // while the dispatch is still valid (~CKvStore's shutdown is a no-op then)
   ~CKvArrayBase() override { this->Engine_.shutdown(); }
 
   rocksdb::MergeOperator *mergeOperator() final { return new MergeOperator(); }
@@ -350,7 +349,7 @@ public:
 protected:
   // One sealed layer, one batch: the newest descriptor of a key IS its
   // composed trim-and-append, the buffers are read where they lie
-  void writeLayer(rocksdb::DB *db, size_t shardIndex, const CLayer<CKey> *layer, const BC::Proto::BlockHashTy &stamp) final {
+  void writeLayer(rocksdb::DB *db, size_t shardIndex, const CLayer<CKey> *layer, const BaseBlob<256> &stamp) final {
     layer->buildScattered();
 
     std::vector<const CKey*> keys;
@@ -381,7 +380,7 @@ private:
   // Disk half of the flush: one composed trim-and-append per key, in key order
   void flushComposed(rocksdb::DB *db,
                      size_t shardIndex,
-                     const BC::Proto::BlockHashTy &stamp,
+                     const BaseBlob<256> &stamp,
                      const std::vector<const CKey*> &allKeys,
                      const std::vector<uint64_t> &allTrims,
                      const std::vector<const CItem*> &allTails,
@@ -691,5 +690,4 @@ private:
   bool MetaCacheFrozen_ = false;
 };
 
-}
 }
