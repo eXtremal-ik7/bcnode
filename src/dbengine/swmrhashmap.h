@@ -5,17 +5,18 @@
 // with one flat table. Generation-based reset makes clearing O(1) - a retired
 // window can be recycled by a counter bump, with no drain of the map at all.
 //
-// The map stores non-owning value pointers into the window arena; a null result
-// means "not in this window, look deeper" (an older window, or the disk). A
+// The map stores arena offsets, not pointers: a zero result means "not in this
+// window, look deeper" (an older window, or the disk), and unit zero of the
+// arena is never handed out so the two cannot be confused. A
 // delete is a value like any other (the layer above stores its own marker), and
 // keys are never removed within a window, so linear-probe chains never break.
 //
 // Slot life cycle within one window ("gen" is the map generation, even):
 //     stale (Gen != gen)  --claim: CAS Gen -> gen+1-->  mid-insert
-//     mid-insert          --fill Key/Ptr, store Gen = gen (release)--> live
-//     live                --update: store Ptr (release)--> live
+//     mid-insert          --fill Key/Ref, store Gen = gen (release)--> live
+//     live                --update: store Ref (release)--> live
 // reset() bumps the generation by 2: every slot turns stale at once, the
-// arena pointers inside die with the arena, nothing is walked or freed.
+// offsets inside die with the arena, nothing is walked or freed.
 //
 // The generation word doubles as the claim word and the publication word:
 //  - a claim can only move a STALE slot to mid-insert, so a live slot can
@@ -47,7 +48,7 @@
 //
 // The header is deliberately interpretable by GenMC (the model checker runs
 // the real class, not a model): no std::vector, no calloc, no variable
-// length memory intrinsics; stale slots never have their Key/Ptr read, so
+// length memory intrinsics; stale slots never have their Key/Ref read, so
 // the uninitialized-memory rule is checked by the tool as well.
 
 #include <atomic>
@@ -66,10 +67,13 @@ namespace dbengine {
 template<typename CKey, typename CHasher = std::hash<CKey>>
 class CSwmrHashMap {
 private:
+  // The value is an arena offset and not a pointer: the slot is paid once per
+  // table entry, and a table runs at a load factor below one, so every byte
+  // here costs more than a byte of the arena it points into
   struct SSlot {
-    std::atomic<uint64_t> Gen;
-    std::atomic<void*> Ptr;   // value, or garbage while Gen is stale
-    CKey Key;                 // immutable from publication to reset
+    std::atomic<uint32_t> Gen;
+    std::atomic<uint32_t> Ref;   // value, or garbage while Gen is stale
+    CKey Key;                    // immutable from publication to reset
   };
 
   struct STable {
@@ -80,7 +84,7 @@ private:
   };
 
   std::atomic<STable*> Table_{nullptr};
-  std::atomic<uint64_t> Gen_{2};  // even; slot values gen+1 mean mid-insert
+  std::atomic<uint32_t> Gen_{2};  // even; slot values gen+1 mean mid-insert
   uint64_t Used_ = 0;             // claimed slots this window (atomicAdd from mutators)
   STable *Graveyard_ = nullptr;   // outgrown tables, freed at reset()
   CHasher Hasher_;
@@ -112,7 +116,7 @@ private:
     t->Mask = capacity - 1;
     t->NextGrave = nullptr;
     t->Slots = reinterpret_cast<SSlot*>(t + 1);
-    // only the generations need a defined value: Key/Ptr of a stale slot are
+    // only the generations need a defined value: Key/Ref of a stale slot are
     // never read, the claim writes them before the publication
     for (size_t i = 0; i < capacity; i++)
       t->Slots[i].Gen.store(0, std::memory_order_relaxed);
@@ -129,20 +133,20 @@ private:
   // single-writer growth; readers keep using the old table until the
   // release store below, the old table stays valid until reset()
   void grow(STable *t, size_t newCapacity) {
-    const uint64_t gen = Gen_.load(std::memory_order_relaxed);
+    const uint32_t gen = Gen_.load(std::memory_order_relaxed);
     STable *fresh = allocTable(newCapacity);
     uint64_t used = 0;
     for (size_t i = 0; i < t->Capacity; i++) {
       SSlot &s = t->Slots[i];
       if (s.Gen.load(std::memory_order_relaxed) != gen)
         continue;
-      void *p = s.Ptr.load(std::memory_order_relaxed);
+      uint32_t p = s.Ref.load(std::memory_order_relaxed);
       size_t idx = Hasher_(s.Key) & fresh->Mask;
       for (;;) {
         SSlot &d = fresh->Slots[idx];
         if (d.Gen.load(std::memory_order_relaxed) != gen) {
           d.Key = s.Key;
-          d.Ptr.store(p, std::memory_order_relaxed);
+          d.Ref.store(p, std::memory_order_relaxed);
           d.Gen.store(gen, std::memory_order_relaxed);
           break;
         }
@@ -163,39 +167,40 @@ public:
 
   ~CSwmrHashMap() {
     freeGraveyard();
-    free(Table_.load(std::memory_order_relaxed));
+    STable *t = Table_.load(std::memory_order_relaxed);
+    free(t);
   }
 
   CSwmrHashMap(const CSwmrHashMap&) = delete;
   CSwmrHashMap &operator=(const CSwmrHashMap&) = delete;
 
-  // reader side: wait-free, legal at any time. nullptr = not in this window,
+  // reader side: wait-free, legal at any time. zero = not in this window,
   // the caller falls through to the frozen log / disk, where the key is
   // guaranteed older than this window.
   //
   // Every entry point has a hash overload taking the value the caller already
   // computed to pick the shard; it must equal CHasher's for that key
-  void *find(const CKey &key) const { return find(key, Hasher_(key)); }
+  uint32_t find(const CKey &key) const { return find(key, Hasher_(key)); }
 
-  void *find(const CKey &key, size_t hash) const {
+  uint32_t find(const CKey &key, size_t hash) const {
     const STable *t = Table_.load(std::memory_order_acquire);
-    const uint64_t gen = Gen_.load(std::memory_order_relaxed);
+    const uint32_t gen = Gen_.load(std::memory_order_relaxed);
     size_t idx = hash & t->Mask;
     for (size_t probe = 0; probe <= t->Mask; probe++, idx = (idx + 1) & t->Mask) {
       const SSlot &s = t->Slots[idx];
-      const uint64_t g = s.Gen.load(std::memory_order_acquire);
+      const uint32_t g = s.Gen.load(std::memory_order_acquire);
       if (g == gen) {
         // published: the key is immutable, the acquire above pairs with the
         // publication release, so reading it plainly is race-free
         if (s.Key == key)
-          return s.Ptr.load(std::memory_order_acquire);
+          return s.Ref.load(std::memory_order_acquire);
         continue;
       }
       if (g == gen + 1)
         continue; // mid-insert of another key: the probe must not stop here
-      return nullptr; // stale slot: end of the cluster
+      return 0; // stale slot: end of the cluster
     }
-    return nullptr;
+    return 0;
   }
 
   // Warm a slot and its TLB entry ahead of an update. A pure hint: a wrong or
@@ -217,12 +222,12 @@ public:
   void prefetch(const CKey &key) const { prefetch(Hasher_(key)); }
 
   // mutator side: insert or update, disjoint-key concurrent safe
-  void update(const CKey &key, void *value) {
+  void update(const CKey &key, uint32_t value) {
     update(key, Hasher_(key), value);
   }
 
-  void update(const CKey &key, size_t hash, void *value) {
-    updateWith(key, hash, [value](void*) { return value; });
+  void update(const CKey &key, size_t hash, uint32_t value) {
+    updateWith(key, hash, [value](uint32_t) { return value; });
   }
 
   template<typename F>
@@ -236,17 +241,17 @@ public:
   template<typename F>
   void updateWith(const CKey &key, size_t hash, F &&valueOf) {
     STable *t = Table_.load(std::memory_order_relaxed);
-    const uint64_t gen = Gen_.load(std::memory_order_relaxed);
+    const uint32_t gen = Gen_.load(std::memory_order_relaxed);
     size_t idx = hash & t->Mask;
     for (size_t probe = 0; probe <= t->Mask; probe++, idx = (idx + 1) & t->Mask) {
       SSlot &s = t->Slots[idx];
-      uint64_t g = s.Gen.load(std::memory_order_acquire);
+      uint32_t g = s.Gen.load(std::memory_order_acquire);
       if (g == gen) {
         if (!(s.Key == key))
           continue;
         // our own published slot: nobody else touches this key
-        void *prev = s.Ptr.load(std::memory_order_relaxed);
-        s.Ptr.store(valueOf(prev), std::memory_order_release);
+        uint32_t prev = s.Ref.load(std::memory_order_relaxed);
+        s.Ref.store(valueOf(prev), std::memory_order_release);
         return;
       }
       if (g == gen + 1)
@@ -263,22 +268,22 @@ public:
         if (!s.Gen.compare_exchange_strong(g, gen + 1, std::memory_order_acquire, std::memory_order_relaxed))
           continue;
         s.Key = key;
-        s.Ptr.store(valueOf(nullptr), std::memory_order_relaxed);
+        s.Ref.store(valueOf(0), std::memory_order_relaxed);
         s.Gen.store(gen, std::memory_order_release); // publish key + value together
         atomicAdd(Used_, 1);
         // single-writer growth; a concurrent wave must have reserve()d, so
         // this trigger never fires there (see the contract above)
         if (atomicLoad(Used_) > t->Capacity - t->Capacity / 4)
-          grow(t, t->Capacity * 4);
+          grow(t, t->Capacity * 2);
         return;
       }
 
       s.Key = key;
-      s.Ptr.store(valueOf(nullptr), std::memory_order_relaxed);
+      s.Ref.store(valueOf(0), std::memory_order_relaxed);
       s.Gen.store(gen, std::memory_order_release); // publish key + value together
       Used_++;
       if (Used_ > t->Capacity - t->Capacity / 4)
-        grow(t, t->Capacity * 4);
+        grow(t, t->Capacity * 2);
       return;
     }
     // no stale slot in a full circle: only a concurrent wave that broke the
@@ -293,15 +298,15 @@ public:
   template<typename F>
   void replaceEach(F &&fn) {
     STable *t = Table_.load(std::memory_order_relaxed);
-    const uint64_t gen = Gen_.load(std::memory_order_relaxed);
+    const uint32_t gen = Gen_.load(std::memory_order_relaxed);
     for (size_t i = 0; i < t->Capacity; i++) {
       SSlot &s = t->Slots[i];
       if (s.Gen.load(std::memory_order_relaxed) != gen)
         continue;
-      void *prev = s.Ptr.load(std::memory_order_relaxed);
-      void *next = fn(prev);
+      uint32_t prev = s.Ref.load(std::memory_order_relaxed);
+      uint32_t next = fn(prev);
       if (next != prev)
-        s.Ptr.store(next, std::memory_order_release);
+        s.Ref.store(next, std::memory_order_release);
     }
   }
 
@@ -310,12 +315,12 @@ public:
   template<typename F>
   void forEachCurrent(F &&fn) const {
     const STable *t = Table_.load(std::memory_order_relaxed);
-    const uint64_t gen = Gen_.load(std::memory_order_relaxed);
+    const uint32_t gen = Gen_.load(std::memory_order_relaxed);
     for (size_t i = 0; i < t->Capacity; i++) {
       const SSlot &s = t->Slots[i];
       if (s.Gen.load(std::memory_order_relaxed) != gen)
         continue;
-      fn(static_cast<const CKey&>(s.Key), s.Ptr.load(std::memory_order_relaxed));
+      fn(static_cast<const CKey&>(s.Key), s.Ref.load(std::memory_order_relaxed));
     }
   }
 
@@ -327,12 +332,12 @@ public:
   template<typename F>
   void forEachConcurrent(F &&fn) const {
     const STable *t = Table_.load(std::memory_order_acquire);
-    const uint64_t gen = Gen_.load(std::memory_order_relaxed);
+    const uint32_t gen = Gen_.load(std::memory_order_relaxed);
     for (size_t i = 0; i < t->Capacity; i++) {
       const SSlot &s = t->Slots[i];
       if (s.Gen.load(std::memory_order_acquire) != gen)
         continue;
-      fn(static_cast<const CKey&>(s.Key), s.Ptr.load(std::memory_order_acquire));
+      fn(static_cast<const CKey&>(s.Key), s.Ref.load(std::memory_order_acquire));
     }
   }
 

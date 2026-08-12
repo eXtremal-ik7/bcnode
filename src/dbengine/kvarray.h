@@ -18,7 +18,7 @@
 // records are small descriptors, cumulative for the layer, so a read takes
 // the newest one at its watermark and has the whole composed state - no
 // replay, no per-element pointer chase. Buffers and descriptors die with the
-// layer (MLog frees nothing), which is what keeps every pinned reader valid.
+// layer (the arena frees nothing), which keeps every pinned reader valid.
 //
 // CItem requirements: trivially copyable, fixed size, public Aggregate field
 // with the semantics above - additive, default state is the zero.

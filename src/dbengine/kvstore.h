@@ -35,6 +35,17 @@
 
 namespace dbengine {
 
+// One cache for every database of the process. A function and not a static
+// inside the store: that one is a member of a class template, so each key type
+// would get a cache of its own.
+// HyperClockCache and not NewLRUCache: the clock table is what rocksdb picks
+// by default, and the legacy LRU shards behind a mutex
+inline std::shared_ptr<rocksdb::Cache> kvBlockCache(config4cpp::Configuration *cfg) {
+  static std::shared_ptr<rocksdb::Cache> cache =
+    rocksdb::HyperClockCacheOptions(static_cast<size_t>(cfg->lookupInt("rocksdb", "blockCacheMb", 32)) << 20, 0).MakeSharedCache();
+  return cache;
+}
+
 #pragma pack(push, 1)
 struct CBaseCfg {
   uint32_t Version;
@@ -102,7 +113,6 @@ public:
       rocksdb::DB *db;
       rocksdb::Options options;
       options.create_if_missing = true;
-      options.compression = rocksdb::kZSTD;
       options.keep_log_file_num = 4;
       options.merge_operator.reset(mergeOperator());
 
@@ -118,14 +128,10 @@ public:
       rocksdb::BlockBasedTableOptions tableOptions;
       tableOptions.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
 
-      // Every write of these families reads the row it updates, and the block
-      // it comes in has to be decompressed each time it is missed. rocksdb's
-      // own default is 32Mb - nothing against a database of tens of GB, and
-      // one cache is shared by every database of the process
-      // HyperClockCache and not NewLRUCache: the clock table is what rocksdb
-      // picks by default, and the legacy LRU shards behind a mutex
-      static std::shared_ptr<rocksdb::Cache> blockCache =
-        rocksdb::HyperClockCacheOptions(static_cast<size_t>(cfg->lookupInt("rocksdb", "blockCacheMb", 1024)) << 20, 0).MakeSharedCache();
+      // rocksdb's own default size, until there is a measurement that asks for
+      // another: a catch-up leaves the cache empty from end to end - its reads
+      // are answered by the bloom filters, which live outside it
+      std::shared_ptr<rocksdb::Cache> blockCache = kvBlockCache(cfg);
       tableOptions.block_cache = blockCache;
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(tableOptions));
       options.memtable_prefix_bloom_size_ratio = 0.05;
@@ -135,7 +141,9 @@ public:
       // Below it compression is the single biggest cost of compaction, while
       // almost all of the data ends up on the bottom level - hence two knobs,
       // the transit levels and the floor they settle on. lz4 rather than zstd:
-      // address hashes barely compress, so zstd buys 7% of space for 60% of speed
+      // address hashes barely compress, so zstd buys 7% of space for 60% of
+      // speed. These two settle it: a non-empty compression_per_level is what
+      // rocksdb reads, and options.compression is never consulted again
       options.compression_per_level = {rocksdb::kNoCompression,
                                        compressionByName(cfg, "compression", rocksdb::kLZ4Compression)};
       options.bottommost_compression = compressionByName(cfg, "bottommostCompression", rocksdb::kDisableCompressionOption);

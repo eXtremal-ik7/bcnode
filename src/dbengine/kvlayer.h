@@ -14,7 +14,7 @@
 // watermark it can hold.
 
 #include "common/baseBlob.h"
-#include "common/mlog.h"
+#include "dbengine/arena.h"
 #include "dbengine/swmrhashmap.h"
 
 #include <p2putils/strExtras.h>
@@ -27,8 +27,11 @@
 
 namespace dbengine {
 
-// One version of one key: payload follows the header, the previous version's
-// pointer - when one exists - precedes it
+// One version of one key: payload follows the header, the offset of the
+// previous version - when one exists - precedes it. An offset and not a
+// pointer, so the map slot and the chain speak the same language and a record
+// can be reached from either without a reverse lookup. It keeps the whole unit
+// the pointer took, which is what holds the payload on its 8-byte alignment
 struct CGenRecord {
   static constexpr uint32_t MayExistBelowFlag = 0x80000000u;
   static constexpr uint32_t TombstoneFlag = 0x40000000u;
@@ -43,12 +46,12 @@ struct CGenRecord {
   bool tombstone() const { return (SizeAndFlags & TombstoneFlag) != 0; }
   const void *payload() const { return this + 1; }
 
-  const CGenRecord *prev() const {
+  uint32_t prevRef() const {
     if (!(SizeAndFlags & HasPrevFlag))
-      return nullptr;
-    const CGenRecord *p;
-    memcpy(&p, reinterpret_cast<const char*>(this) - sizeof(void*), sizeof(p));
-    return p;
+      return 0;
+    uint32_t ref;
+    memcpy(&ref, reinterpret_cast<const char*>(this) - sizeof(uint64_t), sizeof(ref));
+    return ref;
   }
 };
 
@@ -144,22 +147,25 @@ public:
   // Legal because the generation is uncommitted: no reader sees the gap
   template<typename F>
   void putWith(const CKey &key, size_t hash, size_t size, F &&fill) {
-    Map_.updateWith(key, hash, [&](void *prevRaw) -> void* {
-      const CGenRecord *prev = static_cast<const CGenRecord*>(prevRaw);
-      CGenRecord *rec = writeRecord(chainOf(prev), 0, nullptr, size);
+    Map_.updateWith(key, hash, [&](CArena::CRef prevRef) -> CArena::CRef {
+      const CGenRecord *prev = record(prevRef);
+      CArena::CRef ref = 0;
+      CGenRecord *rec = writeRecord(chainOf(prev, prevRef), 0, nullptr, size, ref);
       fill(rec + 1, prev);
-      return rec;
+      return ref;
     });
   }
 
   void erase(const CKey &key, size_t hash) {
-    Map_.updateWith(key, hash, [&](void *prevRaw) -> void* {
-      const CGenRecord *prev = static_cast<const CGenRecord*>(prevRaw);
+    Map_.updateWith(key, hash, [&](CArena::CRef prevRef) -> CArena::CRef {
+      const CGenRecord *prev = record(prevRef);
       // No version in this layer, or one that admits layers below: the disk
       // may hold the key and the tombstone must survive the flush. A value
       // born here dies with its pair - a tombstone without the flag
       const bool meb = !prev || prev->mayExistBelow();
-      return writeRecord(chainOf(prev), CGenRecord::TombstoneFlag | (meb ? CGenRecord::MayExistBelowFlag : 0), nullptr, 0);
+      CArena::CRef ref = 0;
+      writeRecord(chainOf(prev, prevRef), CGenRecord::TombstoneFlag | (meb ? CGenRecord::MayExistBelowFlag : 0), nullptr, 0, ref);
+      return ref;
     });
   }
 
@@ -174,11 +180,11 @@ public:
   // The records stay behind as arena garbage; the generation was never torn
   // off, so no reader ever met them. Live era only, mutator thread
   void discardUncommitted() {
-    Map_.replaceEach([this](void *value) -> void* {
-      const CGenRecord *rec = static_cast<const CGenRecord*>(value);
+    Map_.replaceEach([this](CArena::CRef ref) -> CArena::CRef {
+      const CGenRecord *rec = record(ref);
       if (!rec || rec->Gen != Gen_)
-        return value;
-      return const_cast<void*>(static_cast<const void*>(rec->prev()));
+        return ref;
+      return rec->prevRef();
     });
   }
 
@@ -199,9 +205,9 @@ public:
   // nullptr = nothing this layer knew at W - fall through to the layer below.
   // A tombstone is a result like any other
   const CGenRecord *find(const CKey &key, size_t hash, uint32_t watermark) const {
-    const CGenRecord *rec = static_cast<const CGenRecord*>(Map_.find(key, hash));
+    const CGenRecord *rec = record(Map_.find(key, hash));
     while (rec && rec->Gen > watermark)
-      rec = rec->prev();
+      rec = record(rec->prevRef());
     return rec;
   }
 
@@ -209,7 +215,7 @@ public:
   // head only while it is this generation - an older head belongs to a
   // committed unit below and is not the caller's to touch
   const CGenRecord *findOwn(const CKey &key, size_t hash) const {
-    const CGenRecord *rec = static_cast<const CGenRecord*>(Map_.find(key, hash));
+    const CGenRecord *rec = record(Map_.find(key, hash));
     return rec && rec->Gen == Gen_ ? rec : nullptr;
   }
 
@@ -219,10 +225,10 @@ public:
   // watermark the caller can hold, so the answer is exact for W
   template<typename F>
   void forEachAt(uint32_t watermark, F &&fn) const {
-    Map_.forEachConcurrent([watermark, &fn](const CKey &key, void *value) {
-      const CGenRecord *rec = static_cast<const CGenRecord*>(value);
+    Map_.forEachConcurrent([this, watermark, &fn](const CKey &key, CArena::CRef ref) {
+      const CGenRecord *rec = record(ref);
       while (rec && rec->Gen > watermark)
-        rec = rec->prev();
+        rec = record(rec->prevRef());
       if (rec)
         fn(key, *rec);
     });
@@ -258,13 +264,13 @@ public:
     if (!Scattered.empty() || Map_.used() == 0)
       return;
     Scattered.reserve(Map_.used());
-    Map_.forEachCurrent([this](const CKey &key, void *value) {
+    Map_.forEachCurrent([this](const CKey &key, CArena::CRef ref) {
       // a discarded unit popped the key out of the map
-      if (!value)
+      if (!ref)
         return;
       uint64_t prefix = 0;
       memcpy(&prefix, &key, std::min(sizeof(prefix), sizeof(CKey)));
-      Scattered.push_back({xhtobe(prefix), &key, value});
+      Scattered.push_back({xhtobe(prefix), &key, record(ref)});
     });
 
     // Key + record framing per entry, values at most what the arena holds:
@@ -280,19 +286,26 @@ public:
 private:
   // A committed previous version may still have a reader and goes on the
   // chain; an uncommitted one is replaced and links past itself
-  const CGenRecord *chainOf(const CGenRecord *prev) const {
+  CArena::CRef chainOf(const CGenRecord *prev, CArena::CRef prevRef) const {
     if (!prev)
-      return nullptr;
-    return prev->Gen != Gen_ ? prev : prev->prev();
+      return 0;
+    return prev->Gen != Gen_ ? prevRef : prev->prevRef();
   }
 
-  CGenRecord *writeRecord(const CGenRecord *chain, uint32_t flags, const void *data, size_t size) {
-    // 8-aligned records, so the back pointer sits whole right before its header
-    const size_t prefix = chain ? sizeof(void*) : 0;
-    uint8_t *base = static_cast<uint8_t*>(Arena_.alloc((prefix + sizeof(CGenRecord) + size + 7) & ~static_cast<size_t>(7)));
+  const CGenRecord *record(CArena::CRef ref) const {
+    return ref ? static_cast<const CGenRecord*>(Arena_.resolve(ref)) : nullptr;
+  }
+
+  CGenRecord *writeRecord(CArena::CRef chain, uint32_t flags, const void *data, size_t size, CArena::CRef &ref) {
+    // A whole unit for the back link, so the header - and with it the payload -
+    // stays 8-aligned whether the record chains or not
+    const size_t prefix = chain ? sizeof(uint64_t) : 0;
+    const CArena::CRef allocated = Arena_.allocRef(prefix + sizeof(CGenRecord) + size);
+    uint8_t *base = static_cast<uint8_t*>(Arena_.resolve(allocated));
+    ref = allocated + static_cast<CArena::CRef>(prefix >> CArena::UnitBits);
     if (chain) {
-      memcpy(base, &chain, sizeof(void*));
-      base += sizeof(void*);
+      memcpy(base, &chain, sizeof(chain));
+      base += sizeof(uint64_t);
       flags |= CGenRecord::HasPrevFlag;
     }
     CGenRecord *rec = reinterpret_cast<CGenRecord*>(base);
@@ -306,20 +319,21 @@ private:
   }
 
   void putRecord(const CKey &key, size_t hash, const void *data, size_t size, const void *suffix, size_t suffixSize, bool mayExistBelow) {
-    Map_.updateWith(key, hash, [&](void *prevRaw) -> void* {
-      const CGenRecord *prev = static_cast<const CGenRecord*>(prevRaw);
+    Map_.updateWith(key, hash, [&](CArena::CRef prevRef) -> CArena::CRef {
+      const CGenRecord *prev = record(prevRef);
       // A born-dead tombstone adds nothing - that pair lived and died here
       const bool meb = mayExistBelow || (prev && prev->mayExistBelow());
-      CGenRecord *rec = writeRecord(chainOf(prev), meb ? CGenRecord::MayExistBelowFlag : 0, nullptr, size + suffixSize);
+      CArena::CRef ref = 0;
+      CGenRecord *rec = writeRecord(chainOf(prev, prevRef), meb ? CGenRecord::MayExistBelowFlag : 0, nullptr, size + suffixSize, ref);
       uint8_t *value = reinterpret_cast<uint8_t*>(rec + 1);
       memcpy(value, data, size);
       if (suffixSize)
         memcpy(value + size, suffix, suffixSize);
-      return rec;
+      return ref;
     });
   }
 
-  MLog Arena_;
+  CArena Arena_;
   CSwmrHashMap<CKey> Map_;
 
   // The mutator's own copy of "the generation being filled": the watermark is

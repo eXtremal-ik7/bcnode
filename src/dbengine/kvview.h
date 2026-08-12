@@ -345,9 +345,13 @@ public:
       CLayer<CKey> *era = ActiveEra_[i].get();
       if (!era) {
         // Sized once for the era: the map by what the previous full era of the
-        // shard held, doubled. A fixed guess per byte of arena misses by an
-        // order of magnitude either way - tails and records are not the same
-        const size_t records = LastEraUsed_[i] ? LastEraUsed_[i] * 2 : EraBytes_ / 48;
+        // shard held. A fixed guess per byte of arena misses by an order of
+        // magnitude either way - tails and records are not the same.
+        // The margin is the growth threshold and nothing more: an era is
+        // bounded by bytes and the record of a family has a fixed size, so the
+        // key count barely moves between eras. Rounding up to a power of two
+        // adds up to another 2x on top by itself
+        const size_t records = LastEraUsed_[i] ? LastEraUsed_[i] + LastEraUsed_[i] / 3 : EraBytes_ / 48;
         era = new CLayer<CKey>(EraBytes_, records);
         ActiveEra_[i] = era;
       }
