@@ -443,7 +443,10 @@ public:
 
   // Big endian is the order a word travels in outside the machine: protocol
   // fields, hashes, contract storage
-  void exportBE(uint8_t *out) const {
+  // Forced inline: both are four loads and four byte swaps, but their callers are enormous - an
+  // EVM opcode loop, a protocol decoder - and gcc stops inlining into a function that large, so
+  // the call frame ends up costing as much as the work
+  __attribute__((always_inline)) inline void exportBE(uint8_t *out) const {
     // Assembled first, stored once: a byte output may be unaligned, and eight
     // small stores into it cost more than one wide one
     uint64_t limbs[LimbsNum];
@@ -452,7 +455,7 @@ public:
     memcpy(out, limbs, sizeof(limbs));
   }
 
-  void importBE(const uint8_t *in) {
+  __attribute__((always_inline)) inline void importBE(const uint8_t *in) {
     for (size_t i = 0; i < LimbsNum; i++) {
       uint64_t limb;
       memcpy(&limb, in + 8*i, sizeof(limb));

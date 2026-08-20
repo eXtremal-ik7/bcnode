@@ -132,9 +132,13 @@ void CBlockPipeline::feed(std::unique_ptr<CSegment> segment)
 bool CBlockPipeline::throttled() const
 {
   // The serial stage reads utxo on every spend, and every unflushed layer is one more probe per
-  // lookup: this bounds the stack under the reader. The archive is not asked - its connect only
-  // writes, so its layers cost memory and no reads
+  // lookup: this bounds the stack under the reader
   if (Storage_->utxodb().pipelineFull())
+    return true;
+
+  // The archive adds no lookups, but without this its layers have no bound at all: a database
+  // whose flusher is held by rocksdb compaction debt grows until the box is out of memory
+  if (Storage_->archive().pipelineFull())
     return true;
 
   // No escape needed: the cache is released by whoever finishes with the blocks - a database

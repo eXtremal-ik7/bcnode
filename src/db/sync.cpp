@@ -157,7 +157,7 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
                         params.SegmentBlocksLimit,
                         params.WaveThreads);
   for (;;) {
-    // The same limits the reindex reader obeys: the utxo engine over its admission limit, and
+    // The same limits the reindex reader obeys: any engine over its admission limit, and
     // decoded blocks the chain has not taken yet
     while (pipeline.throttled())
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
