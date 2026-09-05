@@ -170,25 +170,6 @@ BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
   }
 }
 
-static inline void QueueNextHeaders(std::deque<BC::Common::BlockIndex*> &queue, BC::Common::BlockIndex *start)
-{
-  auto *index = start->SuccessorHeaders.exchange(nullptr, std::memory_order_acq_rel);
-  while (index) {
-    queue.push_back(index);
-    index = index->HeaderNext;
-  }
-}
-
-static inline void QueueNextBlocks(std::deque<BC::Common::BlockIndex*> &queue,
-                                   BC::Common::BlockIndex *start)
-{
-  auto *index = start->SuccessorBlocks.exchange(nullptr, std::memory_order_acq_rel);
-  while (index) {
-    queue.push_back(index);
-    index = index->BlockNext;
-  }
-}
-
 // Index bookkeeping of a connected block: the chain, the height index and the flags. The
 // databases hear about it separately - one call per batch, not per block
 static void markConnected(BC::Common::BlockIndex *index, BlockInMemoryIndex &blockIndex)
@@ -953,88 +934,90 @@ static BC::Common::BlockIndex *findOrCreateStub(BlockInMemoryIndex &blockIndex,
   return it->second;
 }
 
-static void publishHeader(BlockInMemoryIndex &blockIndex,
-                          BC::Common::ChainParams &chainParams,
-                          BC::Common::BlockIndex *index)
-{
-  // Update the parent's successor list: index becomes the new head of the Treiber stack.
-  auto *parent = index->Prev;
-  auto &successors = parent->SuccessorHeaders;
-  auto *head = successors.load(std::memory_order_relaxed);
-  do {
-    index->HeaderNext = head;
-  } while (!successors.compare_exchange_weak(head, index,
-                                             std::memory_order_acq_rel,
-                                             std::memory_order_relaxed));
+// Builder actions, not BlockFlags: a parent's data phase may still need local DataDone.
+enum ChainEvent : uint32_t {
+  CEBuildHeader      = 1u << 0, // compute Height/ChainWork, then publish HeaderReady
+  CEParentDataReady  = 1u << 1, // meet DataDone to elect the data-path builder
+  CEPublishDataReady = 1u << 2  // addBlock has already won that election
+};
 
-  if (head || !parent->hasFlags(BFHeaderReady))
+static BC::Common::BlockIndex *successorHead(uintptr_t state)
+{
+  static_assert(alignof(BC::Common::BlockIndex) > SPReady);
+  return reinterpret_cast<BC::Common::BlockIndex*>(state & ~uintptr_t(SPReady));
+}
+
+static uint32_t successorEvents(uintptr_t phases)
+{
+  return ((phases & SPHeaderReady) ? uint32_t(CEBuildHeader) : 0u) |
+         ((phases & SPDataReady) ? uint32_t(CEParentDataReady) : 0u);
+}
+
+// Each event has one owner; concurrent header/data builders publish disjoint Ready bits.
+static void buildChain(BlockInMemoryIndex &blockIndex,
+                       BC::Common::ChainParams &chainParams,
+                       BC::Common::BlockIndex *index,
+                       uint32_t initialEvents)
+{
+  if (!initialEvents)
     return;
 
-  std::deque<BC::Common::BlockIndex*> queue;
+  constexpr uint32_t readyMask = BFHeaderReady | BFDataReady;
+  std::deque<std::pair<BC::Common::BlockIndex*, uint32_t>> queue{{index, initialEvents}};
   BC::Common::BlockIndex *best = nullptr;
-
-  QueueNextHeaders(queue, parent);
-
   while (!queue.empty()) {
-    BC::Common::BlockIndex *current = queue.front();
-    BC::Common::BlockIndex *prev = current->Prev;
+    const auto [current, events] = queue.front();
+    queue.pop_front();
+    uint32_t ready = 0;
 
-    if (current->Height == std::numeric_limits<uint32_t>::max()) {
+    if (events & CEBuildHeader) {
+      auto *prev = current->Prev;
       current->Height = prev->Height + 1;
       current->ChainWork = prev->ChainWork + BC::Common::GetBlockProof(current->Header, chainParams);
+      ready |= BFHeaderReady;
     }
+    if (events & CEPublishDataReady)
+      ready |= BFDataReady;
+    if ((events & CEParentDataReady) &&
+        (current->Flags.fetch_or(BFParentDataReady, std::memory_order_acq_rel) & BFDataDone))
+      ready |= BFDataReady;
+    // Invalid data stops only the data phase; headers can still acquire their height/work.
+    if ((ready & BFDataReady) &&
+        (current->hasFlags(BFInvalid) || current->Prev->hasFlags(BFInvalid)))
+      ready &= ~BFDataReady;
+    if (!ready)
+      continue;
 
-    // The second topology walk acquires the first one's fields and announces the candidate.
-    uint32_t flags = current->Flags.fetch_or(BFHeaderReady, std::memory_order_acq_rel);
-    if ((flags & BFDataReady) && (!best || current->ChainWork > best->ChainWork))
+    uint32_t flags = current->Flags.fetch_or(ready, std::memory_order_acq_rel);
+    assert(!(flags & ready)); // Each Ready bit has exactly one publisher.
+    if (((flags | ready) & readyMask) == readyMask &&
+        (!best || current->ChainWork > best->ChainWork))
       best = current;
 
-    QueueNextHeaders(queue, current);
-    queue.pop_front();
+    uintptr_t phases = ((ready & BFHeaderReady) ? uintptr_t(SPHeaderReady) : 0u) |
+                       ((ready & BFDataReady) ? uintptr_t(SPDataReady) : 0u);
+    uintptr_t head = current->Successors.fetch_or(phases, std::memory_order_acq_rel);
+    uint32_t childEvents = successorEvents(phases);
+    for (auto *child = successorHead(head); child; child = child->SuccessorNext)
+      queue.emplace_back(child, childEvents);
   }
 
   if (best)
     blockIndex.notifyReady(best);
 }
 
-// Called exactly once: by whichever writer publishes HeaderDone/DataDone second.
-static void publishBlock(BlockInMemoryIndex &blockIndex, BC::Common::BlockIndex *index)
+// Insert once, retaining the list for both phases. Insertion before a phase's fetch_or
+// belongs to that snapshot; insertion after it inherits the phase here instead.
+static uint32_t addSuccessor(BC::Common::BlockIndex *index)
 {
-  auto *parent = index->Prev;
-  auto &successors = parent->SuccessorBlocks;
-  auto *head = successors.load(std::memory_order_relaxed);
+  auto &successors = index->Prev->Successors;
+  uintptr_t head = successors.load(std::memory_order_acquire);
   do {
-    index->BlockNext = head;
-  } while (!successors.compare_exchange_weak(head, index,
+    index->SuccessorNext = successorHead(head);
+  } while (!successors.compare_exchange_weak(head, reinterpret_cast<uintptr_t>(index) | (head & SPReady),
                                              std::memory_order_acq_rel,
-                                             std::memory_order_relaxed));
-
-  if (head || !parent->hasFlags(BFDataReady))
-    return;
-
-  // Each detached list belongs to one walker; concurrent walks process disjoint indexes.
-  std::deque<BC::Common::BlockIndex*> queue;
-  QueueNextBlocks(queue, parent);
-  BC::Common::BlockIndex *best = nullptr;
-
-  while (!queue.empty()) {
-    BC::Common::BlockIndex *current = queue.front();
-    queue.pop_front();
-
-    // A rejected block takes its descendants with it: the walk stops here, so their successor
-    // lists stay unreleased and nothing below them is ever offered as a candidate
-    if (current->hasFlags(BFInvalid) ||
-        current->Prev->hasFlags(BFInvalid))
-      continue;
-
-    uint32_t flags = current->Flags.fetch_or(BFDataReady, std::memory_order_acq_rel);
-    if ((flags & BFHeaderReady) && (!best || current->ChainWork > best->ChainWork))
-      best = current;
-    QueueNextBlocks(queue, current);
-  }
-
-  if (best)
-    blockIndex.notifyReady(best);
+                                             std::memory_order_acquire));
+  return successorEvents(head);
 }
 
 // A duplicate returns immediately; its Header/Prev may still be under construction
@@ -1044,6 +1027,7 @@ BC::Common::BlockIndex *addHeader(BlockInMemoryIndex &blockIndex,
                                  const BC::Proto::BlockHeader &header,
                                  bool workChecked)
 {
+  // Header batches need the parent's stub to order downloads, even for a duplicate.
   auto *prev = findOrCreateStub(blockIndex, header.hashPrevBlock);
   auto *index = findOrCreateStub(blockIndex, header.GetHash());
   uint32_t bits = BFHeaderWriteStarted;
@@ -1055,10 +1039,9 @@ BC::Common::BlockIndex *addHeader(BlockInMemoryIndex &blockIndex,
 
   index->Prev = prev;
   index->Header = header;
-  flags = index->Flags.fetch_or(BFHeaderDone, std::memory_order_acq_rel);
-  publishHeader(blockIndex, chainParams, index);
-  if (flags & BFDataDone)
-    publishBlock(blockIndex, index);
+  index->Flags.fetch_or(BFHeaderDone, std::memory_order_release);
+  uint32_t events = addSuccessor(index);
+  buildChain(blockIndex, chainParams, index, events);
   return index;
 }
 
@@ -1074,27 +1057,29 @@ EBlockDataResult addBlock(BlockInMemoryIndex &blockIndex,
     return EBlockDataResult::Invalid;
 
   const auto &header = block->header;
-  auto *prev = findOrCreateStub(blockIndex, header.hashPrevBlock);
   auto *index = findOrCreateStub(blockIndex, header.GetHash());
   if (accepted)
     *accepted = index;
   if (index->Flags.fetch_or(BFDataWriteStarted, std::memory_order_acq_rel) & BFDataWriteStarted)
     return EBlockDataResult::Duplicate;
 
-  if (!(index->Flags.fetch_or(BFHeaderWriteStarted, std::memory_order_acq_rel) & BFHeaderWriteStarted)) {
-    index->Prev = prev;
-    index->Header = header;
-    // We own the body: it cannot be done yet, so no publication check here.
-    index->Flags.fetch_or(BFHeaderDone, std::memory_order_release);
-    publishHeader(blockIndex, chainParams, index);
-  }
-
   index->FileNo = fileNo;
   index->FileOffset = fileOffset;
   index->SerializedBlockSize = static_cast<uint32_t>(object.get()->blockData().size());
   index->Serialized.reset(object.get());
-  if (index->Flags.fetch_or(BFDataDone, std::memory_order_acq_rel) & BFHeaderDone)
-    publishBlock(blockIndex, index);
+
+  uint32_t events = 0;
+  bool writeHeader = !(index->Flags.fetch_or(BFHeaderWriteStarted, std::memory_order_acq_rel) & BFHeaderWriteStarted);
+  if (writeHeader) {
+    index->Prev = findOrCreateStub(blockIndex, header.hashPrevBlock);
+    index->Header = header;
+    // Publish both together so a ready parent starts only one traversal.
+    index->Flags.fetch_or(BFHeaderDone | BFDataDone, std::memory_order_release);
+    events = addSuccessor(index);
+  } else if (index->Flags.fetch_or(BFDataDone, std::memory_order_acq_rel) & BFParentDataReady) {
+    events = CEPublishDataReady;
+  }
+  buildChain(blockIndex, chainParams, index, events);
   return EBlockDataResult::Accepted;
 }
 
@@ -1140,7 +1125,9 @@ static bool decodeIndexRange(BlockInMemoryIndex &blockIndex,
     }
 
     index->Flags.store(BFHeaderWriteStarted | BFHeaderDone | BFDataWriteStarted | BFDataDone |
-                       BFWorkChecked | BFHeaderReady | BFDataReady, std::memory_order_relaxed);
+                       BFWorkChecked | BFHeaderReady | BFDataReady | BFParentDataReady,
+                       std::memory_order_relaxed);
+    index->Successors.store(SPReady, std::memory_order_relaxed);
 
     bool blockPresent = index->FileNo < blockFileSizes.size();
     if (blockPresent) {

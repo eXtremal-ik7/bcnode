@@ -225,8 +225,9 @@ int main(int argc, char **argv)
     genesisIndex->Header = context.ChainParams.GenesisBlock.header;
     genesisIndex->ChainWork = BC::Common::GetBlockProof(genesisIndex->Header, context.ChainParams);
     genesisIndex->Flags.store(BFHeaderWriteStarted | BFHeaderDone | BFDataWriteStarted | BFDataDone |
-                              BFWorkChecked | BFHeaderReady | BFDataReady | BFOnChain,
+                              BFWorkChecked | BFHeaderReady | BFDataReady | BFParentDataReady | BFOnChain,
                               std::memory_order_relaxed);
+    genesisIndex->Successors.store(SPReady, std::memory_order_relaxed);
     {
       xmstream stream;
       BTC::serialize(stream, context.ChainParams.GenesisBlock);

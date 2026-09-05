@@ -19,10 +19,19 @@ enum BlockFlags : uint32_t {
   BFHeaderReady        = 1u << 5, // header path to genesis: Height and ChainWork are readable
   BFDataReady          = 1u << 6, // complete block-data path to genesis
   BFOnChain            = 1u << 7,
-  BFInvalid            = 1u << 8
+  BFParentDataReady    = 1u << 8, // meets DataDone to elect the data-path builder
+  BFInvalid            = 1u << 9
+};
+
+// Low bits of Successors: phases published to children (walks may still be running).
+enum SuccessorPhase : uintptr_t {
+  SPHeaderReady = 1u << 0,
+  SPDataReady   = 1u << 1,
+  SPReady      = SPHeaderReady | SPDataReady
 };
 
 static_assert(std::atomic<uint32_t>::is_always_lock_free);
+static_assert(std::atomic<uintptr_t>::is_always_lock_free);
 
 namespace BTC {
 namespace Common {
@@ -113,13 +122,10 @@ public:
   // TODO: make union with other field for save memory
   std::chrono::time_point<std::chrono::steady_clock> DownloadingStartTime = std::chrono::time_point<std::chrono::steady_clock>::max();
 
-  // Successor lists are detached once their parent's topology is ready.
-  std::atomic<BlockIndexTy*> SuccessorHeaders = nullptr;
-  std::atomic<BlockIndexTy*> SuccessorBlocks = nullptr;
-
-  // Written before CAS insertion, immutable once published in the corresponding list.
-  BlockIndexTy *HeaderNext = nullptr;
-  BlockIndexTy *BlockNext = nullptr;
+  // Permanent successor list with SuccessorPhase bits in its head.
+  std::atomic<uintptr_t> Successors = 0;
+  // Only the header writer inserts this index; the link is then immutable.
+  BlockIndexTy *SuccessorNext = nullptr;
 
 public:
   static BlockIndexTy *create() {
