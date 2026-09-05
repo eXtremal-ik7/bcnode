@@ -220,16 +220,13 @@ int main(int argc, char **argv)
 
   {
     // Add genesis block to index
-    BC::Common::BlockIndex *genesisIndex = BC::Common::BlockIndex::create(BSBlock, nullptr);
-    genesisIndex->SuccessorHeaders.set(nullptr, 1);
-    genesisIndex->SuccessorBlocks.set(nullptr, 1);
+    BC::Common::BlockIndex *genesisIndex = BC::Common::BlockIndex::create();
     genesisIndex->Height = 0;
     genesisIndex->Header = context.ChainParams.GenesisBlock.header;
     genesisIndex->ChainWork = BC::Common::GetBlockProof(genesisIndex->Header, context.ChainParams);
-    genesisIndex->OnChain = true;
-    genesisIndex->WorkChecked = true;
-    genesisIndex->HeaderReady = true;
-    genesisIndex->DataReady = true;
+    genesisIndex->Flags.store(BFHeaderWriteStarted | BFHeaderDone | BFDataWriteStarted | BFDataDone |
+                              BFWorkChecked | BFHeaderReady | BFDataReady | BFOnChain,
+                              std::memory_order_relaxed);
     {
       xmstream stream;
       BTC::serialize(stream, context.ChainParams.GenesisBlock);

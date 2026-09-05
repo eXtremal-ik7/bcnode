@@ -116,7 +116,8 @@ public:
   // that went quiet leaves it neither finished nor moving. Whoever calls this releases such a source
   bool stalled(uint32_t bestHeight, std::chrono::time_point<std::chrono::steady_clock> now);
 
-  void enqueue(std::vector<BC::Common::BlockIndex*> &&indexes, bool counted);
+  void enqueue(std::vector<BC::Common::BlockIndex*> &&indexes,
+               BC::Common::BlockIndex *prev, bool counted);
   void enqueueHighPriority(std::vector<BC::Common::BlockIndex*> &&indexes);
   void processStalledBlocks(BC::Common::BlockIndex *frontier);
   bool dequeue(std::vector<BC::Common::BlockIndex*> &indexes, size_t indexesNum, bool highPriorityOnly);

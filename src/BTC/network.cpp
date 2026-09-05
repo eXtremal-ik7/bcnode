@@ -536,9 +536,9 @@ void Peer::onInv(BC::Proto::MessageInv &inv)
         break;
       case BC::Proto::InventoryVector::MSG_BLOCK :
       case BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : {
-        // Check presense of this block
+        // A started data write suppresses another download; it does not make the data readable.
         auto it = BlockIndex_.blockIndex().find(element.hash);
-        if (it == BlockIndex_.blockIndex().end() || !haveBlockData(it->second->IndexState)) {
+        if (it == BlockIndex_.blockIndex().end() || !it->second->hasFlags(BFDataWriteStarted)) {
           BC::Proto::InventoryVector iv;
           iv.type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
           iv.hash = element.hash;
@@ -663,7 +663,8 @@ bool Peer::fetchQueuedBlocks(xvector<BC::Proto::BlockHashTy> &hashes)
   if ((blockDownloading.fetch_add(sub) & 0xF) == 2) {
     for (auto &hash: ScheduledToDownload_) {
       auto index = BlockIndex_.blockIndex().find(hash);
-      if (index == BlockIndex_.blockIndex().end() || !haveBlockData(index->second->IndexState))
+      // Do not retry a download once a writer has started attaching its data.
+      if (index == BlockIndex_.blockIndex().end() || !index->second->hasFlags(BFDataWriteStarted))
         hashes.emplace_back(hash);
     }
   }
@@ -1066,7 +1067,7 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
       const BC::Proto::BlockHashTy hash = header.GetHash();
       auto It = BlockIndex_->blockIndex().find(hash);
       workValid[i] = It != BlockIndex_->blockIndex().end() &&
-                     It->second->WorkChecked.load(std::memory_order_acquire);
+                     It->second->hasFlags(BFWorkChecked);
       if (!workValid[i]) {
         headersToCheck.push_back(&header);
         checkPositions.push_back(i);
@@ -1092,12 +1093,14 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
         return;
       }
 
-      index = AddHeader(*BlockIndex_, *ChainParams_, headers[i].header);
+      index = addHeader(*BlockIndex_, *ChainParams_, headers[i].header, /*workChecked=*/true);
       indexes[i] = index;
     }
 
     currentPeer->noteHeight(index->knownHeight());
-    blockSource->enqueue(std::move(indexes), token.consume(blockSource));
+    // Use the received header: indexes.front()->Prev may still be under construction.
+    auto *prev = BlockIndex_->indexByHash(headers.front().header.hashPrevBlock);
+    blockSource->enqueue(std::move(indexes), prev, token.consume(blockSource));
   } else {
     if (headers.empty())
       return;
@@ -1145,14 +1148,21 @@ void Node::Sync(Peer *peer,
   // Network workers deserialize before publication. Scheduled downloads build bulk segments;
   // live relay remains an immediate one-block segment.
   BC::Common::BlockIndex *attached = nullptr;
-  EBlockDataResult result = acceptNetworkBlock(*BlockIndex_,
-                                               *ChainParams_,
-                                               *Storage_,
-                                               data,
-                                               size,
-                                               memorySize,
-                                               !scheduledBlock,
-                                               &attached);
+  size_t unpackedSize = 0;
+  xmstream stream(data, size);
+  auto *block = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
+  EBlockDataResult result = EBlockDataResult::Invalid;
+  if (block && stream.remaining() == 0) {
+    intrusive_ptr<BC::Common::CIndexCacheObject> object(
+      new BC::Common::CIndexCacheObject(&Storage_->cache(), data, size, memorySize,
+                                       block, unpackedSize, !scheduledBlock));
+    result = addBlock(*BlockIndex_, *ChainParams_, object,
+                      std::numeric_limits<uint32_t>::max(),
+                      std::numeric_limits<uint32_t>::max(), &attached);
+  } else {
+    operator delete(block);
+    operator delete(data);
+  }
   if (scheduledBlock && downloadFinished)
     Pipeline_->setBulkFeed(false);
 
@@ -1387,13 +1397,14 @@ bool Node::scheduleBlocksDownload(Peer *slave)
 
   LOG_F(WARNING, "%s: download time: %u, last batch size: %zu, new batch size: %zu; ping: %u", slave->Name.c_str(), slave->averageDownloadTime(), slave->LastBatchSize_, batchSize, slave->averagePing());
 
-  if (!slave->IsProducerPeer_ && blockSource.lastKnownIndex()) {
+  auto *lastKnown = blockSource.lastKnownIndex();
+  if (!slave->IsProducerPeer_ && lastKnown && lastKnown->hasFlags(BFHeaderReady)) {
     // lastKnownIndex is null until the first headers batch lands: the retry queue can feed a
     // fresh source before that, and the probe makes no sense without a master header anyway
     if (!slave->LastKnownBlock_ || indexes.back()->knownHeight() > slave->LastKnownBlock_->knownHeight()) {
       // Master peer contains last received header, we can build block locator based on this header
       // and use getheaders message for checking slave peer chain
-      slave->LastAskedBlock_ = blockSource.lastKnownIndex();
+      slave->LastAskedBlock_ = lastKnown;
       xvector<BC::Proto::BlockHashTy> hashes;
       buildBlockLocator(hashes, slave->LastAskedBlock_->Prev);
       slave->downloadHeaders(std::move(hashes), slave->LastAskedBlock_->Header.GetHash());
@@ -1405,7 +1416,9 @@ bool Node::scheduleBlocksDownload(Peer *slave)
   std::vector<BC::Proto::BlockHashTy> hashes;
   for (const auto &index: indexes) {
     auto downloadTime = std::chrono::duration_cast<std::chrono::seconds>(now - index->DownloadingStartTime).count();
-    if (index->IndexState.load(std::memory_order_relaxed) == BSHeader &&
+    uint32_t flags = index->Flags.load(std::memory_order_acquire);
+    // HeaderDone makes the hash readable; DataWriteStarted only suppresses duplicate downloads.
+    if ((flags & (BFHeaderDone | BFDataWriteStarted | BFInvalid)) == BFHeaderDone &&
         (index->DownloadingStartTime == TimeUnknown || downloadTime > 8)) {
       index->DownloadingStartTime = now;
       hashes.emplace_back(index->Header.GetHash());

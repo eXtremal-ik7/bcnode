@@ -58,8 +58,7 @@ intrusive_ptr<BlockSource> BlockSource::getOrCreateBlockSource(atomic_intrusive_
 void BlockSource::processTask(Task *task)
 {
   if (task->Type == Task::Batch && !task->Indexes.empty()) {
-    BC::Common::BlockIndex *first = task->Indexes.front();
-    if ((!LastKnownIndex_ && first->Prev && first->Prev->OnChain) || LastKnownIndex_ == task->Prev) {
+    if ((!LastKnownIndex_ && task->Prev && task->Prev->hasFlags(BFOnChain)) || LastKnownIndex_ == task->Prev) {
       for (auto index: task->Indexes)
         DownloadQueue_.push(index);
       LastKnownIndex_ = task->Indexes.back();
@@ -94,7 +93,8 @@ void BlockSource::processTask(TaskHP *task)
     // dequeue drags them below the holes, and a fresh source after a restart has none at all
     BC::Common::BlockIndex *index = task->Frontier;
     for (unsigned i = 0; i < ThreadsNum_; i++) {
-      if (LastDequeued_[i] && (!index || LastDequeued_[i]->knownHeight() > index->knownHeight()))
+      if (LastDequeued_[i] && LastDequeued_[i]->hasFlags(BFHeaderReady) &&
+          (!index || LastDequeued_[i]->knownHeight() > index->knownHeight()))
         index = LastDequeued_[i];
     }
 
@@ -102,8 +102,9 @@ void BlockSource::processTask(TaskHP *task)
     // stalled too - its queue entry died with the old source, nobody else will ask
     auto now = std::chrono::steady_clock::now();
     std::vector<BC::Common::BlockIndex*> stalledBlocks;
-    while (index && !index->OnChain) {
-      if (!haveBlockData(index->IndexState) &&
+    while (index && !index->hasFlags(BFOnChain)) {
+      // Data being attached is not a stalled download, even before DataDone is published.
+      if (!index->hasFlags(BFDataWriteStarted) &&
           (index->DownloadingStartTime == std::chrono::time_point<std::chrono::steady_clock>::max() ||
            std::chrono::duration_cast<std::chrono::seconds>(now-index->DownloadingStartTime).count() >= 8))
         stalledBlocks.push_back(index);
@@ -164,19 +165,20 @@ bool BlockSource::downloadFinished()
 {
   if (DownloadingFinished_)
     return true;
-  if (HeadersFinished_ && (!LastKnownIndex_ || LastKnownIndex_->OnChain))
+  if (HeadersFinished_ && (!LastKnownIndex_ || LastKnownIndex_->hasFlags(BFOnChain)))
     return true;
   return false;
 }
 
-void BlockSource::enqueue(std::vector<BC::Common::BlockIndex*> &&indexes, bool counted)
+void BlockSource::enqueue(std::vector<BC::Common::BlockIndex*> &&indexes,
+                          BC::Common::BlockIndex *prev, bool counted)
 {
   Task *task = new Task;
   task->Owner = this;
   task->Type = Task::Batch;
   task->Counted = counted;
   task->Indexes = std::move(indexes);
-  task->Prev = !task->Indexes.empty() ? task->Indexes[0]->Prev : nullptr;
+  task->Prev = prev;
   Combiner_.call(task, [this](Task *task) { processTask(task); });
 }
 
@@ -209,6 +211,12 @@ bool BlockSource::dequeue(std::vector<BC::Common::BlockIndex*> &indexes, size_t 
       BC::Common::BlockIndex *index;
       if (!DownloadQueue_.try_pop(index))
         break;
+      // A competing header writer may still own this stub. Keep its download queued;
+      // return to the event loop instead of waiting for that writer.
+      if (!index->hasFlags(BFHeaderDone)) {
+        DownloadQueue_.push(index);
+        break;
+      }
       indexes.push_back(index);
     }
   }

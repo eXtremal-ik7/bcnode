@@ -7,7 +7,6 @@
 
 #include "BC/bc.h"
 #include "common/blockPipeline.h"
-#include "common/combiner.h"
 #include "common/linearDataStorage.h"
 #include <tbb/concurrent_unordered_map.h>
 #include <filesystem>
@@ -30,9 +29,12 @@ BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
                                     BC::Common::BlockIndex *previousBest,
                                     std::vector<BC::Common::BlockIndex*> &forDisconnect);
 
-BC::Common::BlockIndex *AddHeader(BlockInMemoryIndex &blockIndex,
-                                  BC::Common::ChainParams &chainParams,
-                                  const BC::Proto::BlockHeader &header);
+// Does not wait for a concurrent writer. Read Header/Prev only after BFHeaderDone.
+// Does not check PoW; pass workChecked only if the caller has already verified it.
+BC::Common::BlockIndex *addHeader(BlockInMemoryIndex &blockIndex,
+                                 BC::Common::ChainParams &chainParams,
+                                 const BC::Proto::BlockHeader &header,
+                                 bool workChecked = false);
 
 enum class EBlockDataResult {
   Accepted,
@@ -41,24 +43,14 @@ enum class EBlockDataResult {
 };
 
 // Publish a decoded block. The index owns a reference to object after Accepted; file coordinates
-// are present for disk blocks and absent for network blocks.
-EBlockDataResult acceptBlockData(BlockInMemoryIndex &blockIndex,
-                                 BC::Common::ChainParams &chainParams,
-                                 const intrusive_ptr<BC::Common::CIndexCacheObject> &object,
-                                 uint32_t fileNo,
-                                 uint32_t fileOffset,
-                                 BC::Common::BlockIndex **accepted);
-
-// Takes ownership of data in every result. Network blocks keep it in CIndexCacheObject so the
-// storage thread can append exactly the received serialization.
-EBlockDataResult acceptNetworkBlock(BlockInMemoryIndex &blockIndex,
-                                    BC::Common::ChainParams &chainParams,
-                                    BC::DB::Storage &storage,
-                                    void *data,
-                                    size_t size,
-                                    size_t memorySize,
-                                    bool relay,
-                                    BC::Common::BlockIndex **accepted);
+// are present for disk blocks and absent for network blocks. Accepted need not mean HeaderDone:
+// a concurrent header writer will finish publication without making this caller wait.
+EBlockDataResult addBlock(BlockInMemoryIndex &blockIndex,
+                         BC::Common::ChainParams &chainParams,
+                         const intrusive_ptr<BC::Common::CIndexCacheObject> &object,
+                         uint32_t fileNo,
+                         uint32_t fileOffset,
+                         BC::Common::BlockIndex **accepted);
 
 // Rare path after a rejected candidate: find the strongest fully data-reachable branch with no
 // invalid ancestor.
@@ -124,7 +116,6 @@ public:
 
   auto &blockIndex() { return BlockIndex_; }
   auto &blockHeightIndex() { return BlockHeightIndex_; }
-  auto &combiner() { return ReadyCombiner_; }
 
   void notifyReady(BC::Common::BlockIndex *index) {
     CBlockPipeline *pipeline = ReadyPipeline_.load(std::memory_order_acquire);
@@ -137,7 +128,6 @@ public:
   }
 
 private:
-  Combiner<BC::Common::BlockIndex> ReadyCombiner_;
   std::atomic<CBlockPipeline*> ReadyPipeline_ = nullptr;
   tbb::concurrent_unordered_map<BC::Proto::BlockHashTy, BC::Common::BlockIndex*, std::hash<BC::Proto::BlockHashTy>> BlockIndex_;
   tbb::concurrent_unordered_map<uint32_t, BC::Common::BlockIndex*, std::hash<uint32_t>> BlockHeightIndex_;

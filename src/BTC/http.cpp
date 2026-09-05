@@ -331,7 +331,7 @@ void BC::Network::HttpApiConnection::onBlocksByHash(rapidjson::Document &request
 
   // Search block in index
   BC::Common::BlockIndex *index = BlockIndex_.indexByHash(hash);
-  if (!index) {
+  if (!index || !index->ready()) {
     replyWithError("BLOCK_NOT_FOUND", "", "" ,"");
     return;
   }
@@ -950,7 +950,7 @@ void BC::Network::HttpApiConnection::serializeBlock(xmstream &stream,
 
   blockObject.addString("reward", FormatMoney(reward, BC::Configuration::RationalPartSize));
   blockObject.addNull("fees_total");
-  blockObject.addBoolean("is_orphan", !index->OnChain);
+  blockObject.addBoolean("is_orphan", !index->hasFlags(BFOnChain));
 }
 
 const BTC::Common::CBIP30Repeat *BC::Network::HttpApiConnection::bip30Repeat(const BC::Proto::TxHashTy &txid) const

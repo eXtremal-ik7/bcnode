@@ -9,17 +9,20 @@
 #include <chrono>
 #include <memory>
 
-enum BlockStatus {
-  BSEmpty = 0,  // stub for a block known only as someone's predecessor: no header yet
-  BSClaimed,    // a producer is filling the index; other producers wait for the final state
-  BSHeader,     // header accepted, no block data
-  BSData,       // block data attached and waiting for the batch pipeline, nothing validated yet
-  BSBlock,      // block data unpacked and accepted (failed checks stay here: not asked again)
-  BSInvalid     // rejected for good: consensus or connect check failed
+enum BlockFlags : uint32_t {
+  // WriteStarted elects a single writer; only Done publishes its fields. Both bits stay set.
+  BFHeaderWriteStarted = 1u << 0,
+  BFHeaderDone         = 1u << 1, // Header and Prev are immutable and readable
+  BFDataWriteStarted   = 1u << 2, // suppress duplicate writes/downloads; data is not necessarily readable
+  BFDataDone           = 1u << 3, // Serialized and initial disk coordinates are readable
+  BFWorkChecked        = 1u << 4,
+  BFHeaderReady        = 1u << 5, // header path to genesis: Height and ChainWork are readable
+  BFDataReady          = 1u << 6, // complete block-data path to genesis
+  BFOnChain            = 1u << 7,
+  BFInvalid            = 1u << 8
 };
 
-// Block data is here or on its way through the pipeline: don't ask peers for it again
-static inline bool haveBlockData(BlockStatus state) { return state >= BSData; }
+static_assert(std::atomic<uint32_t>::is_always_lock_free);
 
 namespace BTC {
 namespace Common {
@@ -88,10 +91,10 @@ public:
 template<typename T>
 struct alignas(8) BlockIndexTy {
 private:
-  BlockIndexTy() {}
+  BlockIndexTy() = default;
 
 public:
-  std::atomic<BlockStatus> IndexState;
+  std::atomic<uint32_t> Flags = 0;
 
   typename T::BlockHeader Header;
   uint32_t Height = std::numeric_limits<uint32_t>::max();
@@ -105,44 +108,29 @@ public:
   BlockIndexTy *Prev = nullptr;
   BlockIndexTy *Next = nullptr;
 
-  // On the best chain: written by connect/disconnect, read from network threads (the block source
-  // decides by it what is left to download)
-  std::atomic<bool> OnChain = false;
-  // The header PoW was checked either by the headers-first batch or by a preparation wave.
-  std::atomic<bool> WorkChecked = false;
-  // The independent topology walks may finish in either order. HeaderReady publishes
-  // Height/ChainWork; DataReady publishes a complete block-data path to genesis. Neither goes
-  // back: an evicted object can be rebuilt from its disk coordinates.
-  std::atomic<bool> HeaderReady = false;
-  std::atomic<bool> DataReady = false;
-
   UInt<256> ChainWork;
   atomic_intrusive_ptr<CIndexCacheObject> Serialized;
   // TODO: make union with other field for save memory
   std::chrono::time_point<std::chrono::steady_clock> DownloadingStartTime = std::chrono::time_point<std::chrono::steady_clock>::max();
 
-  // queue to chainstate
-  // TODO: don't use intrusive container
-  atomic_tagged_ptr<BlockIndexTy, 3> SuccessorHeaders;
-  atomic_tagged_ptr<BlockIndexTy, 3> SuccessorBlocks;
-  atomic_tagged_ptr<BlockIndexTy, 3> ConcurrentHeaderNext;
-  atomic_tagged_ptr<BlockIndexTy, 3> ConcurrentBlockNext;
-  BlockIndexTy *CombinerNext;
+  // Successor lists are detached once their parent's topology is ready.
+  std::atomic<BlockIndexTy*> SuccessorHeaders = nullptr;
+  std::atomic<BlockIndexTy*> SuccessorBlocks = nullptr;
+
+  // Written before CAS insertion, immutable once published in the corresponding list.
+  BlockIndexTy *HeaderNext = nullptr;
+  BlockIndexTy *BlockNext = nullptr;
 
 public:
-  static BlockIndexTy *create(BlockStatus state, BlockIndexTy *prev) {
-    BlockIndexTy *index = new BlockIndexTy;
-    index->Prev = prev;
-    index->IndexState = state;
-    index->SuccessorHeaders.set(nullptr, 0);
-    index->SuccessorBlocks.set(nullptr, 0);
-    index->ConcurrentHeaderNext.set(nullptr, 0);
-    index->ConcurrentBlockNext.set(nullptr, 0);
-    index->CombinerNext = nullptr;
-    return index;
+  static BlockIndexTy *create() {
+    return new BlockIndexTy;
   }
 
-  bool isOrphan() const { return Height == std::numeric_limits<uint32_t>::max(); }
+  bool hasFlags(uint32_t flags) const {
+    return (Flags.load(std::memory_order_acquire) & flags) == flags;
+  }
+
+  bool isOrphan() const { return !hasFlags(BFHeaderReady); }
   bool blockStored() const {
     return FileNo != std::numeric_limits<uint32_t>::max() &&
            FileOffset != std::numeric_limits<uint32_t>::max() &&
@@ -156,18 +144,14 @@ public:
   }
 
   bool ready() const {
-    return HeaderReady.load(std::memory_order_acquire) &&
-           DataReady.load(std::memory_order_acquire);
+    return hasFlags(BFHeaderReady | BFDataReady);
   }
 
   uint32_t knownHeight() const {
-    return HeaderReady.load(std::memory_order_acquire) ?
+    return hasFlags(BFHeaderReady) ?
            Height : std::numeric_limits<uint32_t>::max();
   }
 
-  BlockIndexTy *next() { return CombinerNext; }
-  void setNext(BlockIndexTy *index) { CombinerNext = index; }
-  void release() {}
 };
 
 }

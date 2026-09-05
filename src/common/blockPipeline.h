@@ -7,15 +7,13 @@
 
 #include "BC/bc.h"
 #include "common/intrusive_ptr.h"
+#include "common/inbox.h"
 #include "common/parallelRunner.h"
 
 #include <atomic>
-#include <condition_variable>
 #include <deque>
 #include <functional>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -52,8 +50,8 @@ struct CSegment {
   std::vector<CInput> Inputs;
   size_t Size = 0;
 
-  // Preparation is parallel, connect is ordered. Seq orders segments inside one Gen; Gen makes
-  // results from a discarded generation harmless after a failed segment resets Seq.
+  // Preparation is parallel, connect is ordered. Seq reserves a position in the window;
+  // Gen identifies late results from jobs that were running when their branch was discarded.
   uint64_t Seq = 0;
   uint64_t Gen = 0;
 
@@ -72,6 +70,32 @@ struct CSegment {
 
 private:
   std::atomic<size_t> Shares_ = 0;
+};
+
+// A job is also its completion event: ownership travels from the combiner to a worker and
+// back, without allocating a second node. Other events are consumed by the combiner once.
+struct CBlockPipelineEvent {
+  enum class EType { Candidate, Prepared, Connected, Feed, Bulk, Drain, Stop };
+
+  struct CReply {
+    std::atomic<bool> Done = false;
+    void wait() { Done.wait(false, std::memory_order_acquire); }
+    void finish() {
+      Done.store(true, std::memory_order_release);
+      Done.notify_all();
+    }
+  };
+
+  explicit CBlockPipelineEvent(EType type) : Type(type) {}
+  EType Type;
+  CBlockPipelineEvent *Next = nullptr;
+  BC::Common::BlockIndex *Index = nullptr;
+  std::unique_ptr<CSegment> Segment;
+  std::shared_ptr<CReply> Reply;
+  size_t Lane = 0;
+  size_t FailedAt = 0;
+  bool Ok = true;
+  bool Bulk = false;
 };
 
 class CBlockPipeline {
@@ -103,8 +127,8 @@ public:
   typedef std::function<void(std::unique_ptr<CSegment>)> catchUpSink;
   void setCatchUpSink(catchUpSink sink) { CatchUpSink_ = std::move(sink); }
 
-  // The only chain input: the flat combiner calls this when a fully data-reachable tip with more
-  // work appears. It never blocks the producer.
+  // Offer a fully data-reachable tip. The caller may become the combiner and plan work, but
+  // never waits for validation, connection or room in the segment window.
   void submit(BC::Common::BlockIndex *candidate);
 
   // A decoded batch of blocks already on the active chain, for databases that lag behind it.
@@ -118,17 +142,37 @@ public:
   void waitDrained();
 
 private:
-  void prepare();
-  void serial();
-  void scheduleLocked();
-  std::unique_ptr<CSegment> makeSegmentLocked();
-  void publishReadyLocked();
-  void resetLocked(std::vector<std::unique_ptr<CSegment>> &dropped);
+  using CEvent = CBlockPipelineEvent;
+  using CReplies = std::vector<std::shared_ptr<CEvent::CReply>>;
+
+  // One outstanding job per worker. Only the combiner gives work, only this worker takes it.
+  // The atomic mailbox also carries the wakeup, so there is no separate sleep/wakeup race.
+  struct CWorker {
+    std::atomic<CEvent*> Job = nullptr;
+    std::thread Thread;
+    bool Busy = false; // combiner only; stays true until the completion is handled
+    void give(CEvent *event);
+    CEvent *take();
+  };
+
+  struct CSlot {
+    enum class EState { Pending, Preparing, Ready };
+    uint64_t Seq;
+    std::unique_ptr<CEvent> Task; // null while the preparation worker owns it
+    EState State;
+  };
+
+  void post(CEvent *event);
+  void request(CEvent *event);
+  void handle(std::unique_ptr<CEvent> event, CReplies &replies);
+  void worker(CWorker &worker, bool preparation);
+  void schedule(CReplies &replies);
+  void admit(BC::Common::BlockIndex *candidate);
+  void append(std::unique_ptr<CEvent> event, CSlot::EState state);
+  std::unique_ptr<CSegment> makeSegment();
+  void reset();
   void discard(CSegment &segment);
-  void rescanCandidate();
-  size_t queuedLocked() const;
-  bool idleLocked() const;
-  bool drainedLocked() const;
+  bool idle() const;
 
 private:
   BlockInMemoryIndex *BlockIndex_ = nullptr;
@@ -140,31 +184,34 @@ private:
   catchUpSink CatchUpSink_;
 
   CParallelRunner Runner_;
-  std::vector<std::thread> PrepThreads_;
-  std::thread SerialThread_;
+  std::deque<CWorker> PrepWorkers_;
+  CWorker SerialWorker_;
+  CEvent StopEvent_{CEvent::EType::Stop};
 
-  mutable std::mutex Mutex_;
-  std::condition_variable PrepCV_;
-  std::condition_variable SerialCV_;
-  std::condition_variable DrainCV_;
-  std::deque<std::unique_ptr<CSegment>> Pending_;
-  std::map<uint64_t, std::unique_ptr<CSegment>> Reorder_;
-  std::deque<std::unique_ptr<CSegment>> Ready_;
+  CInbox<CEvent> Combiner_;
+  // Everything below belongs to the combiner. A null window slot reserves the position of a
+  // preparation still in flight; completed segments connect only from the front.
+  std::deque<CSlot> Window_;
+  std::deque<std::unique_ptr<CEvent>> FeedWaiters_;
+  CReplies DrainWaiters_;
+  std::shared_ptr<CEvent::CReply> StopReply_;
+  size_t WindowLimit_ = 0;
 
   uint64_t NextSeq_ = 0;
-  uint64_t PublishSeq_ = 0;
   uint64_t Generation_ = 0;
   size_t Preparing_ = 0;
   BC::Common::BlockIndex *Frontier_ = nullptr;
   BC::Common::BlockIndex *Candidate_ = nullptr;
 
   bool Stopped_ = false;
-  bool SerialBusy_ = false;
   bool Resetting_ = false;
-  std::atomic<bool> BulkFeed_ = false;
+  bool BulkFeed_ = false;
   bool FlushBulk_ = false;
   bool TailWaiting_ = false;
 
-  // Candidate down to the frontier, reused across calls to keep its capacity
+  // Candidate down to the frontier. Consume from the back, retaining the rest for the next
+  // segment; a new candidate invalidates the path. No repeated walk for each batch of a backlog.
   std::vector<BC::Common::BlockIndex*> Path_;
+  BC::Common::BlockIndex *PathBase_ = nullptr;
+  size_t PathBytes_ = 0;
 };
