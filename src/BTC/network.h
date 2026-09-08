@@ -1,4 +1,6 @@
 #pragma once
+
+#include "config4cpp/Configuration.h"
 #include "common/blockDataBase.h"
 #include "common/blockSource.h"
 #include "common/hostAddress.h"
@@ -364,6 +366,8 @@ private:
   BC::Common::ChainParams *ChainParams_;
   BC::DB::Storage *Storage_;
   CBlockPipeline *Pipeline_;
+  // Lives as long as the process; bcnode.cpp never destroys it
+  config4cpp::Configuration *Config_ = nullptr;
   asyncBase *Base;
   unsigned ThreadsNum_;
   unsigned WorkerThreadsNum_;
@@ -407,6 +411,8 @@ private:
   void OnBCNodeConnection(HostAddress address, aioObject *object);
 
 public:
+  // cfg is the parsed bcnode.conf, the same one the databases get: a coin whose network layer
+  // has settings of its own reads them here, and the engine stays out of naming them
   void Init(BlockInMemoryIndex &blockIndex,
             BC::Common::ChainParams &chainParams,
             BC::DB::Storage &storage,
@@ -415,7 +421,9 @@ public:
             unsigned threadsNum,
             unsigned workerThreadsNum,
             unsigned outgoingConnectionsLimit,
-            unsigned incomingConnectionsLimit) {
+            unsigned incomingConnectionsLimit,
+            config4cpp::Configuration *cfg) {
+    Config_ = cfg;
     BlockIndex_ = &blockIndex;
     ChainParams_ = &chainParams;
     Storage_ = &storage;

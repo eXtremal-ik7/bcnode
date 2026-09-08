@@ -481,7 +481,7 @@ int main(int argc, char **argv)
   }
 
   // Starting daemon
-  context.Node.Init(context.BlockIndex, context.ChainParams, context.Storage, context.Pipeline, context.MainBase, totalThreadsNum, workerThreadsNum, outgoingConnectionsLimit, incomingConnectionsLimit);
+  context.Node.Init(context.BlockIndex, context.ChainParams, context.Storage, context.Pipeline, context.MainBase, totalThreadsNum, workerThreadsNum, outgoingConnectionsLimit, incomingConnectionsLimit, cfg);
 
   for (size_t i = 0; i < lookupThreadsNum; i++) {
     if (!workers[i].get())
