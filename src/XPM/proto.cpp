@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <memory>
 #include "proto.h"
 #include "common/serializeJson.h"
 
@@ -25,19 +26,6 @@ size_t Io<mpz_class>::getSerializedSize(const mpz_class &data)
   if (serializedSize > bnSize)
     size += 1;
   return size;
-}
-
-size_t Io<mpz_class>::getUnpackedExtraSize(xmstream &src)
-{
-  uint64_t size;
-  unserializeVarSize(src, size);
-  if (src.seek<uint8_t>(size)) {
-    size_t alignedSize = size % sizeof(mp_limb_t) ? size + (sizeof(mp_limb_t) - size % sizeof(mp_limb_t)) : size;
-    size_t limbsNum = alignedSize / sizeof(mp_limb_t);
-    return limbsNum * sizeof(mp_limb_t);
-  } else {
-    return 0;
-  }
 }
 
 void Io<mpz_class>::serialize(xmstream &dst, const mpz_class &data)
@@ -65,21 +53,32 @@ void Io<mpz_class>::unserialize(xmstream &src, mpz_class &data)
     mpz_import(data.get_mpz_t(), size, -1, 1, -1, 0, p);
 }
 
-void Io<mpz_class>::unpack2(xmstream &src, mpz_class *data, uint8_t **extraData)
+void Io<mpz_class>::read(Ser::CReaderState &op, xmstream &src, mpz_class &data)
 {
   uint64_t size;
   unserializeVarSize(src, size);
-  if (const uint8_t *p = src.seek<uint8_t>(size)) {
-    size_t alignedSize = size % sizeof(mp_limb_t) ? size + (sizeof(mp_limb_t) - size % sizeof(mp_limb_t)) : size;
-    size_t limbsNum = alignedSize / sizeof(mp_limb_t);
-    mp_limb_t *limbs = reinterpret_cast<mp_limb_t*>(*extraData);
-    (*extraData) += limbsNum*sizeof(mp_limb_t);
+  const uint8_t *p = src.seek<uint8_t>(size);
+  if (!p)
+    return;
 
-    data->get_mpz_t()->_mp_d = limbs;
-    data->get_mpz_t()->_mp_size = static_cast<int>(limbsNum);
-    data->get_mpz_t()->_mp_alloc = static_cast<int>(limbsNum);
-    mpz_import(data->get_mpz_t(), size, -1, 1, -1, 0, p);
+  if (op.pass() == Ser::EPass::Read) {
+    mpz_import(data.get_mpz_t(), size, -1, 1, -1, 0, p);
+    return;
   }
+
+  size_t alignedSize = size % sizeof(mp_limb_t) ? size + (sizeof(mp_limb_t) - size % sizeof(mp_limb_t)) : size;
+  size_t limbsNum = alignedSize / sizeof(mp_limb_t);
+  uint8_t *memory = op.arena(limbsNum * sizeof(mp_limb_t));
+  if (!memory)
+    return;
+
+  // What the default constructor allocated goes back before the limbs move into the arena,
+  // which is not memory GMP may ever hand to free()
+  std::destroy_at(&data);
+  data.get_mpz_t()->_mp_d = reinterpret_cast<mp_limb_t*>(memory);
+  data.get_mpz_t()->_mp_size = static_cast<int>(limbsNum);
+  data.get_mpz_t()->_mp_alloc = static_cast<int>(limbsNum);
+  mpz_import(data.get_mpz_t(), size, -1, 1, -1, 0, p);
 }
 
 }

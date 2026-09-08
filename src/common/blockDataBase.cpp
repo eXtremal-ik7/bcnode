@@ -1385,13 +1385,27 @@ bool reindex(BlockInMemoryIndex &blockIndex,
     positions.clear();
     xmstream stream(fileData.get(), fileSize);
     while (stream.remaining()) {
+      // Tail padding is a run of zeros, and so is the record header of a coin whose magic is
+      // zero - the size field is what tells them apart, because a record is never empty
       size_t recordOffset = stream.offsetOf();
       if (fileData[recordOffset] == 0) {
-        while (recordOffset < fileSize && fileData[recordOffset] == 0)
-          recordOffset++;
-        if (recordOffset == fileSize)
-          break;
-        stream.seekSet(recordOffset);
+        bool padding = true;
+        if (stream.remaining() >= 8) {
+          for (size_t i = recordOffset + 4; i < recordOffset + 8; i++) {
+            if (fileData[i]) {
+              padding = false;
+              break;
+            }
+          }
+        }
+
+        if (padding) {
+          while (recordOffset < fileSize && fileData[recordOffset] == 0)
+            recordOffset++;
+          if (recordOffset == fileSize)
+            break;
+          stream.seekSet(recordOffset);
+        }
       }
 
       if (stream.remaining() < 8) {

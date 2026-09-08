@@ -1,6 +1,13 @@
 #pragma once
 
+// Bitcoin's wire format: compact sizes, base 128 varints, little endian scalars. The machinery
+// that walks a shape - the passes, the arena, the failure latch - is format-neutral and lives
+// in common/serialize.h; this file is only the bytes, and the same bytes serve bcnode's own
+// on-disk structures (the block index, the linked-outputs file, utxodb values) because that is
+// what they were written in, not because a format is inherited from anywhere.
+
 #include "common/baseBlob.h"
+#include "common/serialize.h"
 #include "common/uint.h"
 #include "common/xvector.h"
 #include "p2putils/xmstream.h"
@@ -11,43 +18,20 @@
 #include <string>
 #include <type_traits>
 
-static inline size_t aligned(size_t size, size_t align) { return (size + align - 1) & ~(align-1); }
-static constexpr size_t UnpackAlignment = 8;
-
 namespace BTC {
 
+// The leaves of the format. A leaf that needs arena space of its own declares
+// read(op, src, data) instead of unserialize and takes it from op.arena().
 template<typename T, typename Enable=void>
 struct Io {
   static inline size_t getSerializedSize(const T &data);
-  static inline size_t getUnpackedExtraSize(xmstream &src);
   static inline void serialize(xmstream &src, const T &data);
   static inline void unserialize(xmstream &dst, T &data);
-  static inline void unpack2(xmstream &src, T *data, uint8_t **extraData);
 };
 
 template<typename T> static inline size_t getSerializedSize(const T &data) { return Io<T>::getSerializedSize(data); }
 template<typename T> static inline void serialize(xmstream &src, const T &data) { Io<T>::serialize(src, data); }
-template<typename T> static inline void unserialize(xmstream &dst, T &data) { Io<T>::unserialize(dst, data); }
-template<typename T> static inline T *unpack2(xmstream &src, size_t *size) {
-  size_t dataOnlySize = aligned(sizeof(T), UnpackAlignment);
-  {
-    xmstream stream(src.ptr<uint8_t>(), src.remaining());
-    *size = dataOnlySize + Io<T>::getUnpackedExtraSize(stream);
-    if (stream.eof())
-      return nullptr;
-  }
-
-  uint8_t *data = static_cast<uint8_t*>(operator new(*size));
-  uint8_t *extraData = data + dataOnlySize;
-  Io<T>::unpack2(src, reinterpret_cast<T*>(data), &extraData);
-  assert(static_cast<size_t>(extraData-data) == *size && "Unpack failed");
-  if (!src.eof()) {
-    return reinterpret_cast<T*>(data);
-  } else {
-    operator delete(data);
-    return nullptr;
-  }
-}
+template<typename T> static inline void unserialize(xmstream &src, T &data);
 
 // variable size
 // Upper bound Core puts on a compact size
@@ -185,14 +169,8 @@ struct VarSize {
 
 template<> struct Io<VarSize> {
   static inline size_t getSerializedSize(const VarSize &data) { return getSerializedVarSizeSize(data.Value); }
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    uint64_t value;
-    unserializeVarSize(src, value);
-    return 0;
-  }
   static inline void serialize(xmstream &dst, const VarSize &data) { serializeVarSize(dst, data.Value); }
   static inline void unserialize(xmstream &src, VarSize &data) { unserializeVarSize(src, data.Value); }
-  static inline void unpack2(xmstream &src, VarSize *data, uint8_t**) { unserialize(src, *data); }
 };
 
 }
@@ -214,7 +192,6 @@ struct is_simple_numeric : std::integral_constant<bool,
 template<typename T>
 struct Io<T, typename std::enable_if<is_simple_numeric<T>::value, void>::type> {
   static inline size_t getSerializedSize(const T&) { return sizeof(T); }
-  static inline size_t getUnpackedExtraSize(xmstream &src) { src.seek(sizeof(T)); return 0; }
   static inline void serialize(xmstream &stream, const T &data) { stream.writele<T>(data); }
   static inline void unserialize(xmstream &stream, T &data) { data = stream.readle<T>(); }
 };
@@ -229,29 +206,19 @@ template<> struct Io<bool> {
 // Serialization for base_blob (including uint256) types
 template<unsigned Bits> struct Io<BaseBlob<Bits>> {
   static inline size_t getSerializedSize(const BaseBlob<Bits>&) { return Bits/8; }
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    src.seek(Bits / 8);
-    return 0;
-  }
   static inline void serialize(xmstream &stream, const BaseBlob<Bits> &data) { stream.write(data.begin(), data.size()); }
   static inline void unserialize(xmstream &stream, BaseBlob<Bits> &data) { stream.read(data.begin(), data.size()); }
-  static inline void unpack2(xmstream &src, BaseBlob<Bits> *data, uint8_t**) { unserialize(src, *data); }
 };
 
 template<unsigned Bits> struct Io<UInt<Bits>> {
   static inline size_t getSerializedSize(const UInt<Bits>&) { return Bits/8; }
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    src.seek(Bits / 8);
-    return 0;
-  }
   static inline void serialize(xmstream &stream, const UInt<Bits> &data) { stream.write(data.data(), Bits / 8); }
   static inline void unserialize(xmstream &stream, UInt<Bits> &data) { stream.read(data.data(), Bits / 8); }
-  static inline void unpack2(xmstream &src, UInt<Bits> *data, uint8_t**) { unserialize(src, *data); }
 };
 
 // string
 // Serialization for std::string
-// NOTE: unpacking not supported
+// NOTE: a string keeps its own heap, so a type holding one cannot live in an unpacked object
 template<> struct Io<std::string> {
   static inline size_t getSerializedSize(const std::string &data) {
     return getSerializedVarSizeSize(data.size()) + data.size();
@@ -274,11 +241,6 @@ template<size_t Size> struct Io<std::array<uint8_t, Size>> {
     return Size;
   }
 
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    src.seek(Size);
-    return 0;
-  }
-
   static inline void serialize(xmstream &dst, const std::array<uint8_t, Size> &data) {
     dst.write(data.data(), Size);
   }
@@ -286,202 +248,46 @@ template<size_t Size> struct Io<std::array<uint8_t, Size>> {
   static inline void unserialize(xmstream &src, std::array<uint8_t, Size> &data) {
     src.read(data.data(), Size);
   }
-
-  static inline void unpack2(xmstream &src, std::array<uint8_t, Size> *data, uint8_t**) {
-    src.read(data->data(), Size);
-  }
 };
 
-// xvector
+// xvector: only the writing side is a leaf. Reading a vector is where the three passes differ,
+// so it belongs to the reader, which is the one place that knows which pass is running.
 template<typename T> struct Io<xvector<T>> {
-  static inline size_t getSerializedSize(const xvector<T> &data) {
-    size_t size = getSerializedVarSizeSize(data.size());
-    for (const auto &v: data)
-      size += Io<T>::getSerializedSize(v);
-    return size;
-  }
-
-  static inline size_t getUnpackedExtraSize(xmstream &src, uint64_t *count) {
-    unserializeVarSize(src, *count);
-
-    size_t result = 0;
-    for (size_t i = 0; i < *count; i++)
-      result += Io<T>::getUnpackedExtraSize(src);
-    return *count*sizeof(T) + result;
-  }
-
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    uint64_t size;
-    return getUnpackedExtraSize(src, &size);
-  }
-
-  static inline void serialize(xmstream &dst, const xvector<T> &data) {
-    serializeVarSize(dst, data.size());
-    for (const auto &v: data)
-      BTC::serialize(dst, v);
-  }
-
-  static inline void unserialize(xmstream &src, xvector<T> &data) {
-    uint64_t size = 0;
-    unserializeVarSize(src, size);
-    if (size > src.remaining()) {
-      src.seekEnd(0, true);
-      return;
-    }
-
-    data.resize(size);
-    for (uint64_t i = 0; i < size; i++)
-      BTC::unserialize(src, data[i]);
-  }
-
-  static inline void unpack2(xmstream &src, xvector<T> *data, uint8_t **extraData) {
-    uint64_t size;
-    unserializeVarSize(src, size);
-
-    T *elementsData = reinterpret_cast<T*>(*extraData);
-    new (data) xvector<T>(elementsData, size);
-    (*extraData) += sizeof(T)*size;
-    for (size_t i = 0; i < size; i++)
-      BTC::Io<T>::unpack2(src, &elementsData[i], extraData);
-  }
-};
-
-// Context-dependend xvector
-// The element type takes the context either in its own Io specialization or as trailing
-// arguments of the plain one (the self-described drivers below accept any), hence the fallback
-template<typename T, typename ContextTy> struct Io<xvector<T>, ContextTy> {
-  static inline size_t getSerializedSize(const xvector<T> &data, ContextTy context) {
+  template<typename... Ctx>
+  static inline size_t getSerializedSize(const xvector<T> &data, Ctx... ctx) {
     size_t size = getSerializedVarSizeSize(data.size());
     for (const auto &v: data) {
-      if constexpr (requires { Io<T, ContextTy>::getSerializedSize(v, context); })
-        size += Io<T, ContextTy>::getSerializedSize(v, context);
-      else if constexpr (requires { Io<T>::getSerializedSize(v, context); })
-        size += Io<T>::getSerializedSize(v, context);
+      if constexpr (requires { Io<T>::getSerializedSize(v, ctx...); })
+        size += Io<T>::getSerializedSize(v, ctx...);
       else
         size += Io<T>::getSerializedSize(v);
     }
     return size;
   }
 
-  static inline size_t getUnpackedExtraSize(xmstream &src, uint64_t *count, ContextTy context) {
-    unserializeVarSize(src, *count);
-
-    size_t result = 0;
-    for (size_t i = 0; i < *count; i++) {
-      if constexpr (requires { Io<T, ContextTy>::getUnpackedExtraSize(src, context); })
-        result += Io<T, ContextTy>::getUnpackedExtraSize(src, context);
-      else if constexpr (requires { Io<T>::getUnpackedExtraSize(src, context); })
-        result += Io<T>::getUnpackedExtraSize(src, context);
-      else
-        result += Io<T>::getUnpackedExtraSize(src);
-    }
-    return *count*sizeof(T) + result;
-  }
-
-  static inline size_t getUnpackedExtraSize(xmstream &src, ContextTy context) {
-    uint64_t size;
-    return getUnpackedExtraSize(src, &size, context);
-  }
-
-  static inline void serialize(xmstream &dst, const xvector<T> &data, ContextTy context) {
+  template<typename... Ctx>
+  static inline void serialize(xmstream &dst, const xvector<T> &data, Ctx... ctx) {
     serializeVarSize(dst, data.size());
     for (const auto &v: data) {
-      if constexpr (requires { Io<T, ContextTy>::serialize(dst, v, context); })
-        Io<T, ContextTy>::serialize(dst, v, context);
+      if constexpr (requires { Io<T>::serialize(dst, v, ctx...); })
+        Io<T>::serialize(dst, v, ctx...);
       else
-        Io<T>::serialize(dst, v, context);
-    }
-  }
-
-  static inline void unserialize(xmstream &src, xvector<T> &data, ContextTy context) {
-    uint64_t size = 0;
-    unserializeVarSize(src, size);
-    if (size > src.remaining()) {
-      src.seekEnd(0, true);
-      return;
-    }
-
-    data.resize(size);
-    for (uint64_t i = 0; i < size; i++) {
-      if constexpr (requires { Io<T, ContextTy>::unserialize(src, data[i], context); })
-        Io<T, ContextTy>::unserialize(src, data[i], context);
-      else if constexpr (requires { Io<T>::unserialize(src, data[i], context); })
-        Io<T>::unserialize(src, data[i], context);
-      else
-        Io<T>::unserialize(src, data[i]);
-    }
-  }
-
-  static inline void unpack2(xmstream &src, xvector<T> *data, uint8_t **extraData, ContextTy context) {
-    uint64_t size;
-    unserializeVarSize(src, size);
-
-    T *elementsData = reinterpret_cast<T*>(*extraData);
-    new (data) xvector<T>(elementsData, size);
-    (*extraData) += sizeof(T)*size;
-    for (size_t i = 0; i < size; i++) {
-      if constexpr (requires { Io<T, ContextTy>::unpack2(src, &elementsData[i], extraData, context); })
-        Io<T, ContextTy>::unpack2(src, &elementsData[i], extraData, context);
-      else if constexpr (requires { Io<T>::unpack2(src, &elementsData[i], extraData, context); })
-        Io<T>::unpack2(src, &elementsData[i], extraData, context);
-      else
-        Io<T>::unpack2(src, &elementsData[i], extraData);
+        Io<T>::serialize(dst, v);
     }
   }
 };
 
-// Special case: xvector<uint8_t>
+// Special case: xvector<uint8_t> is a byte string, not a list
 template<> struct Io<xvector<uint8_t>> {
   static inline size_t getSerializedSize(const xvector<uint8_t> &data) {
     return getSerializedVarSizeSize(data.size()) + data.size();
-  }
-
-  static inline size_t getUnpackedExtraSize(xmstream &src, uint64_t *count) {
-    unserializeVarSize(src, *count);
-    src.seek(*count);
-    return aligned(*count, UnpackAlignment);
-  }
-
-  static inline size_t getUnpackedExtraSize(xmstream &src) {
-    uint64_t size;
-    return getUnpackedExtraSize(src, &size);
   }
 
   static inline void serialize(xmstream &dst, const xvector<uint8_t> &data) {
     serializeVarSize(dst, data.size());
     dst.write(data.data(), data.size());
   }
-
-  static inline void unserialize(xmstream &src, xvector<uint8_t> &data) {
-    uint64_t size = 0;
-    unserializeVarSize(src, size);
-    if (size > src.remaining()) {
-      src.seekEnd(0, true);
-      return;
-    }
-
-    data.resize(size);
-    src.read(data.data(), size);
-  }
-
-  static inline void unpack2(xmstream &src, xvector<uint8_t> *data, uint8_t **extraData) {
-    uint64_t size;
-    unserializeVarSize(src, size);
-
-    new (data) xvector<uint8_t>(*extraData, size);
-    void *srcData = src.seek(size);
-    if (srcData)
-      memcpy(*extraData, srcData, size);
-    (*extraData) += aligned(size, UnpackAlignment);
-  }
 };
-
-// unserialize & check
-template<typename T>
-static inline bool unserializeAndCheck(xmstream &stream, T &data) {
-  BTC::Io<T>::unserialize(stream, data);
-  return !stream.eof();
-}
 
 // Self-described types: the wire format is written once as a single template procedure
 //
@@ -499,14 +305,15 @@ static inline bool unserializeAndCheck(xmstream &stream, T &data) {
 // so an heir that forgot its own io fails loudly instead of picking up the base format;
 // heirs that keep the format inherit io as is.
 //
-// The op interface: io(member [, context]) — a field, another self-described type or a leaf;
-// vec(member [, context]) — a vector field, returns the element count on both directions, so
-// counts read from the stream can drive later gates on every pass; raw(member) — unions and
-// paddingless aggregates written as bytes; varint(member) — an integer in Core's base 128 form
-// rather than fixed width little endian; check(ok) — a format rule, makes the readers fail;
+// The op interface: io(member [, context]) — a field, another self-described type or a leaf,
+// with a vector member routed to vec(); vec(member [, context]) — a vector field, returns the
+// element count on every pass, so counts read from the stream can drive later gates even while
+// measuring, when the vector itself is not filled; raw(member) — unions and paddingless
+// aggregates written as bytes; varint(member) — an integer in Core's base 128 form rather than
+// fixed width little endian; check(ok [, what]) — a format rule, makes the readers fail;
 // put(v)/get(v) — direction-specific scalars for wire words that are not members (packed
-// version bits, prefix bytes, the segwit marker); element(vec, i, fn) — per-element access
-// on the reading passes (the measuring pass has no elements and hands fn a throwaway).
+// version bits, prefix bytes, the segwit marker); element(vec, i, fn) — per-element access on
+// the reading side (the measuring pass has no elements and hands fn a throwaway).
 
 // Probes only the call shape, so the io body is not instantiated: a concept usable before
 // the operation classes exist
@@ -523,7 +330,9 @@ struct SizeOf {
   static constexpr bool Writing = true;
 
   template<typename U, typename... Ctx> inline void io(const U &v, Ctx... ctx) {
-    if constexpr (requires { U::io(*this, v, ctx...); }) {
+    if constexpr (Ser::IsXVector<U>::value) {
+      vec(v, ctx...);
+    } else if constexpr (requires { U::io(*this, v, ctx...); }) {
       U::io(*this, v, ctx...);
     } else if constexpr (requires { U::io(*this, v); }) {
       // a self-described member that does not take the context: drop it, as a leaf would
@@ -535,10 +344,7 @@ struct SizeOf {
   }
 
   template<typename U, typename... Ctx> inline size_t vec(const xvector<U> &v, Ctx... ctx) {
-    if constexpr (sizeof...(Ctx) != 0)
-      Size += Io<xvector<U>, Ctx...>::getSerializedSize(v, ctx...);
-    else
-      Size += Io<xvector<U>>::getSerializedSize(v);
+    Size += Io<xvector<U>>::getSerializedSize(v, ctx...);
     return v.size();
   }
 
@@ -546,6 +352,7 @@ struct SizeOf {
   template<typename U> inline void varint(const U &v) { Size += getSerializedVarIntSize(v); }
   template<typename U> inline void put(U) { Size += sizeof(U); }
   inline void check(bool) {}
+  inline void check(bool, const char*) {}
 };
 
 struct Writer {
@@ -553,7 +360,9 @@ struct Writer {
   static constexpr bool Writing = true;
 
   template<typename U, typename... Ctx> inline void io(const U &v, Ctx... ctx) {
-    if constexpr (requires { U::io(*this, v, ctx...); }) {
+    if constexpr (Ser::IsXVector<U>::value) {
+      vec(v, ctx...);
+    } else if constexpr (requires { U::io(*this, v, ctx...); }) {
       U::io(*this, v, ctx...);
     } else if constexpr (requires { U::io(*this, v); }) {
       U::io(*this, v);
@@ -564,10 +373,7 @@ struct Writer {
   }
 
   template<typename U, typename... Ctx> inline size_t vec(const xvector<U> &v, Ctx... ctx) {
-    if constexpr (sizeof...(Ctx) != 0)
-      Io<xvector<U>, Ctx...>::serialize(Dst, v, ctx...);
-    else
-      Io<xvector<U>>::serialize(Dst, v);
+    Io<xvector<U>>::serialize(Dst, v, ctx...);
     return v.size();
   }
 
@@ -575,122 +381,112 @@ struct Writer {
   template<typename U> inline void varint(const U &v) { serializeVarInt(Dst, v); }
   template<typename U> inline void put(U v) { Dst.writele<U>(v); }
   inline void check(bool) {}
+  inline void check(bool, const char*) {}
 };
 
-struct Reader {
+// The reading side, one class for all three passes. What they disagree about is where a
+// vector's elements go, and that lives in Ser::CReaderState::prepare - so the guards a vector
+// read needs are written once and cannot drift between passes.
+//
+// A failure both latches into the status and sets eof on the stream: the latch carries the
+// message, eof is what unserializeAndCheck and unpack2 have always answered on.
+struct Reader : public Ser::CReaderState {
   xmstream &Src;
   static constexpr bool Writing = false;
 
+  Reader(xmstream &src, Ser::CIoStatus &status) : Ser::CReaderState(status), Src(src) {}
+  Reader(xmstream &src, Ser::CIoStatus &status, size_t *extra) : Ser::CReaderState(status, extra), Src(src) {}
+  Reader(xmstream &src, Ser::CIoStatus &status, uint8_t **arena) : Ser::CReaderState(status, arena), Src(src) {}
+
+  inline void fail(const char *what) {
+    Ser::CReaderState::fail(what);
+    Src.seekEnd(0, true);
+  }
+
+  inline void check(bool ok) { if (!ok) fail("format check failed"); }
+  inline void check(bool ok, const char *what) { if (!ok) fail(what); }
+
   template<typename U, typename... Ctx> inline void io(U &v, Ctx... ctx) {
-    if constexpr (requires { U::io(*this, v, ctx...); }) {
-      U::io(*this, v, ctx...);
-    } else if constexpr (requires { U::io(*this, v); }) {
-      U::io(*this, v);
-    } else {
-      static_assert(!SelfIo<U>, "self-described type reached the leaf path: missing io context?");
-      Io<U>::unserialize(Src, v);
-    }
+    if constexpr (Ser::IsXVector<U>::value)
+      vec(v, ctx...);
+    else
+      leaf(v, ctx...);
   }
 
   template<typename U, typename... Ctx> inline size_t vec(xvector<U> &v, Ctx... ctx) {
-    if constexpr (sizeof...(Ctx) != 0)
-      Io<xvector<U>, Ctx...>::unserialize(Src, v, ctx...);
-    else
-      Io<xvector<U>>::unserialize(Src, v);
-    return v.size();
-  }
-
-  template<typename U> inline void raw(U &v) { Src.read(&v, sizeof(U)); }
-  template<typename U> inline void varint(U &v) { unserializeVarInt(Src, v); }
-  template<typename U> inline void get(U &v) { v = Src.readle<U>(); }
-  inline void check(bool ok) { if (!ok) Src.seekEnd(0, true); }
-  template<typename U, typename F> inline void element(xvector<U> &v, size_t i, F body) { body(v[i]); }
-};
-
-// The unpack measuring pass: nothing is being built, vector contents only move the stream.
-// Scalar members are read into the throwaway object the driver provides, so a gate on an
-// already read integer field (the auxpow bit, a message version) works here as well; gates on
-// vector contents must use the count vec() returns instead.
-struct Measurer {
-  xmstream &Src;
-  size_t Extra = 0;
-  static constexpr bool Writing = false;
-
-  template<typename U, typename... Ctx> inline void io(U &v, Ctx... ctx) {
-    if constexpr (requires { U::io(*this, v, ctx...); }) {
-      U::io(*this, v, ctx...);
-    } else if constexpr (requires { U::io(*this, v); }) {
-      U::io(*this, v);
-    } else if constexpr (is_simple_numeric<U>::value || std::is_same_v<U, bool>) {
-      Io<U>::unserialize(Src, v);
-    } else {
-      static_assert(!SelfIo<U>, "self-described type reached the leaf path: missing io context?");
-      Extra += Io<U>::getUnpackedExtraSize(Src);
-    }
-  }
-
-  template<typename U, typename... Ctx> inline size_t vec(xvector<U>&, Ctx... ctx) {
     uint64_t count = 0;
-    if constexpr (sizeof...(Ctx) != 0)
-      Extra += Io<xvector<U>, Ctx...>::getUnpackedExtraSize(Src, &count, ctx...);
-    else
-      Extra += Io<xvector<U>>::getUnpackedExtraSize(Src, &count);
+    unserializeVarSize(Src, count);
+    // Every element takes at least one byte: a count past the end is a broken record, and
+    // without this the measuring pass would walk millions of elements that are not there
+    if (count > Src.remaining()) {
+      fail("vector is longer than the data");
+      return 0;
+    }
+
+    U *elements = prepare(v, count);
+    for (uint64_t i = 0; i < count; i++) {
+      if (Src.eof() || failed())
+        break;
+      // io, not leaf: an element can itself be a vector - the witness stacks are
+      if (elements) {
+        io(elements[i], ctx...);
+      } else {
+        U throwaway;
+        io(throwaway, ctx...);
+      }
+    }
+
     return count;
   }
 
-  template<typename U> inline void raw(U&) { Src.seek(sizeof(U)); }
-  // Read, not skipped: a varint has no fixed width, and a later gate may depend on the value
-  template<typename U> inline void varint(U &v) { unserializeVarInt(Src, v); }
-  template<typename U> inline void get(U &v) { v = Src.readle<U>(); }
-  inline void check(bool ok) { if (!ok) Src.seekEnd(0, true); }
-  template<typename U, typename F> inline void element(xvector<U>&, size_t, F body) {
-    U dummy;
-    body(dummy);
-  }
-};
-
-// Building into raw memory the measuring pass sized. The driver placement-constructs the
-// whole object first; unpack2 of an arena leaf then rebuilds the member in place — what the
-// constructor made is destroyed right before, or an allocating default constructor
-// (mpz_class under MPIR) would leak.
-struct Unpacker {
-  xmstream &Src;
-  uint8_t **Extra;
-  static constexpr bool Writing = false;
-
-  template<typename U, typename... Ctx> inline void io(U &v, Ctx... ctx) {
-    if constexpr (requires { U::io(*this, v, ctx...); }) {
-      U::io(*this, v, ctx...);
-    } else if constexpr (requires { U::io(*this, v); }) {
-      U::io(*this, v);
-    } else if constexpr (requires { Io<U>::unpack2(Src, &v, Extra); }) {
-      static_assert(!SelfIo<U>, "self-described type reached the leaf path: missing io context?");
-      std::destroy_at(&v);
-      Io<U>::unpack2(Src, &v, Extra);
-    } else {
-      // leaves needing no arena space of their own have no unpack2
-      static_assert(!SelfIo<U>, "self-described type reached the leaf path: missing io context?");
-      Io<U>::unserialize(Src, v);
+  // A byte string, not a list of elements
+  inline size_t vec(xvector<uint8_t> &v) {
+    uint64_t count = 0;
+    unserializeVarSize(Src, count);
+    if (count > Src.remaining()) {
+      fail("byte string is longer than the data");
+      return 0;
     }
-  }
 
-  template<typename U, typename... Ctx> inline size_t vec(xvector<U> &v, Ctx... ctx) {
-    std::destroy_at(&v);
-    if constexpr (sizeof...(Ctx) != 0)
-      Io<xvector<U>, Ctx...>::unpack2(Src, &v, Extra, ctx...);
-    else
-      Io<xvector<U>>::unpack2(Src, &v, Extra);
-    return v.size();
+    uint8_t *data = prepare(v, count);
+    const void *source = Src.seek(count);
+    if (data && source)
+      memcpy(data, source, count);
+    return count;
   }
 
   template<typename U> inline void raw(U &v) { Src.read(&v, sizeof(U)); }
   template<typename U> inline void varint(U &v) { unserializeVarInt(Src, v); }
   template<typename U> inline void get(U &v) { v = Src.readle<U>(); }
-  inline void check(bool ok) { if (!ok) Src.seekEnd(0, true); }
-  template<typename U, typename F> inline void element(xvector<U> &v, size_t i, F body) { body(v[i]); }
+
+  // Elements exist on every pass but the measuring one, which has nothing to point at
+  template<typename U, typename F> inline void element(xvector<U> &v, size_t i, F body) {
+    if (pass() != Ser::EPass::Measure) {
+      body(v[i]);
+    } else {
+      U throwaway;
+      body(throwaway);
+    }
+  }
+
+private:
+  template<typename U, typename... Ctx> inline void leaf(U &v, Ctx... ctx) {
+    if constexpr (requires { U::io(*this, v, ctx...); }) {
+      U::io(*this, v, ctx...);
+    } else if constexpr (requires { U::io(*this, v); }) {
+      U::io(*this, v);
+    } else if constexpr (requires { Io<U>::read(*this, Src, v); }) {
+      // a leaf with variable-size innards of its own, taking them from the arena
+      static_assert(!SelfIo<U>, "self-described type reached the leaf path: missing io context?");
+      Io<U>::read(*this, Src, v);
+    } else {
+      static_assert(!SelfIo<U>, "self-described type reached the leaf path: missing io context?");
+      Io<U>::unserialize(Src, v);
+    }
+  }
 };
 
-// The five operations of a self-described type are thin drivers over its io
+// The operations of a self-described type are thin drivers over its io
 template<typename T> requires SelfIo<T>
 struct Io<T, void> {
   template<typename... Ctx>
@@ -708,26 +504,53 @@ struct Io<T, void> {
 
   template<typename... Ctx>
   static inline void unserialize(xmstream &src, T &data, Ctx... ctx) {
-    Reader op{src};
+    Ser::CIoStatus status;
+    Reader op(src, status);
     op.io(data, ctx...);
   }
-
-  template<typename... Ctx>
-  static inline size_t getUnpackedExtraSize(xmstream &src, Ctx... ctx) {
-    T tmp;
-    Measurer op{src};
-    op.io(tmp, ctx...);
-    return op.Extra;
-  }
-
-  template<typename... Ctx>
-  static inline void unpack2(xmstream &src, T *data, uint8_t **extraData, Ctx... ctx) {
-    // Default initialized, not value initialized: members that are not on the wire have no
-    // other chance to be constructed, the rest is overwritten from the stream anyway
-    new (data) T;
-    Unpacker op{src, extraData};
-    op.io(*data, ctx...);
-  }
 };
+
+// Public reads use the reader too: a root can be a vector, not only a leaf or a shape.
+template<typename T>
+static inline void unserialize(xmstream &src, T &data) {
+  Ser::CIoStatus status;
+  Reader op(src, status);
+  op.io(data);
+}
+
+// unserialize & check
+template<typename T>
+static inline bool unserializeAndCheck(xmstream &stream, T &data) {
+  BTC::unserialize(stream, data);
+  return !stream.eof();
+}
+
+// The object and everything it contains in one allocation: the shape is walked once to size
+// the arena, then again to fill it. The measuring walk runs on a copy of the cursor, so the
+// caller's stream advances exactly once. 'error', when given, is filled only on failure.
+template<typename T> static inline T *unpack2(xmstream &src, size_t *size, std::string *error = nullptr)
+{
+  Ser::CIoStatus status;
+  status.Name = "block";
+  status.Error = error;
+
+  uint8_t *begin = src.ptr<uint8_t>();
+  const size_t remaining = src.remaining();
+
+  return Ser::unpackObject<T>(status, size, [&](size_t *extra, uint8_t **arena, T &target) {
+    if (extra) {
+      xmstream probe(begin, remaining);
+      Reader op(probe, status, extra);
+      op.io(target);
+      if (probe.eof())
+        op.fail("unexpected end of data");
+    } else {
+      Reader op(src, status, arena);
+      op.io(target);
+      if (src.eof())
+        op.fail("unexpected end of data");
+    }
+  });
+}
 
 }

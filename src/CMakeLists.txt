@@ -157,6 +157,7 @@ endif()
 add_library(bcnodecrypto STATIC
   crypto/scrypt.c
   crypto/sha256.c
+  crypto/sha3.c
 )
 
 target_link_libraries(bcnodecrypto

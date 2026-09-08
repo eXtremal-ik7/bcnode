@@ -98,12 +98,13 @@ public:
 
 // Serialize
 namespace BTC {
+// The one leaf in the tree with variable-size innards of its own: on the unpacking passes the
+// limbs come from the object's arena instead of from GMP's allocator
 template<> struct Io<mpz_class> {
   static size_t getSerializedSize(const mpz_class &data);
-  static size_t getUnpackedExtraSize(xmstream &src);
   static void serialize(xmstream &dst, const mpz_class &data);
   static void unserialize(xmstream &src, mpz_class &data);
-  static void unpack2(xmstream &src, mpz_class *data, uint8_t **extraData);
+  static void read(Ser::CReaderState &op, xmstream &src, mpz_class &data);
 };
 
 }
