@@ -29,6 +29,38 @@ bool dbDisconnectBlocks(BC::DB::BaseInterface &db,
   return true;
 }
 
+// The genesis block is in no block file the engine reads back and no feed ever carries it:
+// it is put into the index ready-made at startup. A chain whose genesis pays into a spendable
+// output still has to hand it to the databases, or the coins it creates are missing from the
+// utxo set when something spends them - which on Hathor happens forty thousand blocks later
+static bool dbConnectGenesis(BC::DB::UTXODb &utxoDb,
+                             bool utxoWantsIt,
+                             BC::DB::Archive *archive,
+                             BlockInMemoryIndex &blockIndex,
+                             BC::Common::ChainParams &chainParams,
+                             BC::DB::Storage &storage)
+{
+  BC::Common::BlockIndex *genesis = blockIndex.genesis();
+  auto object = objectByIndex(genesis, chainParams, storage.blockDb());
+  if (!object.get()) {
+    LOG_F(ERROR, "Can't load the genesis block");
+    return false;
+  }
+
+  LOG_F(INFO, "Connecting genesis block %s", genesis->Header.GetHash().getHexLE().c_str());
+  const BC::DB::CBlockRef ref{genesis,
+                              object.get()->block(),
+                              &object.get()->linkedOutputs(),
+                              &object.get()->validationData()};
+  if (utxoWantsIt)
+    utxoDb.connect(BC::DB::CBlockBatch(&ref, 1), blockIndex, storage.blockDb());
+  // The archive databases wake up at heights of their own and those are already set, so a
+  // batch of one at height zero reaches exactly the ones that start from the genesis
+  if (archive)
+    archive->connect(BC::DB::CBlockBatch(&ref, 1), blockIndex, storage.blockDb());
+  return true;
+}
+
 // A database wakes up at its own height; heights inside a batch are contiguous
 static size_t tailFrom(uint32_t connectHeight, uint32_t firstHeight)
 {
@@ -69,8 +101,12 @@ bool dbConnectBlocks(BC::DB::UTXODb &utxoDb,
 
   // A database opened empty asks to start at the genesis block, which is in no block file and
   // which no path ever connects - the chain starts above it
-  if (firstNeeded == blockIndex.genesis())
+  if (firstNeeded == blockIndex.genesis()) {
+    if (chainParams.ConnectGenesis &&
+        !dbConnectGenesis(utxoDb, utxoFirstBlock == firstNeeded, archive, blockIndex, chainParams, storage))
+      return false;
     firstNeeded = firstNeeded->Next;
+  }
 
   if (!firstNeeded) {
     LOG_F(INFO, "%s is up to date", name);

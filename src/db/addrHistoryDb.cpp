@@ -102,20 +102,30 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
       txTouches.clear();
     };
 
+    // Outputs come from the records parsed once per block; an empty one is not a utxo.
+    // The ordinal runs over every output of the block in walk order, as it does in utxodb
+    size_t outOrdinal = 0;
+    auto outputInfoAt = [&validationData](size_t ordinal) -> const BC::Script::CUnspentOutputInfo* {
+      size_t size;
+      const void *data = validationData.outputData(ordinal, size);
+      return size ? static_cast<const BC::Script::CUnspentOutputInfo*>(data) : nullptr;
+    };
+
     // Coinbase
     {
       const auto &coinbaseTx = block.Vtx[0];
       BC::Script::CAddress address;
       txSerial++;
-      for (const auto &txout: coinbaseTx.TxOut) {
-        if (BC::Script::extractAddress(txout, address)) {
+      for (size_t j = 0; j < coinbaseTx.TxOut.size(); j++, outOrdinal++) {
+        const BC::Script::CUnspentOutputInfo *outputInfo = outputInfoAt(outOrdinal);
+        if (outputInfo && BC::Script::extractAddress(*outputInfo, address)) {
           // A BIP30 repeat replaces the twin's coins with identical ones and only
           // one of the two can ever be spent: the address gets the history element
           // (the block did pay it) with a zero delta, so the running balance stays
           // equal to what the utxo set holds
           touch(address, validationData.CoinbaseRepeat ?
                            BC::Proto::BalanceType{} :
-                           BC::Proto::BalanceType(static_cast<uint64_t>(txout.Value)));
+                           BC::Proto::BalanceType(unsignedAmount(outputInfo->Value)));
         }
       }
 
@@ -136,16 +146,17 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
       txSerial++;
       for (size_t j = 0; j < tx.TxIn.size(); j++) {
         const auto &linkedTxin = linkedTx.TxIn[j];
-        assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
+        assert(linkedTxin.size() >= sizeof(BC::Script::CUnspentOutputInfo));
 
-        const BC::Script::UnspentOutputInfo *outputInfo = (const BC::Script::UnspentOutputInfo*)linkedTxin.data();
+        const BC::Script::CUnspentOutputInfo *outputInfo = (const BC::Script::CUnspentOutputInfo*)linkedTxin.data();
         if (BC::Script::extractAddress(*outputInfo, address))
-          touch(address, -BC::Proto::BalanceType(static_cast<uint64_t>(outputInfo->Value)));
+          touch(address, -BC::Proto::BalanceType(unsignedAmount(outputInfo->Value)));
       }
 
-      for (const auto &txout: tx.TxOut) {
-        if (BC::Script::extractAddress(txout, address))
-          touch(address, BC::Proto::BalanceType(static_cast<uint64_t>(txout.Value)));
+      for (size_t j = 0; j < tx.TxOut.size(); j++, outOrdinal++) {
+        const BC::Script::CUnspentOutputInfo *outputInfo = outputInfoAt(outOrdinal);
+        if (outputInfo && BC::Script::extractAddress(*outputInfo, address))
+          touch(address, BC::Proto::BalanceType(unsignedAmount(outputInfo->Value)));
       }
 
       flushTx(i);
@@ -167,7 +178,7 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
 void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
                                    const BC::Proto::CBlock &block,
                                    const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                                   const BC::Proto::CBlockValidationData&,
+                                   const BC::Proto::CBlockValidationData &validationData,
                                    BlockInMemoryIndex&,
                                    BlockDatabase&)
 {
@@ -180,13 +191,22 @@ void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
 
   std::unordered_map<BC::Script::CAddress, size_t> txMap;
 
+  // The same walk as the connect, so the counts it undoes are the ones it made
+  size_t outOrdinal = 0;
+  auto outputInfoAt = [&validationData](size_t ordinal) -> const BC::Script::CUnspentOutputInfo* {
+    size_t size;
+    const void *data = validationData.outputData(ordinal, size);
+    return size ? static_cast<const BC::Script::CUnspentOutputInfo*>(data) : nullptr;
+  };
+
   // Coinbase
   {
     const auto &coinbaseTx = block.Vtx[0];
     std::unordered_set<BC::Script::CAddress> affectedAddresses;
     BC::Script::CAddress address;
-    for (const auto &txout: coinbaseTx.TxOut) {
-      if (BC::Script::extractAddress(txout, address)) {
+    for (size_t j = 0; j < coinbaseTx.TxOut.size(); j++, outOrdinal++) {
+      const BC::Script::CUnspentOutputInfo *outputInfo = outputInfoAt(outOrdinal);
+      if (outputInfo && BC::Script::extractAddress(*outputInfo, address)) {
         if (affectedAddresses.insert(address).second)
           txMap[address]++;
       }
@@ -206,15 +226,16 @@ void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
     BC::Script::CAddress address;
     for (size_t j = 0; j < tx.TxIn.size(); j++) {
       const auto &linkedTxin = linkedTx.TxIn[j];
-      assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
+      assert(linkedTxin.size() >= sizeof(BC::Script::CUnspentOutputInfo));
 
-      BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
+      BC::Script::CUnspentOutputInfo *outputInfo = (BC::Script::CUnspentOutputInfo*)linkedTxin.data();
       if (BC::Script::extractAddress(*outputInfo, address) && affectedAddresses.insert(address).second)
         txMap[address]++;
     }
 
-    for (const auto &txout: tx.TxOut) {
-      if (BC::Script::extractAddress(txout, address)) {
+    for (size_t j = 0; j < tx.TxOut.size(); j++, outOrdinal++) {
+      const BC::Script::CUnspentOutputInfo *outputInfo = outputInfoAt(outOrdinal);
+      if (outputInfo && BC::Script::extractAddress(*outputInfo, address)) {
         if (affectedAddresses.insert(address).second)
           txMap[address]++;
       }

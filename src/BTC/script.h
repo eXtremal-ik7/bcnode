@@ -44,7 +44,7 @@ public:
   };
 
 #pragma pack(push, 1)
-  struct UnspentOutputInfo {
+  struct CUnspentOutputInfo {
     enum EType {
       ENonStandard = 0,
       EOpReturn,
@@ -72,7 +72,7 @@ public:
       uint8_t CustomData[1];
     };
 
-    static size_t customDataOffset() { return offsetof(UnspentOutputInfo, CustomData); }
+    static size_t customDataOffset() { return offsetof(CUnspentOutputInfo, CustomData); }
   };
 
   // Typed address, the addrdb/addrhistorydb key. Type is part of the key:
@@ -80,7 +80,7 @@ public:
   // into EPubKeyHash, bare multisig is keyed by hash160 of the whole script.
   // Data is zero-padded: the struct is compared and hashed as raw bytes.
   struct CAddress {
-    uint8_t Type = UnspentOutputInfo::ENonStandard;
+    uint8_t Type = CUnspentOutputInfo::ENonStandard;
     uint8_t Data[32] = {};
 
     void set(uint8_t type, const void *data, size_t size) {
@@ -91,8 +91,8 @@ public:
 
     // 32 for witness script hash / taproot programs, 20 for the hash160 kinds
     size_t payloadSize() const {
-      return Type == UnspentOutputInfo::EWitnessScriptHash ||
-             Type == UnspentOutputInfo::EWitnessTaproot ? 32 : 20;
+      return Type == CUnspentOutputInfo::EWitnessScriptHash ||
+             Type == CUnspentOutputInfo::EWitnessTaproot ? 32 : 20;
     }
 
     bool operator==(const CAddress &r) const { return memcmp(this, &r, sizeof(CAddress)) == 0; }
@@ -100,7 +100,7 @@ public:
 #pragma pack(pop)
 
   static bool extractAddress(const BC::Proto::CTxOut &txOut, CAddress &address);
-  static bool extractAddress(const UnspentOutputInfo &info, CAddress &address);
+  static bool extractAddress(const CUnspentOutputInfo &info, CAddress &address);
 
   static std::string addressToString(const CAddress &address,
                                      const std::vector<uint8_t> &pubkeyPrefix,
@@ -112,6 +112,15 @@ public:
                                 const std::vector<uint8_t> &scriptPrefix,
                                 const std::string &bech32Prefix,
                                 CAddress &address);
+
+  // What the engine calls: the transaction and not just the output, because a coin whose
+  // outputs name their token by an index into it cannot decode one on its own. Bitcoin's
+  // output stands alone, so this only picks it out - and a template because every coin on
+  // this format has a transaction type of its own over the same CTxOut
+  template<typename TxTy>
+  static void parseTransactionOutput(const TxTy &tx, size_t outIndex, xmstream &unspentOutputInfo) {
+    parseTransactionOutput(tx.TxOut[outIndex], unspentOutputInfo);
+  }
 
   static void parseTransactionOutput(const BC::Proto::CTxOut &out, xmstream &unspentOutputInfo);
 

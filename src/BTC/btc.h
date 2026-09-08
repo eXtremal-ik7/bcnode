@@ -49,6 +49,11 @@ namespace Common {
     uint32_t magic;
     // The coin's own block type: LTC's is not the generic BlockTy the others alias
     typename T::CBlock GenesisBlock;
+    // Whether the databases have to see the genesis block. No feed carries it - the engine
+    // puts it into the index ready-made - so its outputs reach nothing unless they are
+    // connected here. Bitcoin's genesis coinbase is unspendable by consensus and stays out;
+    // a chain that premines into a spendable output cannot
+    bool ConnectGenesis = false;
 
     // Soft&hard forks
     uint32_t BIP34Height;

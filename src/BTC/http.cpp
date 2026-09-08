@@ -987,7 +987,7 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
 
   if (!isCoinbase) {
     for (const auto &linkedTxin: txOutputs.TxIn) {
-      BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
+      BC::Script::CUnspentOutputInfo *outputInfo = (BC::Script::CUnspentOutputInfo*)linkedTxin.data();
       valueIn += outputInfo->Value;
     }
     fee = valueIn - valueOut;
@@ -1048,7 +1048,7 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
       int64_t value = 0;
 
       if (!isCoinbase) {
-        BC::Script::UnspentOutputInfo *outputInfo = (BC::Script::UnspentOutputInfo*)linkedTxin.data();
+        BC::Script::CUnspentOutputInfo *outputInfo = (BC::Script::CUnspentOutputInfo*)linkedTxin.data();
         if (BC::Script::extractAddress(*outputInfo, address))
           address58 = BC::Script::addressToString(address, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix, ChainParams_.Bech32Prefix);
         value = outputInfo->Value;

@@ -339,7 +339,7 @@ struct CNetworkAddress {
     xvector<uint32_t> InputLocalTx;
     xvector<uint64_t> OutputSpentLocally;
     xvector<CTxValidationData> TxData;
-    // Outputs parsed once, off the connect thread: serialized UnspentOutputInfo of every output
+    // Outputs parsed once, off the connect thread: serialized CUnspentOutputInfo of every output
     // in walk order, empty record for an OP_RETURN one. Databases copy these bytes
     xvector<uint8_t> OutputData;
     xvector<uint32_t> OutputDataOffset;

@@ -46,8 +46,10 @@ private:
   bool Relay_ = false;
 
   SerializedDataObject BlockData_;
-  Proto::CBlockValidationData ValidationData_;
-  Proto::CBlockLinkedOutputs LinkedOutputs_;
+  // The coin's own forms, not Bitcoin's: what a block precomputes differs by coin, and the
+  // ones that precompute the same thing say so with an alias
+  BC::Proto::CBlockValidationData ValidationData_;
+  BC::Proto::CBlockLinkedOutputs LinkedOutputs_;
 
 public:
   uintptr_t ref_fetch_add(uintptr_t count) const { return Refs_.fetch_add(count); }
@@ -92,9 +94,9 @@ public:
   const SerializedDataObject &blockData() const { return BlockData_; }
   BC::Proto::CBlock *block() const { return static_cast<BC::Proto::CBlock*>(BlockData_.unpackedData()); }
   bool relay() const { return Relay_; }
-  Proto::CBlockValidationData &validationData() { return ValidationData_; }
-  const Proto::CBlockValidationData &validationDataConst() const { return ValidationData_; }
-  Proto::CBlockLinkedOutputs &linkedOutputs() { return LinkedOutputs_; }
+  BC::Proto::CBlockValidationData &validationData() { return ValidationData_; }
+  const BC::Proto::CBlockValidationData &validationDataConst() const { return ValidationData_; }
+  BC::Proto::CBlockLinkedOutputs &linkedOutputs() { return LinkedOutputs_; }
 };
 
 template<typename T>
@@ -165,6 +167,9 @@ public:
 
 namespace BTC {
 
+// The index record is the engine's own disk structure and stays in Bitcoin's encoding for
+// every coin. The header inside is the coin's shape, and its io is what says how it is laid
+// out - a coin whose header never travels writes it with raw, as the bytes it already is
 template<typename T> struct Io<Common::BlockIndexTy<T>> {
   static inline void serialize(xmstream &stream, const BTC::Common::BlockIndexTy<T> &data) {
     BTC::serialize(stream, data.Header);

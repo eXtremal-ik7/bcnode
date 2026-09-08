@@ -15,16 +15,27 @@ namespace DB {
 // disconnect merges it negated
 static void buildBlockDelta(const BC::Proto::CBlock &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
-                            bool coinbaseRepeat,
+                            const BC::Proto::CBlockValidationData &validationData,
                             ankerl::unordered_dense::map<BC::Script::CAddress, CAddrValue> &deltaMap)
 {
+  const bool coinbaseRepeat = validationData.CoinbaseRepeat;
+  // Outputs come from the records parsed once per block; an empty one is not a utxo.
+  // The ordinal runs over every output of the block in walk order, as it does in utxodb
+  size_t outOrdinal = 0;
+  auto outputInfoAt = [&validationData](size_t ordinal) -> const BC::Script::CUnspentOutputInfo* {
+    size_t size;
+    const void *data = validationData.outputData(ordinal, size);
+    return size ? static_cast<const BC::Script::CUnspentOutputInfo*>(data) : nullptr;
+  };
+
   // Coinbase
   {
     const auto &coinbaseTx = block.Vtx[0];
     ankerl::unordered_dense::set<BC::Script::CAddress> affectedAddresses;
     BC::Script::CAddress address;
-    for (const auto &txout: coinbaseTx.TxOut) {
-      if (BC::Script::extractAddress(txout, address)) {
+    for (size_t j = 0; j < coinbaseTx.TxOut.size(); j++, outOrdinal++) {
+      const BC::Script::CUnspentOutputInfo *outputInfo = outputInfoAt(outOrdinal);
+      if (outputInfo && BC::Script::extractAddress(*outputInfo, address)) {
         CAddrValue &delta = deltaMap[address];
         // A BIP30 repeat pays no one twice: its outputs replace the twin's coins
         // with identical ones, and only one of the two can ever be spent. The
@@ -32,8 +43,8 @@ static void buildBlockDelta(const BC::Proto::CBlock &block,
         // the balance and the utxo count of the address stay above what the utxo
         // set holds forever
         if (!coinbaseRepeat) {
-          delta.Received += static_cast<uint64_t>(txout.Value);
-          delta.Mined += static_cast<uint64_t>(txout.Value);
+          delta.Received += unsignedAmount(outputInfo->Value);
+          delta.Mined += unsignedAmount(outputInfo->Value);
           delta.TxOutCount++;
         }
         if (affectedAddresses.insert(address).second) {
@@ -57,22 +68,23 @@ static void buildBlockDelta(const BC::Proto::CBlock &block,
     BC::Script::CAddress address;
     for (size_t j = 0; j < tx.TxIn.size(); j++) {
       const auto &linkedTxin = linkedTx.TxIn[j];
-      assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
+      assert(linkedTxin.size() >= sizeof(BC::Script::CUnspentOutputInfo));
 
-      const BC::Script::UnspentOutputInfo *outputInfo = (const BC::Script::UnspentOutputInfo*)linkedTxin.data();
+      const BC::Script::CUnspentOutputInfo *outputInfo = (const BC::Script::CUnspentOutputInfo*)linkedTxin.data();
       if (BC::Script::extractAddress(*outputInfo, address)) {
         CAddrValue &delta = deltaMap[address];
-        delta.Sent += static_cast<uint64_t>(outputInfo->Value);
+        delta.Sent += unsignedAmount(outputInfo->Value);
         delta.TxInCount++;
         if (affectedAddresses.insert(address).second)
           delta.TxCount++;
       }
     }
 
-    for (const auto &txout: tx.TxOut) {
-      if (BC::Script::extractAddress(txout, address)) {
+    for (size_t j = 0; j < tx.TxOut.size(); j++, outOrdinal++) {
+      const BC::Script::CUnspentOutputInfo *outputInfo = outputInfoAt(outOrdinal);
+      if (outputInfo && BC::Script::extractAddress(*outputInfo, address)) {
         CAddrValue &delta = deltaMap[address];
-        delta.Received += static_cast<uint64_t>(txout.Value);
+        delta.Received += unsignedAmount(outputInfo->Value);
         delta.TxOutCount++;
         if (affectedAddresses.insert(address).second)
           delta.TxCount++;
@@ -101,7 +113,7 @@ void AddrDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
       continue;
 
     deltaMap.clear();
-    buildBlockDelta(*ref.Block, *ref.LinkedOutputs, ref.ValidationData->CoinbaseRepeat, deltaMap);
+    buildBlockDelta(*ref.Block, *ref.LinkedOutputs, *ref.ValidationData, deltaMap);
 
     for (const auto &addr: deltaMap)
       this->merge(writer, addr.first, addr.second);
@@ -124,7 +136,7 @@ void AddrDb::disconnect(const BC::Common::BlockIndex *index,
   }
 
   ankerl::unordered_dense::map<BC::Script::CAddress, CAddrValue> deltaMap;
-  buildBlockDelta(block, linkedOutputs, validationData.CoinbaseRepeat, deltaMap);
+  buildBlockDelta(block, linkedOutputs, validationData, deltaMap);
 
   for (auto &addr: deltaMap) {
     addr.second.negate();

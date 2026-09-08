@@ -14,6 +14,7 @@
 #include "config4cpp/Configuration.h"
 #include <filesystem>
 #include <span>
+#include <type_traits>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,18 @@ public:
   // off, a speed measured over them counts bytes nobody finished writing
   virtual void settle() = 0;
 };
+
+// The value of an output in the form the balance accumulators take. Bitcoin's shape keeps a
+// signed int64 there, and UInt deletes its signed operands on purpose, so that one has to be
+// carried across as unsigned; a coin whose amounts already outgrow 64 bits hands over its own
+// wide type and must not be narrowed to make the same line compile
+template<typename T>
+static inline auto unsignedAmount(const T &value) {
+  if constexpr (std::is_integral_v<T>)
+    return static_cast<uint64_t>(value);
+  else
+    return value;
+}
 
 // Where a database keyed by txid starts its walk over a block. A BIP30 repeat
 // brings a coinbase already stored under that key - the same transaction byte

@@ -40,7 +40,7 @@ bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvecto
   key.Tx = txid;
   key.Index = txoutIdx;
   return this->find(key, [&result](const void *d, size_t s) {
-    // strip the packed height suffix, consumers expect pure UnspentOutputInfo
+    // strip the packed height suffix, consumers expect pure CUnspentOutputInfo
     result.resize(s - sizeof(uint32_t));
     memcpy(result.begin(), d, s - sizeof(uint32_t));
   });
@@ -109,7 +109,7 @@ void UTXODb::warmupFromDb()
       rocksdb::Slice valueSlice = It->value();
       // service records (stamp, base configuration) have short keys
       if (keySlice.size() != sizeof(CUnspentOutputKey) ||
-          valueSlice.size() < sizeof(BC::Script::UnspentOutputInfo) + sizeof(uint32_t))
+          valueSlice.size() < sizeof(BC::Script::CUnspentOutputInfo) + sizeof(uint32_t))
         continue;
 
       // field-wise copy: the key type is not trivially copyable, but the
@@ -277,7 +277,7 @@ void UTXODb::disconnect(const BC::Common::BlockIndex *index,
         const auto &txIn = tx.TxIn[j];
         const auto &linkedTxin = linkedTx.TxIn[j];
 
-        assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
+        assert(linkedTxin.size() >= sizeof(BC::Script::CUnspentOutputInfo));
 
         key.Tx = txIn.PreviousOutputHash;
         key.Index = txIn.PreviousOutputIndex;

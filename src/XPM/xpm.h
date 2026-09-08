@@ -66,6 +66,9 @@ namespace Common {
     int networkId;
     uint32_t magic;
     XPM::Proto::CBlock GenesisBlock;
+    // No feed carries the genesis block, so the databases see it only if this asks for it;
+    // like Bitcoin's, XPM's genesis coinbase is unspendable and stays out of them
+    bool ConnectGenesis = false;
 
     uint32_t BIP34Height;
     // No BIP30 repeats on XPM; kept for the shared HTTP code

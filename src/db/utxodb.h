@@ -19,21 +19,21 @@ using CUnspentOutputKey = COutpointKey;
 namespace BC {
 namespace DB {
 
-// Read-cache entry: serialized UnspentOutputInfo bytes stored inline. Every
+// Read-cache entry: serialized CUnspentOutputInfo bytes stored inline. Every
 // fixed-layout output type (incl. the bare multisig identity) is exactly
-// sizeof(UnspentOutputInfo); longer values (uncompressed P2PK, non-standard
+// sizeof(CUnspentOutputInfo); longer values (uncompressed P2PK, non-standard
 // scripts) are not cached at all - a miss is always legal, a positive must
 // be exact
 struct CUtxoCacheValue {
   uint32_t Height;    // creation height, drives the eviction floor
   uint8_t IsCoinbase; // maturity metadata, mirrors the on-disk suffix bit; rides in former padding
-  uint8_t Data[sizeof(BC::Script::UnspentOutputInfo)];
+  uint8_t Data[sizeof(BC::Script::CUnspentOutputInfo)];
 };
 
-// On-disk value: serialized UnspentOutputInfo followed by a uint32 suffix
+// On-disk value: serialized CUnspentOutputInfo followed by a uint32 suffix
 // packing (creationHeight << 1) | isCoinbase, the Core-style coin metadata
 // (coinbase maturity, BIP68, warmup scan by height). query() strips the
-// suffix: every consumer above sees pure UnspentOutputInfo bytes
+// suffix: every consumer above sees pure CUnspentOutputInfo bytes
 class UTXODb : public CChainDb<dbengine::CKvBase<CUnspentOutputKey>> {
 public:
   UTXODb() : CChainDb<dbengine::CKvBase<CUnspentOutputKey>>("utxo") {}

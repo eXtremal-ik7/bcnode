@@ -71,8 +71,8 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
           }
 
           xmstream s;
-          BC::Script::parseTransactionOutput(localReferencedTx.TxOut[txin.PreviousOutputIndex], s);
-          BC::Script::UnspentOutputInfo *info = s.data<BC::Script::UnspentOutputInfo>();
+          BC::Script::parseTransactionOutput(localReferencedTx, txin.PreviousOutputIndex, s);
+          BC::Script::CUnspentOutputInfo *info = s.data<BC::Script::CUnspentOutputInfo>();
           info->IsLocalTx = 1;
           xvectorFromStream(std::move(s), txinLinked);
         } else {
@@ -575,8 +575,8 @@ static void resolveSegmentInputs(CSegment &segment)
         uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];
         if (localTxIdx != BC::Proto::CBlockValidationData::NoLocalTx) {
           xmstream s;
-          BC::Script::parseTransactionOutput(block.Vtx[localTxIdx].TxOut[txin.PreviousOutputIndex], s);
-          BC::Script::UnspentOutputInfo *info = s.data<BC::Script::UnspentOutputInfo>();
+          BC::Script::parseTransactionOutput(block.Vtx[localTxIdx], txin.PreviousOutputIndex, s);
+          BC::Script::CUnspentOutputInfo *info = s.data<BC::Script::CUnspentOutputInfo>();
           info->IsLocalTx = 1;
           xvectorFromStream(std::move(s), txinLinked);
           continue;
@@ -1119,7 +1119,7 @@ static bool decodeIndexRange(BlockInMemoryIndex &blockIndex,
   for (size_t i = 0; i < count; i++) {
     BC::Common::BlockIndex *index = BC::Common::BlockIndex::create();
     xmstream stream(const_cast<uint8_t*>(fileData) + positions[i].Offset, positions[i].Size);
-    if (!BC::unserializeAndCheck(stream, *index) || stream.remaining() != 0) {
+    if (!BTC::unserializeAndCheck(stream, *index) || stream.remaining() != 0) {
       delete index;
       LOG_F(ERROR, "Can't read index data from %s", path);
       return false;
@@ -1534,7 +1534,7 @@ bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index, bool *needFlush)
   index->LinkedOutputsFileOffset = position.second;
   index->LinkedOutputsSerializedSize = serializedSize;
   data.reset();
-  BC::serialize(data, *index);
+  BTC::serialize(data, *index);
   serializedSize = static_cast<uint32_t>(data.sizeOf());
   if (!IndexStorage_.append2(&serializedSize, sizeof(serializedSize), data.data(), static_cast<uint32_t>(data.sizeOf()), position))
     return false;

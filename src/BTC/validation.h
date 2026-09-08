@@ -12,34 +12,22 @@
 
 namespace BTC {
 
+// Same-block spend topology. The map mirrors the input resolvers: a tx
+// becomes visible after its own inputs, so only spends of earlier txs
+// match. An out-of-range vout still marks the input (the block dies in
+// the resolver before any connect) but has no output bit to set.
+// A txid match is trusted to be the spend target (BIP30 uniqueness): an
+// input spending an older on-disk duplicate would be paired with the local
+// twin instead, and the utxodb pair skip would leave the older coin alive.
+// Safe: a duplicate txid can only be a coinbase (an identical non-coinbase
+// would re-spend its own inputs), unspendable in its own block by maturity
+//
+// Nothing of a format is in here: the txids are already computed and the rest is the shape
+// of the input and output lists, so a coin that lays its block out differently still gets
+// its topology from here rather than restating it
 template<typename BlockTy>
-void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidationData &validation)
+void fillLocalSpendTopology(const BlockTy &block, BTC::Proto::CBlockValidationData &validation)
 {
-  validation.HasWitnessData = false;
-  validation.InputsResolved = false;
-  validation.InputsInvalid = false;
-  validation.LocalSpendInvalid = false;
-  validation.TxIds.resize(block.Vtx.size());
-  for (size_t i = 0; i < block.Vtx.size(); i++)
-    validation.TxIds[i] = block.Vtx[i].getTxId();
-  BTC::fillTxLayout(block, validation.TxLayout);
-  validation.TxData.resize(block.Vtx.size());
-  for (size_t i = 0; i < block.Vtx.size(); i++) {
-    validation.TxData[i].ScriptSigKnownValid.resize(block.Vtx[i].TxIn.size());
-    for (auto &v: validation.TxData[i].ScriptSigKnownValid) {
-      v.ScriptSigKnownValid = false;
-    }
-  }
-
-  // Same-block spend topology. The map mirrors the input resolvers: a tx
-  // becomes visible after its own inputs, so only spends of earlier txs
-  // match. An out-of-range vout still marks the input (the block dies in
-  // the resolver before any connect) but has no output bit to set.
-  // A txid match is trusted to be the spend target (BIP30 uniqueness): an
-  // input spending an older on-disk duplicate would be paired with the local
-  // twin instead, and the utxodb pair skip would leave the older coin alive.
-  // Safe: a duplicate txid can only be a coinbase (an identical non-coinbase
-  // would re-spend its own inputs), unspendable in its own block by maturity
   size_t inputsNum = 0;
   uint64_t outputsNum = 0;
   for (size_t i = 0; i < block.Vtx.size(); i++) {
@@ -50,33 +38,6 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
   validation.InputLocalTx.resize(inputsNum);
   validation.OutputSpentLocally.resize((outputsNum + 63) / 64);
   memset(validation.OutputSpentLocally.begin(), 0, validation.OutputSpentLocally.size() * sizeof(uint64_t));
-
-  // Parsed here, where several blocks are parsed in parallel: the connect stage copies the
-  // record instead of walking the script. An OP_RETURN output is left empty - "not a utxo" to a
-  // database that knows nothing of types
-  {
-    xmstream outputData;
-    outputData.reserve(outputsNum * sizeof(Script::UnspentOutputInfo));
-    outputData.reset();
-    validation.OutputDataOffset.resize(outputsNum + 1);
-
-    size_t ordinal = 0;
-    for (size_t i = 0; i < block.Vtx.size(); i++) {
-      const auto &tx = block.Vtx[i];
-      for (size_t j = 0; j < tx.TxOut.size(); j++, ordinal++) {
-        size_t begin = outputData.offsetOf();
-        validation.OutputDataOffset[ordinal] = static_cast<uint32_t>(begin);
-        Script::parseTransactionOutput(tx.TxOut[j], outputData);
-        const Script::UnspentOutputInfo *info =
-          reinterpret_cast<const Script::UnspentOutputInfo*>(outputData.data<uint8_t>() + begin);
-        if (info->Type == Script::UnspentOutputInfo::EOpReturn)
-          outputData.seekSet(begin);
-      }
-    }
-
-    validation.OutputDataOffset[outputsNum] = static_cast<uint32_t>(outputData.offsetOf());
-    xvectorFromStream(std::move(outputData), validation.OutputData);
-  }
 
   // Value packs the tx index with the block-wide ordinal of its first output
   std::unordered_map<Proto::TxHashTy, uint64_t> txIndexMap;
@@ -112,6 +73,60 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
     txIndexMap[validation.TxIds[i]] = static_cast<uint64_t>(i) | (outOrdinal << 32);
     outOrdinal += tx.TxOut.size();
   }
+}
+
+template<typename BlockTy>
+void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidationData &validation)
+{
+  validation.HasWitnessData = false;
+  validation.InputsResolved = false;
+  validation.InputsInvalid = false;
+  validation.LocalSpendInvalid = false;
+  validation.TxIds.resize(block.Vtx.size());
+  for (size_t i = 0; i < block.Vtx.size(); i++)
+    validation.TxIds[i] = block.Vtx[i].getTxId();
+  BTC::fillTxLayout(block, validation.TxLayout);
+  validation.TxData.resize(block.Vtx.size());
+  for (size_t i = 0; i < block.Vtx.size(); i++) {
+    validation.TxData[i].ScriptSigKnownValid.resize(block.Vtx[i].TxIn.size());
+    for (auto &v: validation.TxData[i].ScriptSigKnownValid) {
+      v.ScriptSigKnownValid = false;
+    }
+  }
+
+  // What the parsed output blob is sized by; the topology pass counts for itself
+  uint64_t outputsNum = 0;
+  for (size_t i = 0; i < block.Vtx.size(); i++)
+    outputsNum += block.Vtx[i].TxOut.size();
+
+  // Parsed here, where several blocks are parsed in parallel: the connect stage copies the
+  // record instead of walking the script. An OP_RETURN output is left empty - "not a utxo" to a
+  // database that knows nothing of types
+  {
+    xmstream outputData;
+    outputData.reserve(outputsNum * sizeof(Script::CUnspentOutputInfo));
+    outputData.reset();
+    validation.OutputDataOffset.resize(outputsNum + 1);
+
+    size_t ordinal = 0;
+    for (size_t i = 0; i < block.Vtx.size(); i++) {
+      const auto &tx = block.Vtx[i];
+      for (size_t j = 0; j < tx.TxOut.size(); j++, ordinal++) {
+        size_t begin = outputData.offsetOf();
+        validation.OutputDataOffset[ordinal] = static_cast<uint32_t>(begin);
+        Script::parseTransactionOutput(tx, j, outputData);
+        const Script::CUnspentOutputInfo *info =
+          reinterpret_cast<const Script::CUnspentOutputInfo*>(outputData.data<uint8_t>() + begin);
+        if (info->Type == Script::CUnspentOutputInfo::EOpReturn)
+          outputData.seekSet(begin);
+      }
+    }
+
+    validation.OutputDataOffset[outputsNum] = static_cast<uint32_t>(outputData.offsetOf());
+    xvectorFromStream(std::move(outputData), validation.OutputData);
+  }
+
+  BTC::fillLocalSpendTopology(block, validation);
 }
 
 
