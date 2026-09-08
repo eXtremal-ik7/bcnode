@@ -32,8 +32,7 @@ bool TxDbRef::queryTransaction(const BC::Proto::TxHashTy &txid,
       return;
     }
 
-    readTransactionAt(index, logData.Index, logData.SerializedDataOffset, logData.SerializedDataSize,
-                      blockDb, result);
+    readTransactionAt(index, logData.Index, logData.TxSpan, blockDb, result);
   });
 
   return true;
@@ -52,7 +51,7 @@ void TxDbRef::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
     assert(validationData.TxIds.size() == block.Vtx.size());
 
-    if (!BTC::txPositionsMatchStored(block, validationData.TxPositions, ref.Index->SerializedBlockSize)) {
+    if (!txLayoutMatchesStored(block, validationData.TxLayout, ref.Index->SerializedBlockSize)) {
       LOG_F(ERROR,
             "TxDbRef: transaction layout of block %s does not add up to its stored size",
             ref.Index->Header.GetHash().getHexLE().c_str());
@@ -64,8 +63,7 @@ void TxDbRef::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
       CLogData data;
       data.Height = ref.Index->Height;
       data.Index = i;
-      data.SerializedDataOffset = validationData.TxPositions[i].Offset;
-      data.SerializedDataSize = validationData.TxPositions[i].Size;
+      data.TxSpan = validationData.TxLayout[i];
       writer.putNew(validationData.TxIds[i], &data, sizeof(data));
     }
   }

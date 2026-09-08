@@ -79,7 +79,7 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
     const BC::Proto::CBlock &block = *ref.Block;
     const BC::Proto::CBlockLinkedOutputs &linkedOutputs = *ref.LinkedOutputs;
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
-    assert(validationData.TxPositions.size() == block.Vtx.size());
+    assert(validationData.TxLayout.size() == block.Vtx.size());
     if (block.Vtx.empty())
       continue;
 
@@ -88,15 +88,14 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
     // Order across addresses within one tx is free to change: a transaction
     // gives an address exactly one element, its delta already folded
     auto flushTx = [&](size_t txIndex) {
-      const BTC::CTxPosition &position = validationData.TxPositions[txIndex];
+      const CDataSpan32 &span = validationData.TxLayout[txIndex];
       for (const CTxTouch &t: txTouches) {
         counts[t.KeyId]++;
         CTouch &out = touches.emplace_back();
         out.KeyId = t.KeyId;
         out.Item.Height = height;
         out.Item.TxIndex = static_cast<uint32_t>(txIndex);
-        out.Item.TxOffset = position.Offset;
-        out.Item.TxSize = position.Size;
+        out.Item.TxSpan = span;
         // The delta; CTailWriter folds it into the running balance
         out.Item.Aggregate = t.Delta;
       }

@@ -398,7 +398,7 @@ bool checkBlockContextual(const BlockIndex &index,
                           const ChainParams &chainParams,
                           std::string &error)
 {
-  BTC::Common::fillBIP30Context(index, chainParams, validation);
+  fillChainContext(index, chainParams, validation);
 
   bool isValid = true;
   isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);

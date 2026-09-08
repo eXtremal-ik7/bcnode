@@ -230,14 +230,14 @@ int main(int argc, char **argv)
     genesisIndex->Successors.store(SPReady, std::memory_order_relaxed);
     {
       xmstream stream;
-      BTC::serialize(stream, context.ChainParams.GenesisBlock);
+      BC::serialize(stream, context.ChainParams.GenesisBlock);
       genesisIndex->FileNo = 0;
       genesisIndex->FileOffset = 0;
       genesisIndex->SerializedBlockSize = static_cast<uint32_t>(stream.sizeOf());
 
       size_t unpackedSize = 0;
       stream.seekSet(0);
-      BC::Proto::CBlock *unpacked = BTC::unpack2<BC::Proto::CBlock>(stream, &unpackedSize);
+      BC::Proto::CBlock *unpacked = BC::unpack2<BC::Proto::CBlock>(stream, &unpackedSize);
       BC::Common::CIndexCacheObject *genesisObject = new BC::Common::CIndexCacheObject(nullptr, nullptr, stream.sizeOf(), 0, unpacked, unpackedSize);
 
       auto &outputs = genesisObject->linkedOutputs();

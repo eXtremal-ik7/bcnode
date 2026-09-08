@@ -11,8 +11,7 @@ namespace DB {
 
 bool readTransactionAt(BC::Common::BlockIndex *index,
                        uint32_t txIndex,
-                       uint32_t txOffset,
-                       uint32_t txSize,
+                       CDataSpan32 txSpan,
                        BlockDatabase &blockDb,
                        CQueryTransactionResult &result)
 {
@@ -35,8 +34,8 @@ bool readTransactionAt(BC::Common::BlockIndex *index,
 
   // The 8 bytes are the magic and the length in front of every stored block
   SmallStream<16384> stream;
-  if (!blockDb.blockReader().read(index->FileNo, index->FileOffset + txOffset + 8,
-                                  stream.reserve(txSize), txSize)) {
+  if (!blockDb.blockReader().read(index->FileNo, index->FileOffset + txSpan.Offset + 8,
+                                  stream.reserve(txSpan.Size), txSpan.Size)) {
     result.DataCorrupted = true;
     return false;
   }
@@ -59,7 +58,8 @@ bool readTransactionAt(BC::Common::BlockIndex *index,
   }
 
   stream.seekSet(0);
-  if (!BC::unserializeAndCheck(stream, linkedOutputs)) {
+  // The engine's own form, always in Bitcoin's encoding; see the writer in blockDataBase
+  if (!BTC::unserializeAndCheck(stream, linkedOutputs)) {
     result.DataCorrupted = true;
     return false;
   }

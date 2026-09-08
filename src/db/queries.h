@@ -12,6 +12,7 @@
 // sees this file
 
 #include "BC/script.h"
+#include "common/blockLayout.h"
 #include "common/blockDataBase.h"
 #include "common/uint.h"
 
@@ -45,8 +46,7 @@ struct CQueryTransactionResult {
 // in the block index already, so this is the whole read path behind a position
 bool readTransactionAt(BC::Common::BlockIndex *index,
                        uint32_t txIndex,
-                       uint32_t txOffset,
-                       uint32_t txSize,
+                       CDataSpan32 txSpan,
                        BlockDatabase &blockDb,
                        CQueryTransactionResult &result);
 
@@ -60,8 +60,7 @@ bool readTransactionAt(BC::Common::BlockIndex *index,
 struct CAddrHistoryItem {
   uint32_t Height;
   uint32_t TxIndex;
-  uint32_t TxOffset;   // from the start of the serialized block
-  uint32_t TxSize;
+  CDataSpan32 TxSpan;  // from the start of the serialized block
   BC::Proto::BalanceType Aggregate;
 };
 #pragma pack(pop)

@@ -45,6 +45,10 @@ public:
 using Script = BTC::Script;
 
 namespace Common {
+  // What the block's place in the chain says about it; Bitcoin's answer applies
+  // unchanged, the pinned repeats are empty and BIP34Height carries the rest
+  using BTC::Common::fillChainContext;
+
   // Inherit BTC chain params
   using ChainParams = BTC::Common::ChainParamsTy<ZEC::Proto>;
 
@@ -71,7 +75,7 @@ namespace Common {
                             std::string &error);
   bool checkBlockContextual(const BlockIndex &index,
                             const Proto::CBlock &block,
-                            const Proto::CBlockValidationData &validation,
+                            Proto::CBlockValidationData &validation,
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
                             std::string &error);

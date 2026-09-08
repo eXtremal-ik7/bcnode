@@ -171,7 +171,7 @@ public:
       }
     }
 
-    // Bytes after the transaction list: txPositionsMatchStored checks a stored block's
+    // Bytes after the transaction list: txLayoutMatchesStored checks a stored block's
     // layout against its size and has to account for them
     static size_t extensionSize(const CBlock &d) {
       if (d.Vtx.size() < 2 || !d.Vtx.back().HogEx)

@@ -22,7 +22,7 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
   validation.TxIds.resize(block.Vtx.size());
   for (size_t i = 0; i < block.Vtx.size(); i++)
     validation.TxIds[i] = block.Vtx[i].getTxId();
-  BTC::fillTxPositions(block, validation.TxPositions);
+  BTC::fillTxLayout(block, validation.TxLayout);
   validation.TxData.resize(block.Vtx.size());
   for (size_t i = 0; i < block.Vtx.size(); i++) {
     validation.TxData[i].ScriptSigKnownValid.resize(block.Vtx[i].TxIn.size());

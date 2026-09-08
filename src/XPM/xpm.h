@@ -50,6 +50,10 @@ public:
 using Script = BTC::Script;
 
 namespace Common {
+  // What the block's place in the chain says about it; Bitcoin's answer applies
+  // unchanged, the pinned repeats are empty and BIP34Height carries the rest
+  using BTC::Common::fillChainContext;
+
   enum NetwordIdTy {
     NetworkIdMain = 0,
     NetworkIdTestnet

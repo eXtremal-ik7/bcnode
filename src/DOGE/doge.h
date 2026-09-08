@@ -46,6 +46,10 @@ public:
 using Script = LTC::Script;
 
 namespace Common {
+  // What the block's place in the chain says about it; Bitcoin's answer applies
+  // unchanged, the pinned repeats are empty and BIP34Height carries the rest
+  using BTC::Common::fillChainContext;
+
   // Inherit BTC chain params, add the aux pow settings on top
   struct ChainParams: public BTC::Common::ChainParamsTy<DOGE::Proto> {
     bool StrictChainId;

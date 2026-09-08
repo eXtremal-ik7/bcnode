@@ -58,8 +58,7 @@ private:
   struct CLogData {
     uint32_t Height;
     uint32_t Index;
-    uint32_t SerializedDataOffset;
-    uint32_t SerializedDataSize;
+    CDataSpan32 TxSpan;
   };
 
   uint32_t version() final { return 1; }

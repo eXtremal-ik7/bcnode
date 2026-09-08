@@ -44,6 +44,10 @@ public:
 using Script = BTC::Script;
 
 namespace Common {
+  // What the block's place in the chain says about it; Bitcoin's answer applies
+  // unchanged, the pinned repeats are empty and BIP34Height carries the rest
+  using BTC::Common::fillChainContext;
+
   // Inherit BTC chain params
   using ChainParams = BTC::Common::ChainParamsTy<LTC::Proto>;
 

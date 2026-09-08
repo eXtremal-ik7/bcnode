@@ -32,7 +32,7 @@ bool TxDb::queryTransaction(const BC::Proto::TxHashTy &txid,
 
     xmstream s(static_cast<uint8_t*>(const_cast<void*>(data)) + sizeof(CLogData), size - sizeof(CLogData));
     result.DataCorrupted |= !BC::unserializeAndCheck(s, result.Tx);
-    result.DataCorrupted |= !BC::unserializeAndCheck(s, result.LinkedOutputs);
+    result.DataCorrupted |= !BTC::unserializeAndCheck(s, result.LinkedOutputs);
   });
 
   return true;
@@ -63,7 +63,7 @@ void TxDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
       data->Height = ref.Index->Height;
       data->Index = i;
       BC::serialize(stream, tx);
-      BC::serialize(stream, ref.LinkedOutputs->Tx[i]);
+      BTC::serialize(stream, ref.LinkedOutputs->Tx[i]);
       writer.putNew(validationData.TxIds[i], stream.data(), stream.sizeOf());
     }
   }

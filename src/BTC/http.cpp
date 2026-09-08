@@ -290,7 +290,7 @@ void BC::Network::HttpApiConnection::onAddressesTxs(rapidjson::Document &request
         }
 
         DB::CQueryTransactionResult queryResult;
-        if (!DB::readTransactionAt(index, item.TxIndex, item.TxOffset, item.TxSize, *BlockDb_, queryResult)) {
+        if (!DB::readTransactionAt(index, item.TxIndex, item.TxSpan, *BlockDb_, queryResult)) {
           replyWithError("DATABASE_CORRUPTED", "", "", index->Header.GetHash().getHexLE());
           return;
         }
@@ -755,6 +755,11 @@ void BC::Network::HttpApiConnection::onTxsByTxid(rapidjson::Document &request)
   jsonParseBaseBlob(request, "txid", txid, &isValid, errorField);
   if (!isValid) {
     replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  if (!Storage_->TransactionDb_) {
+    replyWithError("DATABASE_NOT_ENABLED", "", "", "");
     return;
   }
 

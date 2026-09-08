@@ -7,23 +7,13 @@
 #include "common/baseBlob.h"
 #include "common/endiantools.h"
 #include "hash.h"
+#include "common/blockLayout.h"
 #include "common/smallStream.h"
 #include "common/uint.h"
 #include <vector>
 #include "../loguru.hpp"
 
 namespace BTC {
-
-// Where each transaction lies inside the serialized block, derived from the block itself: the
-// header size and the transaction count give the offset of the first one, every next offset is
-// the previous plus that transaction's size. Exact because unserializeVarSize rejects non
-// minimal encodings, so no stored block can be non canonical; the sum is checked against the
-// stored size to make sure of it. Databases keep a position instead of a txid, and the reader
-// takes exactly those bytes out of the block file
-struct CTxPosition {
-  uint32_t Offset;
-  uint32_t Size;
-};
 
 class Proto {
 public:
@@ -339,7 +329,7 @@ struct CNetworkAddress {
     // Byte layout of the same transactions inside the stored block. Computed here
     // once because more than one database keeps positions instead of txids, and
     // walking the block again per database would parse it twice
-    xvector<CTxPosition> TxPositions;
+    xvector<CDataSpan32> TxLayout;
     // Same-block spend topology, derived from TxIds. InputLocalTx: for every
     // input of vtx[1..] in block walk order, the index of the earlier tx of
     // this block whose output it spends (NoLocalTx otherwise).
@@ -377,7 +367,7 @@ struct CNetworkAddress {
     // Built after the block is already in the block cache and outweighs it: the cache limit
     // means nothing unless this is charged to it too
     size_t memorySize() const {
-      size_t size = TxIds.memoryBytes() + TxPositions.memoryBytes() + InputLocalTx.memoryBytes() + OutputSpentLocally.memoryBytes() +
+      size_t size = TxIds.memoryBytes() + TxLayout.memoryBytes() + InputLocalTx.memoryBytes() + OutputSpentLocally.memoryBytes() +
                     TxData.memoryBytes() + OutputData.memoryBytes() + OutputDataOffset.memoryBytes() +
                     OutputSpentInBatch.memoryBytes() + InputSpendsInBatch.memoryBytes();
       for (const CTxValidationData &tx: TxData)
@@ -571,12 +561,13 @@ struct CBIP30Repeat {
   Proto::TxHashTy TxId;
 };
 
-// What a block's place in the chain says about its coinbase, answered from the pinned
-// list alone. The contextual check is not the only caller: a block reloaded from disk
-// for a disconnect or for a database catching up never runs one, and the databases have
-// to undo exactly what they did
+// The part of the validation context that follows from the block's place in the chain and
+// not from its bytes. The contextual check is not the only caller: a block reloaded from
+// disk for a disconnect or for a database catching up never runs one, and the databases
+// have to undo exactly what they did. Bitcoin's answer is about the coinbase - the pinned
+// repeats and the BIP34 threshold below which any coinbase may collide with an earlier one
 template<typename BlockIndexTy, typename ChainParamsTy, typename ValidationDataTy>
-static inline void fillBIP30Context(const BlockIndexTy &index,
+static inline void fillChainContext(const BlockIndexTy &index,
                                     const ChainParamsTy &chainParams,
                                     ValidationDataTy &validation)
 {
@@ -602,18 +593,14 @@ void serializeForSignature(xmstream &dst,
                            const uint8_t *utxo,
                            size_t utxoSize);
 
-// What a coin writes after the transaction list, LTC's MWEB extension block being the only one
-template<typename CBlockTy>
-static inline size_t blockExtensionSize(const CBlockTy &block)
-{
-  if constexpr (requires { CBlockTy::extensionSize(block); })
-    return CBlockTy::extensionSize(block);
-  else
-    return 0;
-}
-
+// Where each transaction lies inside the serialized block: the header size and the transaction
+// count give the offset of the first one, every next offset is the previous plus that
+// transaction's size. Exact because unserializeVarSize rejects non minimal encodings, so no
+// stored block can be non canonical; txLayoutMatchesStored checks the sum against the stored size.
+// Bitcoin's block layout, so it stays here - a coin that lays its block out differently fills
+// the spans its own way
 template<typename CBlockTy, typename VectorTy>
-static inline void fillTxPositions(const CBlockTy &block, VectorTy &out)
+static inline void fillTxLayout(const CBlockTy &block, VectorTy &out)
 {
   using HeaderTy = std::remove_cvref_t<decltype(block.Header)>;
   using TransactionTy = std::remove_cvref_t<decltype(block.Vtx[0])>;
@@ -626,17 +613,6 @@ static inline void fillTxPositions(const CBlockTy &block, VectorTy &out)
     out[i] = {static_cast<uint32_t>(offset), static_cast<uint32_t>(size)};
     offset += size;
   }
-}
-
-// The parse and the bytes on disk must describe the same block, or a position reads
-// somebody else's transaction: the pieces have to add up to the stored size
-template<typename CBlockTy, typename VectorTy>
-static inline bool txPositionsMatchStored(const CBlockTy &block, const VectorTy &positions, uint32_t storedSize)
-{
-  if (positions.size() != block.Vtx.size() || positions.size() == 0)
-    return false;
-  const CTxPosition &last = positions[positions.size() - 1];
-  return last.Offset + last.Size + blockExtensionSize(block) == storedSize;
 }
 
 }

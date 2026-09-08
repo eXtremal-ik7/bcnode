@@ -230,12 +230,15 @@ bool ZEC::Common::checkBlockStandalone(const Proto::CBlock &block,
   return isValid;
 }
 
-bool ZEC::Common::checkBlockContextual(const BlockIndex&,
+bool ZEC::Common::checkBlockContextual(const BlockIndex &index,
                                       const Proto::CBlock&,
-                                      const Proto::CBlockValidationData&,
+                                      Proto::CBlockValidationData &validation,
                                       const Proto::CBlockLinkedOutputs&,
-                                      const ChainParams&,
+                                      const ChainParams &chainParams,
                                       std::string&)
 {
+  // Nothing of Bitcoin's applies - no BIP34 threshold and no pinned repeats - but the call
+  // stays, so that the block reload path has the same context filler to reproduce
+  fillChainContext(index, chainParams, validation);
   return true;
 }

@@ -264,7 +264,7 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectFromStoredBytes(BC::Common::B
 {
   size_t unpackedSize = 0;
   xmstream blockStream(const_cast<void*>(blockData), blockSize);
-  BC::Proto::CBlock *block = BTC::unpack2<BC::Proto::CBlock>(blockStream, &unpackedSize);
+  BC::Proto::CBlock *block = BC::unpack2<BC::Proto::CBlock>(blockStream, &unpackedSize);
   if (!block || blockStream.remaining() != 0) {
     operator delete(block);
     return nullptr;
@@ -284,7 +284,7 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectFromStoredBytes(BC::Common::B
   // No contextual check runs here - the block passed one on its way into the block database -
   // so the exemptions come straight from the pinned list
   BC::Common::initializeValidationContext(*block, object.get()->validationData());
-  BTC::Common::fillBIP30Context(*index, chainParams, object.get()->validationData());
+  BC::Common::fillChainContext(*index, chainParams, object.get()->validationData());
   object.get()->validationData().InputsResolved = true;
   object.get()->reaccount();
 
@@ -1215,7 +1215,7 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
         return false;
       }
       uint32_t size = 0;
-      BC::unserialize(stream, size);
+      BTC::unserialize(stream, size);
       if (!size || size > stream.remaining()) {
         LOG_F(ERROR, "Invalid index size %u detected in file %s", size, pathUtf8.c_str());
         return false;
@@ -1319,7 +1319,7 @@ static bool decodeBlockRange(BlockInMemoryIndex &blockIndex,
     const BlockPosition &position = positions[i];
     size_t unpackedSize = 0;
     xmstream stream(const_cast<uint8_t*>(fileData) + position.Offset + 8, position.Size);
-    BC::Proto::CBlock *block = BTC::unpack2<BC::Proto::CBlock>(stream, &unpackedSize);
+    BC::Proto::CBlock *block = BC::unpack2<BC::Proto::CBlock>(stream, &unpackedSize);
     if (!block || stream.remaining() != 0) {
       operator delete(block);
       return false;
@@ -1416,8 +1416,8 @@ bool reindex(BlockInMemoryIndex &blockIndex,
 
       uint32_t magic = 0;
       uint32_t blockSize = 0;
-      BC::unserialize(stream, magic);
-      BC::unserialize(stream, blockSize);
+      BTC::unserialize(stream, magic);
+      BTC::unserialize(stream, blockSize);
       if (magic != chainParams.magic || !blockSize || blockSize > stream.remaining()) {
         LOG_F(ERROR, "Can't parse block file %s (invalid record)", pathUtf8.c_str());
         return false;
@@ -1520,10 +1520,12 @@ bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index, bool *needFlush)
     index->FileOffset = position.second;
   }
 
-  // Serialize index for storage
+  // Serialize index for storage. Linked outputs are the engine's own form - nested byte
+  // vectors, nothing of the coin inside - so they are written and read in Bitcoin's encoding
+  // whatever the coin is, and a coin with a serializer of its own needs no writer for them
   uint32_t serializedSize;
   SmallStream<1024> data;
-  BC::serialize(data, serialized->linkedOutputs());
+  BTC::serialize(data, serialized->linkedOutputs());
   serializedSize = static_cast<uint32_t>(data.sizeOf());
   if (!LinkedOutputsStorage_.append2(&serializedSize, sizeof(serializedSize), data.data(), static_cast<uint32_t>(data.sizeOf()), position))
     return false;
@@ -1614,8 +1616,8 @@ void BlockSearcher::fetchPending()
   while (stream.remaining()) {
     uint32_t magic;
     uint32_t blockSize;
-    BC::unserialize(stream, magic);
-    BC::unserialize(stream, blockSize);
+    BTC::unserialize(stream, magic);
+    BTC::unserialize(stream, blockSize);
     void *data = stream.seek<uint8_t>(blockSize);
     if (magic != BlockDb_.magic() || stream.eof()) {
       char fileName[64];
@@ -1771,12 +1773,12 @@ std::unique_ptr<CSegment> CCatchUpReader::next()
     uint32_t linkedOutputsSize = 0;
     {
       xmstream stream(blockData, 8);
-      BC::unserialize(stream, magic);
-      BC::unserialize(stream, blockSize);
+      BTC::unserialize(stream, magic);
+      BTC::unserialize(stream, blockSize);
     }
     {
       xmstream stream(linkedOutputsData, 4);
-      BC::unserialize(stream, linkedOutputsSize);
+      BTC::unserialize(stream, linkedOutputsSize);
     }
 
     // What the index says the record is must be what the record says it is
