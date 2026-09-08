@@ -22,105 +22,105 @@
 namespace LTC {
 namespace MWeb {
 
-using Hash = BaseBlob<256>;
-using BlindingFactor = BaseBlob<256>;
-using Commitment = BaseBlob<264>;
-using PublicKey = BaseBlob<264>;
-using Signature = BaseBlob<512>;
+using HashTy = BaseBlob<256>;
+using BlindingFactorTy = BaseBlob<256>;
+using CommitmentTy = BaseBlob<264>;
+using PublicKeyTy = BaseBlob<264>;
+using SignatureTy = BaseBlob<512>;
 // The nonce masking an output value
-using Nonce = BaseBlob<128>;
+using NonceTy = BaseBlob<128>;
 // Unlike every other byte string here, written without a length prefix
-using RangeProof = std::array<uint8_t, 675>;
+using RangeProofTy = std::array<uint8_t, 675>;
 
-struct Input {
+struct CInput {
   enum FeatureBit {
     StealthKeyFeatureBit = 0x01,
     ExtraDataFeatureBit = 0x02
   };
 
-  uint8_t features = 0;
-  Hash outputId;
-  Commitment commitment;
-  PublicKey outputPubKey;
-  PublicKey inputPubKey;
-  xvector<uint8_t> extraData;
-  Signature signature;
+  uint8_t Features = 0;
+  HashTy OutputId;
+  CommitmentTy Commitment;
+  PublicKeyTy OutputPubKey;
+  PublicKeyTy InputPubKey;
+  xvector<uint8_t> ExtraData;
+  SignatureTy Signature;
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
-    op.io(d.features);
-    op.io(d.outputId);
-    op.io(d.commitment);
-    op.io(d.outputPubKey);
-    if (d.features & StealthKeyFeatureBit)
-      op.io(d.inputPubKey);
-    if (d.features & ExtraDataFeatureBit)
-      op.io(d.extraData);
-    op.io(d.signature);
+    op.io(d.Features);
+    op.io(d.OutputId);
+    op.io(d.Commitment);
+    op.io(d.OutputPubKey);
+    if (d.Features & StealthKeyFeatureBit)
+      op.io(d.InputPubKey);
+    if (d.Features & ExtraDataFeatureBit)
+      op.io(d.ExtraData);
+    op.io(d.Signature);
   }
 };
 
 // What the receiver decrypts to recover the value, masked with keys only the two parties derive
-struct OutputMessage {
+struct COutputMessage {
   enum FeatureBit {
     StandardFieldsFeatureBit = 0x01,
     ExtraDataFeatureBit = 0x02
   };
 
-  uint8_t features = 0;
-  PublicKey keyExchangePubKey;
-  uint8_t viewTag = 0;
-  uint64_t maskedValue = 0;
-  Nonce maskedNonce;
-  xvector<uint8_t> extraData;
+  uint8_t Features = 0;
+  PublicKeyTy KeyExchangePubKey;
+  uint8_t ViewTag = 0;
+  uint64_t MaskedValue = 0;
+  NonceTy MaskedNonce;
+  xvector<uint8_t> ExtraData;
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
-    op.io(d.features);
-    if (d.features & StandardFieldsFeatureBit) {
-      op.io(d.keyExchangePubKey);
-      op.io(d.viewTag);
-      op.io(d.maskedValue);
-      op.io(d.maskedNonce);
+    op.io(d.Features);
+    if (d.Features & StandardFieldsFeatureBit) {
+      op.io(d.KeyExchangePubKey);
+      op.io(d.ViewTag);
+      op.io(d.MaskedValue);
+      op.io(d.MaskedNonce);
     }
-    if (d.features & ExtraDataFeatureBit)
-      op.io(d.extraData);
+    if (d.Features & ExtraDataFeatureBit)
+      op.io(d.ExtraData);
   }
 };
 
-struct Output {
-  Commitment commitment;
-  PublicKey senderPubKey;
-  PublicKey receiverPubKey;
-  OutputMessage message;
-  RangeProof rangeProof;
-  Signature signature;
+struct COutput {
+  CommitmentTy Commitment;
+  PublicKeyTy SenderPubKey;
+  PublicKeyTy ReceiverPubKey;
+  COutputMessage Message;
+  RangeProofTy RangeProof;
+  SignatureTy Signature;
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
-    op.io(d.commitment);
-    op.io(d.senderPubKey);
-    op.io(d.receiverPubKey);
-    op.io(d.message);
-    op.io(d.rangeProof);
-    op.io(d.signature);
+    op.io(d.Commitment);
+    op.io(d.SenderPubKey);
+    op.io(d.ReceiverPubKey);
+    op.io(d.Message);
+    op.io(d.RangeProof);
+    op.io(d.Signature);
   }
 };
 
 // Coins leaving the extension block for the canonical chain
-struct PegOutCoin {
-  int64_t amount = 0;
-  xvector<uint8_t> pkScript;
+struct CPegOutCoin {
+  int64_t Amount = 0;
+  xvector<uint8_t> PkScript;
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
-    op.varint(d.amount);
+    op.varint(d.Amount);
     // an empty pegout script is rejected, as Core does
-    op.check(op.vec(d.pkScript) != 0);
+    op.check(op.vec(d.PkScript) != 0);
   }
 };
 
-struct Kernel {
+struct CKernel {
   enum FeatureBit {
     FeeFeatureBit = 0x01,
     PegInFeatureBit = 0x02,
@@ -130,104 +130,104 @@ struct Kernel {
     ExtraDataFeatureBit = 0x20
   };
 
-  uint8_t features = 0;
-  int64_t fee = 0;
-  int64_t pegIn = 0;
-  xvector<PegOutCoin> pegOuts;
-  int32_t lockHeight = 0;
-  PublicKey stealthExcess;
-  xvector<uint8_t> extraData;
+  uint8_t Features = 0;
+  int64_t Fee = 0;
+  int64_t PegIn = 0;
+  xvector<CPegOutCoin> PegOuts;
+  int32_t LockHeight = 0;
+  PublicKeyTy StealthExcess;
+  xvector<uint8_t> ExtraData;
   // Remainder of the commitment sum, and the signature proving it is a valid public key
-  Commitment excess;
-  Signature signature;
+  CommitmentTy Excess;
+  SignatureTy Signature;
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
     // Core writes the optional groups by presence and reads them by feature bit; driving both
     // off the bits round trips exactly, including a bit set over an empty group
-    op.io(d.features);
-    if (d.features & FeeFeatureBit)
-      op.varint(d.fee);
-    if (d.features & PegInFeatureBit)
-      op.varint(d.pegIn);
-    if (d.features & PegOutFeatureBit)
-      op.io(d.pegOuts);
-    if (d.features & HeightLockFeatureBit)
-      op.varint(d.lockHeight);
-    if (d.features & StealthExcessFeatureBit)
-      op.io(d.stealthExcess);
-    if (d.features & ExtraDataFeatureBit)
-      op.io(d.extraData);
-    op.io(d.excess);
-    op.io(d.signature);
+    op.io(d.Features);
+    if (d.Features & FeeFeatureBit)
+      op.varint(d.Fee);
+    if (d.Features & PegInFeatureBit)
+      op.varint(d.PegIn);
+    if (d.Features & PegOutFeatureBit)
+      op.io(d.PegOuts);
+    if (d.Features & HeightLockFeatureBit)
+      op.varint(d.LockHeight);
+    if (d.Features & StealthExcessFeatureBit)
+      op.io(d.StealthExcess);
+    if (d.Features & ExtraDataFeatureBit)
+      op.io(d.ExtraData);
+    op.io(d.Excess);
+    op.io(d.Signature);
   }
 };
 
 // Shared by a transaction and an extension block
-struct TxBody {
-  xvector<Input> inputs;
-  xvector<Output> outputs;
-  xvector<Kernel> kernels;
+struct CTxBody {
+  xvector<CInput> Inputs;
+  xvector<COutput> Outputs;
+  xvector<CKernel> Kernels;
 
   // The count goes out through the context: a transaction rejects a body with no kernels, and
   // the measuring pass builds no elements to count afterwards
   template<typename Op, typename Self>
   static void io(Op &op, Self &d, size_t *kernelCount = nullptr) {
-    op.vec(d.inputs);
-    op.vec(d.outputs);
-    size_t kernels = op.vec(d.kernels);
+    op.vec(d.Inputs);
+    op.vec(d.Outputs);
+    size_t kernels = op.vec(d.Kernels);
     if (kernelCount)
       *kernelCount = kernels;
   }
 };
 
-struct Transaction {
-  BlindingFactor kernelOffset;
-  BlindingFactor stealthOffset;
-  TxBody body;
+struct CTransaction {
+  BlindingFactorTy KernelOffset;
+  BlindingFactorTy StealthOffset;
+  CTxBody Body;
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
-    op.io(d.kernelOffset);
-    op.io(d.stealthOffset);
+    op.io(d.KernelOffset);
+    op.io(d.StealthOffset);
     size_t kernelCount = 0;
-    op.io(d.body, &kernelCount);
+    op.io(d.Body, &kernelCount);
     // a transaction with no kernel is rejected, as Core does
     op.check(kernelCount != 0);
   }
 };
 
-struct Header {
-  int32_t height = 0;
-  Hash outputRoot;
-  Hash kernelRoot;
-  Hash leafsetRoot;
-  BlindingFactor kernelOffset;
-  BlindingFactor stealthOffset;
-  uint64_t outputMmrSize = 0;
-  uint64_t kernelMmrSize = 0;
+struct CHeader {
+  int32_t Height = 0;
+  HashTy OutputRoot;
+  HashTy KernelRoot;
+  HashTy LeafsetRoot;
+  BlindingFactorTy KernelOffset;
+  BlindingFactorTy StealthOffset;
+  uint64_t OutputMmrSize = 0;
+  uint64_t KernelMmrSize = 0;
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
-    op.varint(d.height);
-    op.io(d.outputRoot);
-    op.io(d.kernelRoot);
-    op.io(d.leafsetRoot);
-    op.io(d.kernelOffset);
-    op.io(d.stealthOffset);
-    op.varint(d.outputMmrSize);
-    op.varint(d.kernelMmrSize);
+    op.varint(d.Height);
+    op.io(d.OutputRoot);
+    op.io(d.KernelRoot);
+    op.io(d.LeafsetRoot);
+    op.io(d.KernelOffset);
+    op.io(d.StealthOffset);
+    op.varint(d.OutputMmrSize);
+    op.varint(d.KernelMmrSize);
   }
 };
 
-struct Block {
-  Header header;
-  TxBody body;
+struct CBlock {
+  CHeader Header;
+  CTxBody Body;
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
-    op.io(d.header);
-    op.io(d.body);
+    op.io(d.Header);
+    op.io(d.Body);
   }
 };
 
@@ -235,9 +235,9 @@ struct Block {
 }
 
 // For HTTP API
-void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::Input &data);
-void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::Output &data);
-void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::PegOutCoin &data);
-void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::Kernel &data);
-void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::Transaction &data);
-void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::Block &data);
+void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::CInput &data);
+void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::COutput &data);
+void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::CPegOutCoin &data);
+void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::CKernel &data);
+void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::CTransaction &data);
+void serializeJson(xmstream &stream, const char *fieldName, const LTC::MWeb::CBlock &data);

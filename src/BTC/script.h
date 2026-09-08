@@ -99,7 +99,7 @@ public:
   };
 #pragma pack(pop)
 
-  static bool extractAddress(const BC::Proto::TxOut &txOut, CAddress &address);
+  static bool extractAddress(const BC::Proto::CTxOut &txOut, CAddress &address);
   static bool extractAddress(const UnspentOutputInfo &info, CAddress &address);
 
   static std::string addressToString(const CAddress &address,
@@ -113,7 +113,7 @@ public:
                                 const std::string &bech32Prefix,
                                 CAddress &address);
 
-  static void parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspentOutputInfo);
+  static void parseTransactionOutput(const BC::Proto::CTxOut &out, xmstream &unspentOutputInfo);
 
 };
 

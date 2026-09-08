@@ -3,4 +3,4 @@
 #include "proto.h"
 #include "doge.h"
 
-bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainParams &chainParams, std::string &error);
+bool validateAuxPow(const DOGE::Proto::CBlock &block, const DOGE::Common::ChainParams &chainParams, std::string &error);

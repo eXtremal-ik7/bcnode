@@ -27,37 +27,37 @@ bool setupChainParams(ChainParams *params, const char *network)
     {
       // Genesis block
       // TODO: build it correct way
-      params->GenesisBlock.header.nVersion = 2;
-      params->GenesisBlock.header.hashPrevBlock.setNull();
-      params->GenesisBlock.header.nTime = 1373064429;
-      params->GenesisBlock.header.nBits = 0x06000000;
-      params->GenesisBlock.header.nNonce = 383;
+      params->GenesisBlock.Header.Version = 2;
+      params->GenesisBlock.Header.HashPrevBlock.setNull();
+      params->GenesisBlock.Header.Time = 1373064429;
+      params->GenesisBlock.Header.Bits = 0x06000000;
+      params->GenesisBlock.Header.Nonce = 383;
 #ifdef _MSC_VER
       // MPIR supports 64-bit integer operands
-      params->GenesisBlock.header.bnPrimeChainMultiplier = ((uint64_t) 532541) * (uint64_t)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+      params->GenesisBlock.Header.PrimeChainMultiplier = ((uint64_t) 532541) * (uint64_t)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
 #else
       static_assert(sizeof(long) == 8 && "4-byte long not supported");
-      params->GenesisBlock.header.bnPrimeChainMultiplier = ((unsigned long) 532541) * (unsigned long)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+      params->GenesisBlock.Header.PrimeChainMultiplier = ((unsigned long) 532541) * (unsigned long)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
 #endif
 
-      XPM::Proto::Transaction tx;
-      tx.version = 1;
-      tx.lockTime = 0;
-      tx.txIn.resize(1);
-      tx.txOut.resize(1);
-      tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.setNull();
-      tx.txIn[0].previousOutputIndex = -1;
+      XPM::Proto::CTransaction tx;
+      tx.Version = 1;
+      tx.LockTime = 0;
+      tx.TxIn.resize(1);
+      tx.TxOut.resize(1);
+      tx.TxIn[0].Sequence = -1;
+      tx.TxIn[0].PreviousOutputHash.setNull();
+      tx.TxIn[0].PreviousOutputIndex = -1;
       xmstream scriptSig;
       serialize(scriptSig, static_cast<uint8_t>(0));
       XPM::serialize(scriptSig, mpz_class(999));
       serialize(scriptSig, static_cast<uint8_t>(0x4C)); // OP_PUSHDATA1
       serialize(scriptSig, std::string("Sunny King - dedicated to Satoshi Nakamoto and all who have fought for the freedom of mankind"));
-      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
-      tx.txOut[0].value = 100000000;
-      params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq<XPM::X>(params->GenesisBlock.header, "963d17ba4dc753138078a2f56afb3af9674e2546822badff26837db9a0152106");
+      xvectorFromStream(std::move(scriptSig), tx.TxIn[0].ScriptSig);
+      tx.TxOut[0].Value = 100000000;
+      params->GenesisBlock.Vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.Header.HashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq<XPM::X>(params->GenesisBlock.Header, "963d17ba4dc753138078a2f56afb3af9674e2546822badff26837db9a0152106");
     }
 
     params->minimalChainLength = 6;
@@ -86,36 +86,36 @@ bool setupChainParams(ChainParams *params, const char *network)
     {
       // Genesis block
       // TODO: build it correct way
-      params->GenesisBlock.header.nVersion = 2;
-      params->GenesisBlock.header.hashPrevBlock.setNull();
-      params->GenesisBlock.header.nTime = 1373063882;
-      params->GenesisBlock.header.nBits = 0x06000000;
-      params->GenesisBlock.header.nNonce = 1513;
+      params->GenesisBlock.Header.Version = 2;
+      params->GenesisBlock.Header.HashPrevBlock.setNull();
+      params->GenesisBlock.Header.Time = 1373063882;
+      params->GenesisBlock.Header.Bits = 0x06000000;
+      params->GenesisBlock.Header.Nonce = 1513;
 #ifdef _MSC_VER
-      params->GenesisBlock.header.bnPrimeChainMultiplier = ((uint64_t) 585641) * (uint64_t)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+      params->GenesisBlock.Header.PrimeChainMultiplier = ((uint64_t) 585641) * (uint64_t)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
 #else
       static_assert(sizeof(long) == 8 && "4-byte long not supported");
-      params->GenesisBlock.header.bnPrimeChainMultiplier = ((unsigned long) 585641) * (unsigned long)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
+      params->GenesisBlock.Header.PrimeChainMultiplier = ((unsigned long) 585641) * (unsigned long)(2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23);
 #endif
 
-      XPM::Proto::Transaction tx;
-      tx.version = 1;
-      tx.lockTime = 0;
-      tx.txIn.resize(1);
-      tx.txOut.resize(1);
+      XPM::Proto::CTransaction tx;
+      tx.Version = 1;
+      tx.LockTime = 0;
+      tx.TxIn.resize(1);
+      tx.TxOut.resize(1);
       xmstream scriptSig;
-      tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.setNull();
-      tx.txIn[0].previousOutputIndex = -1;
+      tx.TxIn[0].Sequence = -1;
+      tx.TxIn[0].PreviousOutputHash.setNull();
+      tx.TxIn[0].PreviousOutputIndex = -1;
       serialize(scriptSig, static_cast<uint8_t>(0));
       XPM::serialize(scriptSig, mpz_class(999));
       serialize(scriptSig, static_cast<uint8_t>(0x4C)); // OP_PUSHDATA1
       serialize(scriptSig, std::string("Sunny King - dedicated to Satoshi Nakamoto and all who have fought for the freedom of mankind"));
-      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
-      tx.txOut[0].value = 100000000;
-      params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq<XPM::X>(params->GenesisBlock.header, "221156cf301bc3585e72de34fe1efdb6fbd703bc27cfc468faa1cdd889d0efa0");
+      xvectorFromStream(std::move(scriptSig), tx.TxIn[0].ScriptSig);
+      tx.TxOut[0].Value = 100000000;
+      params->GenesisBlock.Vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.Header.HashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq<XPM::X>(params->GenesisBlock.Header, "221156cf301bc3585e72de34fe1efdb6fbd703bc27cfc468faa1cdd889d0efa0");
     }
 
     params->minimalChainLength = 2;
@@ -134,7 +134,7 @@ bool setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-// header.nBits is a fixed point number xxxxxxxx.yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy where is
+// Header.Bits is a fixed point number xxxxxxxx.yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy where is
 //   y: fractional part (low 24 bit), minimal unit is 0.000000059604644775390625
 //   x: rational part (high 8 bit)
 
@@ -179,13 +179,13 @@ uint64_t TargetGetFractionalDifficulty(unsigned int nBits)
 /// 7.500 15887
 /// 7.999 254261
 /// 8.000 262144
-UInt<256> GetBlockProof(const XPM::Proto::BlockHeader &header, const XPM::Common::ChainParams &chainParams)
+UInt<256> GetBlockProof(const XPM::Proto::CBlockHeader &header, const XPM::Common::ChainParams &chainParams)
 {
   BaseBlob<256> result;
-  uint64_t nFractionalDifficulty = TargetGetFractionalDifficulty(header.nBits);
+  uint64_t nFractionalDifficulty = TargetGetFractionalDifficulty(header.Bits);
   mpz_class bnWork = 256;
 
-  for (unsigned int nCount = chainParams.minimalChainLength; nCount < TargetGetLength(header.nBits); nCount++)
+  for (unsigned int nCount = chainParams.minimalChainLength; nCount < TargetGetLength(header.Bits); nCount++)
       bnWork *= nWorkTransitionRatio;
 
   // TODO: don't use bignum here
@@ -317,10 +317,10 @@ void checkConsensusInitialize(CheckConsensusCtx &ctx)
   mpz_set_ui(ctx.two, 2);
 }
 
-bool checkConsensus(const Proto::BlockHeader &header, XPM::Common::CheckConsensusCtx &ctx, BC::Common::ChainParams &chainParams)
+bool checkConsensus(const Proto::CBlockHeader &header, XPM::Common::CheckConsensusCtx &ctx, BC::Common::ChainParams &chainParams)
 {
   // Check target
-  if (TargetGetLength(header.nBits) < chainParams.minimalChainLength || TargetGetLength(header.nBits) > 99)
+  if (TargetGetLength(header.Bits) < chainParams.minimalChainLength || TargetGetLength(header.Bits) > 99)
     return false;
 
   UInt<256> hash = header.GetOriginalHeaderHash();
@@ -338,7 +338,7 @@ bool checkConsensus(const Proto::BlockHeader &header, XPM::Common::CheckConsensu
   // ctx.bnPrimeChainOrigin = uintToMpz(hash);
 
   // uint256ToBN(ctx.bnPrimeChainOrigin, hash);
-  mpz_mul(ctx.bnPrimeChainOrigin, ctx.bnPrimeChainOrigin, header.bnPrimeChainMultiplier.get_mpz_t());
+  mpz_mul(ctx.bnPrimeChainOrigin, ctx.bnPrimeChainOrigin, header.PrimeChainMultiplier.get_mpz_t());
 
   auto bnPrimeChainOriginBitSize = mpz_sizeinbase(ctx.bnPrimeChainOrigin, 2);
   if (bnPrimeChainOriginBitSize < 255)
@@ -349,15 +349,15 @@ bool checkConsensus(const Proto::BlockHeader &header, XPM::Common::CheckConsensu
   uint32_t l1 = c1Length(ctx);
   uint32_t l2 = c2Length(ctx);
   uint32_t lbitwin = bitwinLength(l1, l2);
-  if (!(l1 >= header.nBits || l2 >= header.nBits || lbitwin >= header.nBits))
+  if (!(l1 >= header.Bits || l2 >= header.Bits || lbitwin >= header.Bits))
     return false;
 
   uint32_t chainLength;
   chainLength = std::max(l1, l2);
   chainLength = std::max(chainLength, lbitwin);
 
-  // Check that the certificate (bnPrimeChainMultiplier) is normalized
-  if (mpz_get_ui(header.bnPrimeChainMultiplier.get_mpz_t()) % 2 == 0 && mpz_get_ui(ctx.bnPrimeChainOrigin) % 4 == 0) {
+  // Check that the certificate (PrimeChainMultiplier) is normalized
+  if (mpz_get_ui(header.PrimeChainMultiplier.get_mpz_t()) % 2 == 0 && mpz_get_ui(ctx.bnPrimeChainOrigin) % 4 == 0) {
      mpz_fdiv_q_2exp(ctx.bnPrimeChainOrigin, ctx.bnPrimeChainOrigin, 1);
 
      // Calculate extended C1, C2 & bitwin chain lengths
@@ -374,7 +374,7 @@ bool checkConsensus(const Proto::BlockHeader &header, XPM::Common::CheckConsensu
   return true;
 }
 
-bool checkBlockStandalone(const XPM::Proto::Block &block,
+bool checkBlockStandalone(const XPM::Proto::CBlock &block,
                           XPM::Proto::CBlockValidationData &validation,
                           const XPM::Common::ChainParams&,
                           std::string &error)
@@ -392,7 +392,7 @@ bool checkBlockStandalone(const XPM::Proto::Block &block,
 }
 
 bool checkBlockContextual(const BlockIndex &index,
-                          const Proto::Block &block,
+                          const Proto::CBlock &block,
                           Proto::CBlockValidationData &validation,
                           const Proto::CBlockLinkedOutputs&,
                           const ChainParams &chainParams,

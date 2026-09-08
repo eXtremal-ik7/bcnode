@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "blockDataBase.h"
+#include "BC/script.h"
 #include "dbengine/keyHash.h"
 #include "db/storage.h"
 #include "common/fopen.h"
@@ -28,50 +29,50 @@ struct BlockPosition {
 // runs it on a block outside a run, where the state it needs may not exist yet - what it could
 // not answer InputsResolved reports. The connect thread runs it on exactly those, and there the
 // state is the one the block connects to
-static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::Block &block, const BC::DB::UTXODb &db)
+static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::CBlock &block, const BC::DB::UTXODb &db)
 {
   ankerl::unordered_dense::set<CUnspentOutputKey> removed;
 
-  assert(validationData.TxIds.size() == block.vtx.size());
-  linkedOutputs.Tx.resize(block.vtx.size());
+  assert(validationData.TxIds.size() == block.Vtx.size());
+  linkedOutputs.Tx.resize(block.Vtx.size());
 
   bool resolved = true;
   size_t inOrdinal = 0;
-  for (size_t txIdx = 1; txIdx < block.vtx.size(); txIdx++) {
-    BC::Proto::Transaction &tx = block.vtx[txIdx];
+  for (size_t txIdx = 1; txIdx < block.Vtx.size(); txIdx++) {
+    BC::Proto::CTransaction &tx = block.Vtx[txIdx];
     auto &txLinked = linkedOutputs.Tx[txIdx];
 
-    txLinked.TxIn.resize(tx.txIn.size());
-    for (size_t txinIdx = 0; txinIdx < tx.txIn.size(); txinIdx++, inOrdinal++) {
-      const auto &txin = tx.txIn[txinIdx];
+    txLinked.TxIn.resize(tx.TxIn.size());
+    for (size_t txinIdx = 0; txinIdx < tx.TxIn.size(); txinIdx++, inOrdinal++) {
+      const auto &txin = tx.TxIn[txinIdx];
       auto &txinLinked = txLinked.TxIn[txinIdx];
 
       // Answered by the run: from the same block, or from an earlier block of it
       if (!txinLinked.empty())
         continue;
 
-      if (db.query(txin.previousOutputHash, txin.previousOutputIndex, txinLinked)) {
+      if (db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, txinLinked)) {
         // Unspent output found
       } else {
         // Try find in local block (topology precomputed in validation data)
         uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];
         if (localTxIdx != BC::Proto::CBlockValidationData::NoLocalTx) {
-          BC::Proto::Transaction &localReferencedTx = block.vtx[localTxIdx];
-          if (txin.previousOutputIndex >= localReferencedTx.txOut.size()) {
+          BC::Proto::CTransaction &localReferencedTx = block.Vtx[localTxIdx];
+          if (txin.PreviousOutputIndex >= localReferencedTx.TxOut.size()) {
             validationData.InputsResolved = false;
             return false;
           }
           CUnspentOutputKey key;
-          key.Tx = txin.previousOutputHash;
-          key.Index = txin.previousOutputIndex;
+          key.Tx = txin.PreviousOutputHash;
+          key.Index = txin.PreviousOutputIndex;
           if (!removed.insert(key).second) {
             validationData.InputsResolved = false;
             return false;
           }
 
           xmstream s;
-          BC::Script::parseTransactionOutput(localReferencedTx.txOut[txin.previousOutputIndex], s);
-          BTC::Script::UnspentOutputInfo *info = s.data<BTC::Script::UnspentOutputInfo>();
+          BC::Script::parseTransactionOutput(localReferencedTx.TxOut[txin.PreviousOutputIndex], s);
+          BC::Script::UnspentOutputInfo *info = s.data<BC::Script::UnspentOutputInfo>();
           info->IsLocalTx = 1;
           xvectorFromStream(std::move(s), txinLinked);
         } else {
@@ -97,12 +98,12 @@ static void resolveSegmentResidual(CSegment &segment, const BC::DB::UTXODb &db, 
     for (size_t i = begin; i < end; i++) {
       const CSegment::CInput &input = inputs[i];
       BC::Common::CIndexCacheObject *object = segment.Objects[input.Object].Object.get();
-      const auto &txin = object->block()->vtx[input.TxIdx].txIn[input.InIdx];
+      const auto &txin = object->block()->Vtx[input.TxIdx].TxIn[input.InIdx];
       auto &slot = object->linkedOutputs().Tx[input.TxIdx].TxIn[input.InIdx];
       // Emptied first: an empty slot is the only thing that means "the coin is not there", and a
       // block prepared twice still carries what an earlier wave found
       slot.resize(0);
-      db.query(txin.previousOutputHash, txin.previousOutputIndex, slot);
+      db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, slot);
     }
   }, /*priority=*/true);
 
@@ -182,7 +183,7 @@ static void markConnected(BC::Common::BlockIndex *index, BlockInMemoryIndex &blo
 // Everything a connect changes; checks belong to the caller, so a segment can make them for all
 // of its blocks before the first one lands
 static void applyConnect(BC::Common::BlockIndex *index,
-                         BC::Proto::Block &block,
+                         BC::Proto::CBlock &block,
                          BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                          BC::Proto::CBlockValidationData &validationData,
                          BlockInMemoryIndex &blockIndex,
@@ -198,7 +199,7 @@ static void applyConnect(BC::Common::BlockIndex *index,
 }
 
 static bool ConnectBlock(BC::Common::BlockIndex *index,
-                         BC::Proto::Block &block,
+                         BC::Proto::CBlock &block,
                          BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                          BC::Proto::CBlockValidationData &validationData,
                          BC::Common::ChainParams &chainParams,
@@ -215,7 +216,7 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
        !resolveBlockInputs(linkedOutputs, validationData, block, storage.utxodb()))) {
     LOG_F(ERROR,
           "Block %s validation failed (non-existent utxo)",
-          block.header.GetHash().getHexLE().c_str());
+          block.Header.GetHash().getHexLE().c_str());
     return false;
   }
 
@@ -234,7 +235,7 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
 }
 
 static void DisconnectBlock(BlockInMemoryIndex &blockIndex,
-                            BC::Proto::Block &block,
+                            BC::Proto::CBlock &block,
                             BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             BC::Proto::CBlockValidationData &validationData,
                             BC::DB::Storage &storage,
@@ -263,7 +264,7 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectFromStoredBytes(BC::Common::B
 {
   size_t unpackedSize = 0;
   xmstream blockStream(const_cast<void*>(blockData), blockSize);
-  BC::Proto::Block *block = BTC::unpack2<BC::Proto::Block>(blockStream, &unpackedSize);
+  BC::Proto::CBlock *block = BTC::unpack2<BC::Proto::CBlock>(blockStream, &unpackedSize);
   if (!block || blockStream.remaining() != 0) {
     operator delete(block);
     return nullptr;
@@ -375,13 +376,13 @@ static bool switchTo(BC::Common::BlockIndex *newBest,
     sb = newBest;
     uint32_t sbHeight = sb->Height;
     while (lb->Height > sbHeight) {
-      BC::Proto::Block diskBlock;
+      BC::Proto::CBlock diskBlock;
       auto object = objectByIndexChecked(lb, chainParams, storage.blockDb());
       DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), storage, lb, false);
       lb = lb->Prev;
     }
     while (sb != lb) {
-      BC::Proto::Block diskBlock;
+      BC::Proto::CBlock diskBlock;
       newPath.push_back(sb);
       auto object = objectByIndexChecked(lb, chainParams, storage.blockDb());
       DisconnectBlock(blockIndex, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), storage, lb, false);
@@ -512,9 +513,9 @@ static void resolveSegmentInputs(CSegment &segment)
   // The outpoint of a residual input, read back from where it lives
   auto outpointOf = [&](uint32_t inputIdx, uint32_t &index) -> const BC::Proto::TxHashTy& {
     const CSegment::CInput &input = segment.Inputs[inputIdx];
-    const auto &txin = segment.Objects[input.Object].Object.get()->block()->vtx[input.TxIdx].txIn[input.InIdx];
-    index = txin.previousOutputIndex;
-    return txin.previousOutputHash;
+    const auto &txin = segment.Objects[input.Object].Object.get()->block()->Vtx[input.TxIdx].TxIn[input.InIdx];
+    index = txin.PreviousOutputIndex;
+    return txin.PreviousOutputHash;
   };
 
   // False when the segment already spends this coin: the residual wave would find it for both,
@@ -540,11 +541,11 @@ static void resolveSegmentInputs(CSegment &segment)
 
   for (size_t pos = 0; pos < count; pos++) {
     BC::Common::CIndexCacheObject *object = segment.Objects[pos].Object.get();
-    BC::Proto::Block &block = *object->block();
+    BC::Proto::CBlock &block = *object->block();
     BC::Proto::CBlockValidationData &validationData = object->validationData();
     BC::Proto::CBlockLinkedOutputs &linkedOutputs = object->linkedOutputs();
 
-    assert(validationData.TxIds.size() == block.vtx.size());
+    assert(validationData.TxIds.size() == block.Vtx.size());
 
     // Nothing to link: the same-block topology already proved the block invalid, and the segment
     // is cut here
@@ -554,46 +555,46 @@ static void resolveSegmentInputs(CSegment &segment)
       continue;
     }
 
-    linkedOutputs.Tx.resize(block.vtx.size());
+    linkedOutputs.Tx.resize(block.Vtx.size());
 
     // An input left unresolved keeps its block out of the chain; the truncation happens after
     // the linking, so nothing else has to stop here
     bool completable = true;
     size_t inOrdinal = 0;
 
-    for (size_t txIdx = 1; txIdx < block.vtx.size(); txIdx++) {
-      BC::Proto::Transaction &tx = block.vtx[txIdx];
+    for (size_t txIdx = 1; txIdx < block.Vtx.size(); txIdx++) {
+      BC::Proto::CTransaction &tx = block.Vtx[txIdx];
       auto &txLinked = linkedOutputs.Tx[txIdx];
-      txLinked.TxIn.resize(tx.txIn.size());
+      txLinked.TxIn.resize(tx.TxIn.size());
 
-      for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
-        const auto &txin = tx.txIn[j];
+      for (size_t j = 0; j < tx.TxIn.size(); j++, inOrdinal++) {
+        const auto &txin = tx.TxIn[j];
         auto &txinLinked = txLinked.TxIn[j];
 
         // Spend of an output of this very block; the topology pass checked it
         uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];
         if (localTxIdx != BC::Proto::CBlockValidationData::NoLocalTx) {
           xmstream s;
-          BC::Script::parseTransactionOutput(block.vtx[localTxIdx].txOut[txin.previousOutputIndex], s);
-          BTC::Script::UnspentOutputInfo *info = s.data<BTC::Script::UnspentOutputInfo>();
+          BC::Script::parseTransactionOutput(block.Vtx[localTxIdx].TxOut[txin.PreviousOutputIndex], s);
+          BC::Script::UnspentOutputInfo *info = s.data<BC::Script::UnspentOutputInfo>();
           info->IsLocalTx = 1;
           xvectorFromStream(std::move(s), txinLinked);
           continue;
         }
 
         // Spend of an output created by an earlier block of the segment
-        uint64_t hash = txidHash(txin.previousOutputHash);
-        if (const CTxSlot *slot = txFind(hash, txin.previousOutputHash)) {
+        uint64_t hash = txidHash(txin.PreviousOutputHash);
+        if (const CTxSlot *slot = txFind(hash, txin.PreviousOutputHash)) {
           BC::Common::CIndexCacheObject *creator = segment.Objects[slot->Block].Object.get();
           BC::Proto::CBlockValidationData &creatorData = creator->validationData();
-          const BC::Proto::Transaction &creatorTx = creator->block()->vtx[slot->TxIdx];
-          if (txin.previousOutputIndex >= creatorTx.txOut.size()) {
+          const BC::Proto::CTransaction &creatorTx = creator->block()->Vtx[slot->TxIdx];
+          if (txin.PreviousOutputIndex >= creatorTx.TxOut.size()) {
             completable = false;
             continue;
           }
 
           // Spent once already inside the segment, or not a utxo at all
-          size_t ordinal = slot->OutBase + txin.previousOutputIndex;
+          size_t ordinal = slot->OutBase + txin.PreviousOutputIndex;
           if (creatorData.outputSpentLocally(ordinal) || creatorData.outputSpentInBatch(ordinal)) {
             completable = false;
             continue;
@@ -617,7 +618,7 @@ static void resolveSegmentInputs(CSegment &segment)
         segment.Inputs.push_back(CSegment::CInput{static_cast<uint32_t>(pos),
                                                   static_cast<uint32_t>(txIdx),
                                                   static_cast<uint32_t>(j)});
-        if (!spendInsert(outpointHash(txin.previousOutputHash, txin.previousOutputIndex), inputIdx)) {
+        if (!spendInsert(outpointHash(txin.PreviousOutputHash, txin.PreviousOutputIndex), inputIdx)) {
           segment.Inputs.pop_back();
           completable = false;
         }
@@ -626,8 +627,8 @@ static void resolveSegmentInputs(CSegment &segment)
     assert(inOrdinal == validationData.InputLocalTx.size());
 
     uint32_t outBase = 0;
-    for (size_t txIdx = 0; txIdx < block.vtx.size(); txIdx++) {
-      uint32_t outputsNum = static_cast<uint32_t>(block.vtx[txIdx].txOut.size());
+    for (size_t txIdx = 0; txIdx < block.Vtx.size(); txIdx++) {
+      uint32_t outputsNum = static_cast<uint32_t>(block.Vtx[txIdx].TxOut.size());
       const BC::Proto::TxHashTy &txid = validationData.TxIds[txIdx];
       CTxSlot *twin = txInsert(txidHash(txid), txid, static_cast<uint32_t>(pos), static_cast<uint32_t>(txIdx), outBase);
       if (twin) {
@@ -635,7 +636,7 @@ static void resolveSegmentInputs(CSegment &segment)
         // one is spent (BIP30), and impossible since BIP34. Otherwise the block hides a live coin
         BC::Common::CIndexCacheObject *twinObject = segment.Objects[twin->Block].Object.get();
         const BC::Proto::CBlockValidationData &twinData = twinObject->validationDataConst();
-        uint32_t twinOutputs = static_cast<uint32_t>(twinObject->block()->vtx[twin->TxIdx].txOut.size());
+        uint32_t twinOutputs = static_cast<uint32_t>(twinObject->block()->Vtx[twin->TxIdx].TxOut.size());
 
         bool spent = true;
         for (uint32_t i = 0; i < twinOutputs; i++) {
@@ -691,7 +692,7 @@ static void checkSegmentWork(CSegment &segment,
 
   runner.run(segment.Objects.size(), [&segment, &chainParams](size_t begin, size_t end) {
     BC::Common::CheckConsensusCtx &ccCtx = waveConsensusCtx();
-    const BC::Proto::BlockHeader *headers[CheckWorkGroup];
+    const BC::Proto::CBlockHeader *headers[CheckWorkGroup];
     size_t positions[CheckWorkGroup];
     bool results[CheckWorkGroup];
     size_t num = 0;
@@ -750,15 +751,15 @@ static void prepareSegmentBlocks(BC::Common::ChainParams &chainParams,
       }
       entry.Relay = object.get()->relay();
 
-      BC::Proto::Block *block = object.get()->block();
+      BC::Proto::CBlock *block = object.get()->block();
       BC::Proto::CBlockValidationData &validationData = object.get()->validationData();
       BC::Proto::CBlockLinkedOutputs &linkedOutputs = object.get()->linkedOutputs();
 
       std::string error;
-      if (validationData.TxIds.size() != block->vtx.size()) {
+      if (validationData.TxIds.size() != block->Vtx.size()) {
         BC::Common::initializeValidationContext(*block, validationData);
         if (!BC::Common::checkBlockStandalone(*block, validationData, chainParams, error)) {
-          LOG_F(WARNING, "block %s check failed, error: %s", block->header.GetHash().getHexLE().c_str(), error.c_str());
+          LOG_F(WARNING, "block %s check failed, error: %s", block->Header.GetHash().getHexLE().c_str(), error.c_str());
           entry.Valid = false;
           continue;
         }
@@ -854,8 +855,8 @@ bool prepareSegment(BC::Common::ChainParams &chainParams,
       for (size_t i = begin; i < end; i++) {
         const CSegment::CInput &input = segment.Inputs[i];
         BC::Common::CIndexCacheObject *object = segment.Objects[input.Object].Object.get();
-        const auto &txin = object->block()->vtx[input.TxIdx].txIn[input.InIdx];
-        db.query(txin.previousOutputHash, txin.previousOutputIndex, value, /*cacheOnly=*/true);
+        const auto &txin = object->block()->Vtx[input.TxIdx].TxIn[input.InIdx];
+        db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, value, /*cacheOnly=*/true);
       }
     });
   }
@@ -1024,11 +1025,11 @@ static uint32_t addSuccessor(BC::Common::BlockIndex *index)
 // by the elected writer. A caller's successful PoW check is recorded even for a duplicate.
 BC::Common::BlockIndex *addHeader(BlockInMemoryIndex &blockIndex,
                                  BC::Common::ChainParams &chainParams,
-                                 const BC::Proto::BlockHeader &header,
+                                 const BC::Proto::CBlockHeader &header,
                                  bool workChecked)
 {
   // Header batches need the parent's stub to order downloads, even for a duplicate.
-  auto *prev = findOrCreateStub(blockIndex, header.hashPrevBlock);
+  auto *prev = findOrCreateStub(blockIndex, header.HashPrevBlock);
   auto *index = findOrCreateStub(blockIndex, header.GetHash());
   uint32_t bits = BFHeaderWriteStarted;
   if (workChecked)
@@ -1056,7 +1057,7 @@ EBlockDataResult addBlock(BlockInMemoryIndex &blockIndex,
   if (!block)
     return EBlockDataResult::Invalid;
 
-  const auto &header = block->header;
+  const auto &header = block->Header;
   auto *index = findOrCreateStub(blockIndex, header.GetHash());
   if (accepted)
     *accepted = index;
@@ -1071,7 +1072,7 @@ EBlockDataResult addBlock(BlockInMemoryIndex &blockIndex,
   uint32_t events = 0;
   bool writeHeader = !(index->Flags.fetch_or(BFHeaderWriteStarted, std::memory_order_acq_rel) & BFHeaderWriteStarted);
   if (writeHeader) {
-    index->Prev = findOrCreateStub(blockIndex, header.hashPrevBlock);
+    index->Prev = findOrCreateStub(blockIndex, header.HashPrevBlock);
     index->Header = header;
     // Publish both together so a ready parent starts only one traversal.
     index->Flags.fetch_or(BFHeaderDone | BFDataDone, std::memory_order_release);
@@ -1245,7 +1246,7 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
   runner.run(allIndexes.size(), [&](size_t begin, size_t end) {
     for (size_t i = begin; i < end; i++) {
       BC::Common::BlockIndex *index = allIndexes[i];
-      auto prev = blockIndex.blockIndex().find(index->Header.hashPrevBlock);
+      auto prev = blockIndex.blockIndex().find(index->Header.HashPrevBlock);
       if (prev == blockIndex.blockIndex().end()) {
         LOG_F(ERROR,
               "Index loader: previous block is missing for %s",
@@ -1318,7 +1319,7 @@ static bool decodeBlockRange(BlockInMemoryIndex &blockIndex,
     const BlockPosition &position = positions[i];
     size_t unpackedSize = 0;
     xmstream stream(const_cast<uint8_t*>(fileData) + position.Offset + 8, position.Size);
-    BC::Proto::Block *block = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
+    BC::Proto::CBlock *block = BTC::unpack2<BC::Proto::CBlock>(stream, &unpackedSize);
     if (!block || stream.remaining() != 0) {
       operator delete(block);
       return false;

@@ -154,14 +154,14 @@ private:
     }
 
     xmstream blockMsg;
-    BC::Proto::BlockHashTy prevBlockHash = ChainParams_.GenesisBlock.header.GetHash();
+    BC::Proto::BlockHashTy prevBlockHash = ChainParams_.GenesisBlock.Header.GetHash();
     uint32_t height = 1;
     std::vector<BC::Proto::BlockHashTy> blocks;
     std::vector<CLocalUtxo> localUtxo;
 
     for (unsigned i = 0; i < 500; i++) {
-      BC::Proto::MessageBlock block;
-      block.vtx.emplace_back();
+      BC::Proto::CMessageBlock block;
+      block.Vtx.emplace_back();
       finalizeBlock(block,
                     4,
                     prevBlockHash,
@@ -171,22 +171,22 @@ private:
                     maxRewardForHeight(height),
                     Context_.MinerAddress.Address);
 
-      blocks.push_back(block.header.GetHash());
-      localUtxo.emplace_back(block.vtx[0].getTxId(), 0u, Context_.MinerAddress, maxRewardForHeight(height));
+      blocks.push_back(block.Header.GetHash());
+      localUtxo.emplace_back(block.Vtx[0].getTxId(), 0u, Context_.MinerAddress, maxRewardForHeight(height));
       blockMsg.reset();
       serialize(blockMsg, block);
       ioBtcSend(Socket_, "block", blockMsg.data(), blockMsg.sizeOf(), afNone, 0);
-      prevBlockHash = block.header.GetHash();
+      prevBlockHash = block.Header.GetHash();
       height++;
     }
 
     {
       // send coins to 12 addresses
-      BC::Proto::MessageBlock block;
-      block.vtx.emplace_back();
+      BC::Proto::CMessageBlock block;
+      block.Vtx.emplace_back();
 
       for (unsigned i = 0; i < 12; i++) {
-        BC::Proto::Transaction &tx = block.vtx.emplace_back();
+        BC::Proto::CTransaction &tx = block.Vtx.emplace_back();
         buildP2PKHTransaction(Context_.Secp256k1Ctx, tx, {localUtxo[i]}, Context_.RecipientAddresses[i].Address, localUtxo[i].Value);
       }
 
@@ -209,8 +209,8 @@ private:
     --height;
     prevBlockHash = blocks.back();
     for (unsigned i = 0; i < 3; i++) {
-      BC::Proto::MessageBlock block;
-      block.vtx.emplace_back();
+      BC::Proto::CMessageBlock block;
+      block.Vtx.emplace_back();
       finalizeBlock(block,
                     4,
                     prevBlockHash,
@@ -220,14 +220,14 @@ private:
                     maxRewardForHeight(height),
                     Context_.MinerAddress.Address);
 
-      blocks.push_back(block.header.GetHash());
-      localUtxo.emplace_back(block.vtx[0].getTxId(), 0u, Context_.MinerAddress, maxRewardForHeight(height));
+      blocks.push_back(block.Header.GetHash());
+      localUtxo.emplace_back(block.Vtx[0].getTxId(), 0u, Context_.MinerAddress, maxRewardForHeight(height));
 
       blockMsg.reset();
       serialize(blockMsg, block);
       ioBtcSend(Socket_, "block", blockMsg.data(), blockMsg.sizeOf(), afNone, 0);
 
-      prevBlockHash = block.header.GetHash();
+      prevBlockHash = block.Header.GetHash();
       height++;
     }
   }
@@ -249,20 +249,20 @@ private:
   }
 
   void sendVersion() {
-    BC::Proto::MessageVersion msg;
-    msg.version = BC::Configuration::ProtocolVersion;
-    msg.services = 1; // NODE
-    msg.timestamp = static_cast<uint64_t>(time(nullptr));
-    msg.addr_recv.services = 0;
-    msg.addr_recv.setIpv4(0);
-    msg.addr_recv.port = 0;
-    msg.addr_from.services = 0; // NODE
-    msg.addr_from.reset();
-    msg.addr_from.port = 0;
-    msg.nonce = rand();
-    msg.user_agent = BC::Configuration::UserAgent;
-    msg.start_height = 1;
-    msg.relay = 1;
+    BC::Proto::CMessageVersion msg;
+    msg.Version = BC::Configuration::ProtocolVersion;
+    msg.Services = 1; // NODE
+    msg.Timestamp = static_cast<uint64_t>(time(nullptr));
+    msg.AddrRecv.Services = 0;
+    msg.AddrRecv.setIpv4(0);
+    msg.AddrRecv.Port = 0;
+    msg.AddrFrom.Services = 0; // NODE
+    msg.AddrFrom.reset();
+    msg.AddrFrom.Port = 0;
+    msg.Nonce = rand();
+    msg.UserAgent = BC::Configuration::UserAgent;
+    msg.StartHeight = 1;
+    msg.Relay = 1;
 
     SmallStream<1024> localStream;
     BC::serialize(localStream, msg);
@@ -283,12 +283,12 @@ private:
     bool needReceive = true;
     while ( needReceive && ioBtcRecv(Socket_, Command_, ReceiveStream_, Limit_, afNone, 5*1000000) >= 0) {
       if (strcmp(Command_, "version") == 0) {
-        BC::Proto::MessageVersion version;
+        BC::Proto::CMessageVersion version;
         if (!unserializeAndCheck(ReceiveStream_, version))
           return false;
-        printf(" * Version received %s height %u\n", version.user_agent.c_str(), version.start_height);
+        printf(" * Version received %s height %u\n", version.UserAgent.c_str(), version.StartHeight);
 
-        if (version.start_height != 0) {
+        if (version.StartHeight != 0) {
           fprintf(stderr, " * ERROR: node not clean\n");
           return false;
         }
@@ -306,7 +306,7 @@ private:
   }
 
   static int64_t buildP2PKHTransaction(secp256k1_context *secp256k1Ctx,
-                                       BC::Proto::Transaction &tx,
+                                       BC::Proto::CTransaction &tx,
                                        const std::vector<CLocalUtxo> &inputs,
                                        const BC::Proto::AddressTy &output,
                                        int64_t value) {
@@ -319,21 +319,21 @@ private:
 
     int64_t change = 0;
 
-    tx.version = 1;
+    tx.Version = 1;
 
     for (size_t i = 0; i < inputs.size(); i++) {
-      BC::Proto::TxIn &txIn = tx.txIn.emplace_back();
-      txIn.previousOutputHash = inputs[i].TxId;
-      txIn.previousOutputIndex = inputs[i].TxOutIndex;
-      txIn.sequence = std::numeric_limits<uint32_t>::max();
+      BC::Proto::CTxIn &txIn = tx.TxIn.emplace_back();
+      txIn.PreviousOutputHash = inputs[i].TxId;
+      txIn.PreviousOutputIndex = inputs[i].TxOutIndex;
+      txIn.Sequence = std::numeric_limits<uint32_t>::max();
       change += inputs[i].Value;
     }
 
     // single output
-    BC::Proto::TxOut &txOut = tx.txOut.emplace_back();
-    txOut.value = value;
-    txOut.pkScript.resize(sizeof(BC::Proto::AddressTy) + 5);
-    xmstream p2pkh(txOut.pkScript.data(), txOut.pkScript.size());
+    BC::Proto::CTxOut &txOut = tx.TxOut.emplace_back();
+    txOut.Value = value;
+    txOut.PkScript.resize(sizeof(BC::Proto::AddressTy) + 5);
+    xmstream p2pkh(txOut.PkScript.data(), txOut.PkScript.size());
     p2pkh.write<uint8_t>(BTC::Script::OP_DUP);
     p2pkh.write<uint8_t>(BTC::Script::OP_HASH160);
     p2pkh.write<uint8_t>(sizeof(BTC::Proto::AddressTy));
@@ -341,11 +341,11 @@ private:
     p2pkh.write<uint8_t>(BTC::Script::OP_EQUALVERIFY);
     p2pkh.write<uint8_t>(BTC::Script::OP_CHECKSIG);
 
-    tx.lockTime = 0;
+    tx.LockTime = 0;
 
     // sign transaction
     for (size_t i = 0; i < inputs.size(); i++) {
-      BC::Proto::TxIn &txIn = tx.txIn[i];
+      BC::Proto::CTxIn &txIn = tx.TxIn[i];
 
       // restore utxo scriptPubKey
       memcpy(p2pkhOutput + 3, inputs[i].Addr.Address.begin(), sizeof(BC::Proto::AddressTy));
@@ -378,7 +378,7 @@ private:
           txin.write<uint8_t>(1);
           txin.write<uint8_t>(sizeof(inputs[i].Addr.PublicKeyUncompressed));
           txin.write(inputs[i].Addr.PublicKeyUncompressed, sizeof(inputs[i].Addr.PublicKeyUncompressed));
-          xvectorFromStream(std::move(txin), txIn.scriptSig);
+          xvectorFromStream(std::move(txin), txIn.ScriptSig);
         }
       }
     }
@@ -387,7 +387,7 @@ private:
     return change;
   }
 
-  void finalizeBlock(BC::Proto::Block &block,
+  void finalizeBlock(BC::Proto::CBlock &block,
                      uint32_t version,
                      const BC::Proto::BlockHashTy &prev,
                      uint32_t time,
@@ -396,25 +396,25 @@ private:
                      uint64_t reward,
                      const BC::Proto::AddressTy &miningAddress)
   {
-    block.header.nVersion = version;
-    block.header.hashPrevBlock = prev;
-    block.header.nTime = time;
-    block.header.nBits = bits;
-    block.header.nNonce = 0;
+    block.Header.Version = version;
+    block.Header.HashPrevBlock = prev;
+    block.Header.Time = time;
+    block.Header.Bits = bits;
+    block.Header.Nonce = 0;
 
     // Build coinbase transaction
-    BC::Proto::Transaction &coinbaseTx = block.vtx[0];
-    coinbaseTx.version = 2;
+    BC::Proto::CTransaction &coinbaseTx = block.Vtx[0];
+    coinbaseTx.Version = 2;
     {
       // txin
-      BC::Proto::TxIn &txIn = coinbaseTx.txIn.emplace_back();
-      txIn.previousOutputHash.setNull();
-      txIn.previousOutputIndex = 0xFFFFFFFFu;
+      BC::Proto::CTxIn &txIn = coinbaseTx.TxIn.emplace_back();
+      txIn.PreviousOutputHash.setNull();
+      txIn.PreviousOutputIndex = 0xFFFFFFFFu;
       // Witness nonce
       // Use default: 0
-      txIn.witnessStack.resize(1);
-      txIn.witnessStack[0].resize(32);
-      memset(txIn.witnessStack[0].data(), 0, 32);
+      txIn.WitnessStack.resize(1);
+      txIn.WitnessStack[0].resize(32);
+      memset(txIn.WitnessStack[0].data(), 0, 32);
 
       // scriptsig
       xmstream scriptsig;
@@ -425,17 +425,17 @@ private:
       // Extra nonce (8 bytes)
       scriptsig.write<uint64_t>(0);
 
-      xvectorFromStream(std::move(scriptsig), txIn.scriptSig);
-      txIn.sequence = std::numeric_limits<uint32_t>::max();
+      xvectorFromStream(std::move(scriptsig), txIn.ScriptSig);
+      txIn.Sequence = std::numeric_limits<uint32_t>::max();
     }
     {
       // txout
-      BC::Proto::TxOut &txOut = coinbaseTx.txOut.emplace_back();
-      txOut.value = reward;
+      BC::Proto::CTxOut &txOut = coinbaseTx.TxOut.emplace_back();
+      txOut.Value = reward;
 
       // pkscript (use single P2PKH)
-      txOut.pkScript.resize(sizeof(BC::Proto::AddressTy) + 5);
-      xmstream p2pkh(txOut.pkScript.data(), txOut.pkScript.size());
+      txOut.PkScript.resize(sizeof(BC::Proto::AddressTy) + 5);
+      xmstream p2pkh(txOut.PkScript.data(), txOut.PkScript.size());
       p2pkh.write<uint8_t>(BTC::Script::OP_DUP);
       p2pkh.write<uint8_t>(BTC::Script::OP_HASH160);
       p2pkh.write<uint8_t>(sizeof(BC::Proto::AddressTy));
@@ -449,8 +449,8 @@ private:
         std::vector<BaseBlob<256>> witnessHashes;
         witnessHashes.emplace_back();
         witnessHashes.back().setNull();
-        for (size_t i = 1; i < block.vtx.size(); i++)
-          witnessHashes.push_back(block.vtx[i].getWTxid());
+        for (size_t i = 1; i < block.Vtx.size(); i++)
+          witnessHashes.push_back(block.Vtx[i].getWTxid());
         BaseBlob<256> witnessMerkleRoot = BTC::calculateMerkleRoot(&witnessHashes[0], witnessHashes.size());
         uint8_t defaultWitnessNonce[32];
         memset(defaultWitnessNonce, 0, sizeof(defaultWitnessNonce));
@@ -460,27 +460,27 @@ private:
         witnessCommitment.write(prefix, sizeof(prefix));
         witnessCommitment.write(commitment.begin(), commitment.size());
 
-        BC::Proto::TxOut &txOut = coinbaseTx.txOut.emplace_back();
-        txOut.value = 0;
-        txOut.pkScript.resize(witnessCommitment.sizeOf());
-        memcpy(txOut.pkScript.data(), witnessCommitment.data(), witnessCommitment.sizeOf());
+        BC::Proto::CTxOut &txOut = coinbaseTx.TxOut.emplace_back();
+        txOut.Value = 0;
+        txOut.PkScript.resize(witnessCommitment.sizeOf());
+        memcpy(txOut.PkScript.data(), witnessCommitment.data(), witnessCommitment.sizeOf());
       }
     }
 
-    coinbaseTx.lockTime = 0;
+    coinbaseTx.LockTime = 0;
 
     // Merkle root
     std::vector<BC::Proto::TxHashTy> txHashes;
-    for (size_t i = 0; i < block.vtx.size(); i++)
-      txHashes.push_back(block.vtx[i].getTxId());
-    block.header.hashMerkleRoot = BTC::calculateMerkleRoot(&txHashes[0], txHashes.size());
+    for (size_t i = 0; i < block.Vtx.size(); i++)
+      txHashes.push_back(block.Vtx[i].getTxId());
+    block.Header.HashMerkleRoot = BTC::calculateMerkleRoot(&txHashes[0], txHashes.size());
 
     // Nonce
     {
       BC::Common::CheckConsensusCtx ctx;
       BC::Common::checkConsensusInitialize(ctx);
-      while (!BC::Common::checkConsensus(block.header, ctx, ChainParams_))
-        block.header.nNonce++;
+      while (!BC::Common::checkConsensus(block.Header, ctx, ChainParams_))
+        block.Header.Nonce++;
     }
   }
 

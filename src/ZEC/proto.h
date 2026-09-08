@@ -50,227 +50,232 @@ public:
       48); // π_C
 
   template<size_t MLEN>
-  struct NoteEncryption {
+  // Spec names: epk and esk are the ephemeral public and secret keys, hSig the signature hash
+  struct CNoteEncryption {
       enum { CLEN=MLEN+NOTEENCRYPTION_AUTH_BYTES };
-      BaseBlob<256> epk;
-      BaseBlob<256> esk;
-      unsigned char nonce;
-      BaseBlob<256> hSig;
+      BaseBlob<256> Epk;
+      BaseBlob<256> Esk;
+      unsigned char Nonce;
+      BaseBlob<256> HSig;
   };
 
-  using ZCNoteEncryption = NoteEncryption<ZC_NOTEPLAINTEXT_SIZE>;
+  using CZCNoteEncryption = CNoteEncryption<ZC_NOTEPLAINTEXT_SIZE>;
 
 #pragma pack(push, 1)
-  struct BlockHeader {
+  struct CBlockHeader {
   public:
     static constexpr size_t HEADER_SIZE = 4+32+32+32+4+4+32;
 
   public:
-    int32_t nVersion;
-    BaseBlob<256> hashPrevBlock;
-    BaseBlob<256> hashMerkleRoot;
-    BaseBlob<256> hashLightClientRoot;
-    uint32_t nTime;
-    uint32_t nBits;
-    BaseBlob<256> nNonce;
-    xvector<uint8_t> nSolution;
+    int32_t Version;
+    BaseBlob<256> HashPrevBlock;
+    BaseBlob<256> HashMerkleRoot;
+    BaseBlob<256> HashLightClientRoot;
+    uint32_t Time;
+    uint32_t Bits;
+    BaseBlob<256> Nonce;
+    xvector<uint8_t> Solution;
 
     BlockHashTy GetHash() const {
       SmallStream<2048> localStream;
-      BTC::serialize(localStream, nSolution);
+      BTC::serialize(localStream, Solution);
       return BTC::sha256d(this, HEADER_SIZE, localStream.data(), localStream.sizeOf());
     }
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.nVersion);
-      op.io(d.hashPrevBlock);
-      op.io(d.hashMerkleRoot);
-      op.io(d.hashLightClientRoot);
-      op.io(d.nTime);
-      op.io(d.nBits);
-      op.io(d.nNonce);
-      op.io(d.nSolution);
+      op.io(d.Version);
+      op.io(d.HashPrevBlock);
+      op.io(d.HashMerkleRoot);
+      op.io(d.HashLightClientRoot);
+      op.io(d.Time);
+      op.io(d.Bits);
+      op.io(d.Nonce);
+      op.io(d.Solution);
     }
   };
 #pragma pack(pop)
 
   // GetHash hashes the first HEADER_SIZE bytes of the object: layout must stay equal to the
   // wire prefix
-  static_assert(sizeof(BlockHeader) == BlockHeader::HEADER_SIZE + sizeof(xvector<uint8_t>));
+  static_assert(sizeof(CBlockHeader) == CBlockHeader::HEADER_SIZE + sizeof(xvector<uint8_t>));
 
-  using BlockHeaderNet = BTC::Proto::BlockHeaderNetTy<ZEC::Proto>;
-  using Block = BTC::Proto::BlockTy<ZEC::Proto>;
-  using NetworkAddress = BTC::Proto::NetworkAddress;
-  using InventoryVector = BTC::Proto::InventoryVector;
-  // TxIn & TxOut compatible with BTC, witness stack will not used
-  using TxIn = BTC::Proto::TxIn;
-  using TxOut = BTC::Proto::TxOut;
+  using CBlockHeaderNet = BTC::Proto::CBlockHeaderNetTy<ZEC::Proto>;
+  using CBlock = BTC::Proto::CBlockTy<ZEC::Proto>;
+  using CNetworkAddress = BTC::Proto::CNetworkAddress;
+  using CInventoryVector = BTC::Proto::CInventoryVector;
+  // CTxIn & CTxOut compatible with BTC, witness stack will not used
+  using CTxIn = BTC::Proto::CTxIn;
+  using CTxOut = BTC::Proto::CTxOut;
 
   using CBlockValidationData = BTC::Proto::CBlockValidationData;
   using CBlockLinkedOutputs = BTC::Proto::CBlockLinkedOutputs;
   using CTxLinkedOutputs = BTC::Proto::CTxLinkedOutputs;
 
-  struct CompressedG1 {
-    bool y_lsb;
-    BaseBlob<256> x;
+  struct CCompressedG1 {
+    bool YLsb;
+    BaseBlob<256> X;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
       // the y bit lives in a validated prefix byte
       if constexpr (Op::Writing) {
         uint8_t leadingByte = G1_PREFIX_MASK;
-        if (d.y_lsb)
+        if (d.YLsb)
           leadingByte |= 1;
         op.put(leadingByte);
       } else {
         uint8_t leadingByte = 0;
         op.get(leadingByte);
         op.check((leadingByte & ~1) == G1_PREFIX_MASK);
-        d.y_lsb = leadingByte & 1;
+        d.YLsb = leadingByte & 1;
       }
-      op.io(d.x);
+      op.io(d.X);
     }
   };
 
-  struct CompressedG2 {
-    bool y_gt;
-    BaseBlob<512> x;
+  struct CCompressedG2 {
+    bool YGt;
+    BaseBlob<512> X;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
       if constexpr (Op::Writing) {
         uint8_t leadingByte = G2_PREFIX_MASK;
-        if (d.y_gt)
+        if (d.YGt)
           leadingByte |= 1;
         op.put(leadingByte);
       } else {
         uint8_t leadingByte = 0;
         op.get(leadingByte);
         op.check((leadingByte & ~1) == G2_PREFIX_MASK);
-        d.y_gt = leadingByte & 1;
+        d.YGt = leadingByte & 1;
       }
-      op.io(d.x);
+      op.io(d.X);
     }
   };
 
-  struct PHGRProof {
-    CompressedG1 g_A;
-    CompressedG1 g_A_prime;
-    CompressedG2 g_B;
-    CompressedG1 g_B_prime;
-    CompressedG1 g_C;
-    CompressedG1 g_C_prime;
-    CompressedG1 g_K;
-    CompressedG1 g_H;
+  // The eight PHGR proof elements, spec g_A, g_A', g_B, g_B', g_C, g_C', g_K, g_H
+  struct CPHGRProof {
+    CCompressedG1 GA;
+    CCompressedG1 GAPrime;
+    CCompressedG2 GB;
+    CCompressedG1 GBPrime;
+    CCompressedG1 GC;
+    CCompressedG1 GCPrime;
+    CCompressedG1 GK;
+    CCompressedG1 GH;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.g_A);
-      op.io(d.g_A_prime);
-      op.io(d.g_B);
-      op.io(d.g_B_prime);
-      op.io(d.g_C);
-      op.io(d.g_C_prime);
-      op.io(d.g_K);
-      op.io(d.g_H);
+      op.io(d.GA);
+      op.io(d.GAPrime);
+      op.io(d.GB);
+      op.io(d.GBPrime);
+      op.io(d.GC);
+      op.io(d.GCPrime);
+      op.io(d.GK);
+      op.io(d.GH);
     }
   };
 
-  struct SpendDescription {
-    BaseBlob<256> cv;
-    BaseBlob<256> anchor;
-    BaseBlob<256> nullifer;
-    BaseBlob<256> rk;
-    std::array<uint8_t, GROTH_PROOF_SIZE> zkproof;
-    std::array<uint8_t, 64> spendAuthSig;
+  // Spec names: cv is the value commitment, rk the randomized spend key
+  struct CSpendDescription {
+    BaseBlob<256> Cv;
+    BaseBlob<256> Anchor;
+    BaseBlob<256> Nullifier;
+    BaseBlob<256> Rk;
+    std::array<uint8_t, GROTH_PROOF_SIZE> ZkProof;
+    std::array<uint8_t, 64> SpendAuthSig;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.cv);
-      op.io(d.anchor);
-      op.io(d.nullifer);
-      op.io(d.rk);
-      op.io(d.zkproof);
-      op.io(d.spendAuthSig);
+      op.io(d.Cv);
+      op.io(d.Anchor);
+      op.io(d.Nullifier);
+      op.io(d.Rk);
+      op.io(d.ZkProof);
+      op.io(d.SpendAuthSig);
     }
   };
 
-  struct OutputDescription {
-    BaseBlob<256> cv;
-    BaseBlob<256> cmu;
-    BaseBlob<256> ephemeralKey;
-    std::array<uint8_t, ZC_SAPLING_ENCCIPHERTEXT_SIZE> encCiphertext;
-    std::array<uint8_t, ZC_SAPLING_OUTCIPHERTEXT_SIZE> outCiphertext;
-    std::array<uint8_t, GROTH_PROOF_SIZE> zkproof;
+  struct COutputDescription {
+    BaseBlob<256> Cv;
+    BaseBlob<256> Cmu;
+    BaseBlob<256> EphemeralKey;
+    std::array<uint8_t, ZC_SAPLING_ENCCIPHERTEXT_SIZE> EncCiphertext;
+    std::array<uint8_t, ZC_SAPLING_OUTCIPHERTEXT_SIZE> OutCiphertext;
+    std::array<uint8_t, GROTH_PROOF_SIZE> ZkProof;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.cv);
-      op.io(d.cmu);
-      op.io(d.ephemeralKey);
-      op.io(d.encCiphertext);
-      op.io(d.outCiphertext);
-      op.io(d.zkproof);
+      op.io(d.Cv);
+      op.io(d.Cmu);
+      op.io(d.EphemeralKey);
+      op.io(d.EncCiphertext);
+      op.io(d.OutCiphertext);
+      op.io(d.ZkProof);
     }
   };
 
-  struct JSDescription {
-    int64_t vpub_old;
-    int64_t vpub_new;
-    BaseBlob<256> anchor;
-    BaseBlob<256> nullifier1;
-    BaseBlob<256> nullifier2;
-    BaseBlob<256> commitment1;
-    BaseBlob<256> commitment2;
-    BaseBlob<256> ephemeralKey;
-    std::array<uint8_t, ZCNoteEncryption::CLEN> ciphertext1;
-    std::array<uint8_t, ZCNoteEncryption::CLEN> ciphertext2;
-    BaseBlob<256> randomSeed;
-    BaseBlob<256> mac1;
-    BaseBlob<256> mac2;
+  // Spec names of the two transparent amounts are vpub_old and vpub_new: what the joinsplit
+  // takes out of the transparent pool and what it puts back
+  struct CJSDescription {
+    int64_t VpubOld;
+    int64_t VpubNew;
+    BaseBlob<256> Anchor;
+    BaseBlob<256> Nullifier1;
+    BaseBlob<256> Nullifier2;
+    BaseBlob<256> Commitment1;
+    BaseBlob<256> Commitment2;
+    BaseBlob<256> EphemeralKey;
+    std::array<uint8_t, CZCNoteEncryption::CLEN> Ciphertext1;
+    std::array<uint8_t, CZCNoteEncryption::CLEN> Ciphertext2;
+    BaseBlob<256> RandomSeed;
+    BaseBlob<256> Mac1;
+    BaseBlob<256> Mac2;
 
-    PHGRProof phgrProof;
-    std::array<uint8_t, GROTH_PROOF_SIZE> zkproof;
+    CPHGRProof PhgrProof;
+    std::array<uint8_t, GROTH_PROOF_SIZE> ZkProof;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d, bool useGroth) {
-      op.io(d.vpub_old);
-      op.io(d.vpub_new);
-      op.io(d.anchor);
-      op.io(d.nullifier1);
-      op.io(d.nullifier2);
-      op.io(d.commitment1);
-      op.io(d.commitment2);
-      op.io(d.ephemeralKey);
-      op.io(d.randomSeed);
-      op.io(d.mac1);
-      op.io(d.mac2);
+      op.io(d.VpubOld);
+      op.io(d.VpubNew);
+      op.io(d.Anchor);
+      op.io(d.Nullifier1);
+      op.io(d.Nullifier2);
+      op.io(d.Commitment1);
+      op.io(d.Commitment2);
+      op.io(d.EphemeralKey);
+      op.io(d.RandomSeed);
+      op.io(d.Mac1);
+      op.io(d.Mac2);
       // the proof representation is picked by the transaction the description belongs to
       if (useGroth)
-        op.io(d.zkproof);
+        op.io(d.ZkProof);
       else
-        op.io(d.phgrProof);
-      op.io(d.ciphertext1);
-      op.io(d.ciphertext2);
+        op.io(d.PhgrProof);
+      op.io(d.Ciphertext1);
+      op.io(d.Ciphertext2);
     }
   };
 
-  struct Transaction {
-    bool fOverwintered;
-    int32_t version;
-    uint32_t nVersionGroupId;
-    xvector<TxIn> txIn;
-    xvector<TxOut> txOut;
-    uint32_t lockTime;
-    uint32_t nExpiryHeight;
-    int64_t valueBalance;
-    xvector<SpendDescription> vShieldedSpend;
-    xvector<OutputDescription> vShieldedOutput;
-    xvector<JSDescription> vJoinSplit;
-    std::array<uint8_t, 32> joinSplitPubKey;
-    std::array<uint8_t, 64> joinSplitSig;
-    std::array<uint8_t, 64> bindingSig;
+  struct CTransaction {
+    bool Overwintered;
+    int32_t Version;
+    uint32_t VersionGroupId;
+    xvector<CTxIn> TxIn;
+    xvector<CTxOut> TxOut;
+    uint32_t LockTime;
+    uint32_t ExpiryHeight;
+    int64_t ValueBalance;
+    xvector<CSpendDescription> ShieldedSpends;
+    xvector<COutputDescription> ShieldedOutputs;
+    xvector<CJSDescription> JoinSplits;
+    std::array<uint8_t, 32> JoinSplitPubKey;
+    std::array<uint8_t, 64> JoinSplitSig;
+    std::array<uint8_t, 64> BindingSig;
 
     BlockHashTy getTxId() const;
     // ZEC has no witness data, wtxid is always the same as txid
@@ -279,78 +284,78 @@ public:
     // The witness flag of the common block path is accepted and ignored
     template<typename Op, typename Self>
     static void io(Op &op, Self &d, bool = true) {
-      // fOverwintered is packed into the sign bit of the version word
+      // Overwintered is packed into the sign bit of the version word
       uint32_t header;
       if constexpr (Op::Writing) {
-        header = (static_cast<uint32_t>(d.fOverwintered) << 31) | static_cast<uint32_t>(d.version);
+        header = (static_cast<uint32_t>(d.Overwintered) << 31) | static_cast<uint32_t>(d.Version);
         op.put(header);
       } else {
         header = 0;
         op.get(header);
-        d.fOverwintered = header >> 31;
-        d.version = header & 0x7FFFFFFF;
+        d.Overwintered = header >> 31;
+        d.Version = header & 0x7FFFFFFF;
       }
 
-      if (d.fOverwintered)
-        op.io(d.nVersionGroupId);
+      if (d.Overwintered)
+        op.io(d.VersionGroupId);
 
-      bool isOverwinterV3 = d.fOverwintered &&
-          d.nVersionGroupId == OVERWINTER_VERSION_GROUP_ID &&
-          d.version == OVERWINTER_TX_VERSION;
+      bool isOverwinterV3 = d.Overwintered &&
+          d.VersionGroupId == OVERWINTER_VERSION_GROUP_ID &&
+          d.Version == OVERWINTER_TX_VERSION;
       bool isSaplingV4 =
-          d.fOverwintered &&
-          d.nVersionGroupId == SAPLING_VERSION_GROUP_ID &&
-          d.version == SAPLING_TX_VERSION;
-      bool useGroth = d.fOverwintered && d.version >= SAPLING_TX_VERSION;
+          d.Overwintered &&
+          d.VersionGroupId == SAPLING_VERSION_GROUP_ID &&
+          d.Version == SAPLING_TX_VERSION;
+      bool useGroth = d.Overwintered && d.Version >= SAPLING_TX_VERSION;
 
       if constexpr (!Op::Writing) {
         // an overwintered transaction of an unknown version group is unparsable
-        if (d.fOverwintered && !(isOverwinterV3 || isSaplingV4)) {
+        if (d.Overwintered && !(isOverwinterV3 || isSaplingV4)) {
           op.check(false);
           return;
         }
       }
 
-      op.io(d.txIn);
-      op.io(d.txOut);
-      op.io(d.lockTime);
+      op.io(d.TxIn);
+      op.io(d.TxOut);
+      op.io(d.LockTime);
 
       if (isOverwinterV3 || isSaplingV4)
-        op.io(d.nExpiryHeight);
+        op.io(d.ExpiryHeight);
 
       size_t shieldedSpends = 0;
       size_t shieldedOutputs = 0;
       if (isSaplingV4) {
-        op.io(d.valueBalance);
-        shieldedSpends = op.vec(d.vShieldedSpend);
-        shieldedOutputs = op.vec(d.vShieldedOutput);
+        op.io(d.ValueBalance);
+        shieldedSpends = op.vec(d.ShieldedSpends);
+        shieldedOutputs = op.vec(d.ShieldedOutputs);
       }
 
-      if (d.version >= 2) {
-        if (op.vec(d.vJoinSplit, useGroth) != 0) {
-          op.io(d.joinSplitPubKey);
-          op.io(d.joinSplitSig);
+      if (d.Version >= 2) {
+        if (op.vec(d.JoinSplits, useGroth) != 0) {
+          op.io(d.JoinSplitPubKey);
+          op.io(d.JoinSplitSig);
         }
       }
 
       if (isSaplingV4 && (shieldedSpends != 0 || shieldedOutputs != 0))
-        op.io(d.bindingSig);
+        op.io(d.BindingSig);
     }
   };
 
-  using MessageVersion = BTC::Proto::MessageVersion;
-  using MessagePing = BTC::Proto::MessagePing;
-  using MessagePong = BTC::Proto::MessagePong;
-  using MessageAddr = BTC::Proto::MessageAddr;
-  using MessageGetHeaders = BTC::Proto::MessageGetHeaders;
-  using MessageGetBlocks = BTC::Proto::MessageGetBlocks;
-  using MessageInv = BTC::Proto::MessageInv;
-  using MessageBlock = BTC::Proto::MessageBlock;
-  using MessageGetData = BTC::Proto::MessageGetData;
-  using MessageReject = BTC::Proto::MessageReject;
-  using MessageHeaders = BTC::Proto::MessageHeadersTy<ZEC::Proto>;
+  using CMessageVersion = BTC::Proto::CMessageVersion;
+  using CMessagePing = BTC::Proto::CMessagePing;
+  using CMessagePong = BTC::Proto::CMessagePong;
+  using CMessageAddr = BTC::Proto::CMessageAddr;
+  using CMessageGetHeaders = BTC::Proto::CMessageGetHeaders;
+  using CMessageGetBlocks = BTC::Proto::CMessageGetBlocks;
+  using CMessageInv = BTC::Proto::CMessageInv;
+  using CMessageBlock = BTC::Proto::CMessageBlock;
+  using CMessageGetData = BTC::Proto::CMessageGetData;
+  using CMessageReject = BTC::Proto::CMessageReject;
+  using CMessageHeaders = BTC::Proto::CMessageHeadersTy<ZEC::Proto>;
 };
 }
 
-void serializeJson(xmstream &stream, const char *fieldName, const ZEC::Proto::Transaction &data);
-void serializeJsonInside(xmstream &stream, const ZEC::Proto::BlockHeader &header);
+void serializeJson(xmstream &stream, const char *fieldName, const ZEC::Proto::CTransaction &data);
+void serializeJsonInside(xmstream &stream, const ZEC::Proto::CBlockHeader &header);

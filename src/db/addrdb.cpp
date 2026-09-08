@@ -13,17 +13,17 @@ namespace DB {
 
 // Net per-block delta for each affected address; connect merges it as is,
 // disconnect merges it negated
-static void buildBlockDelta(const BC::Proto::Block &block,
+static void buildBlockDelta(const BC::Proto::CBlock &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             bool coinbaseRepeat,
                             ankerl::unordered_dense::map<BC::Script::CAddress, CAddrValue> &deltaMap)
 {
   // Coinbase
   {
-    const auto &coinbaseTx = block.vtx[0];
+    const auto &coinbaseTx = block.Vtx[0];
     ankerl::unordered_dense::set<BC::Script::CAddress> affectedAddresses;
     BC::Script::CAddress address;
-    for (const auto &txout: coinbaseTx.txOut) {
+    for (const auto &txout: coinbaseTx.TxOut) {
       if (BC::Script::extractAddress(txout, address)) {
         CAddrValue &delta = deltaMap[address];
         // A BIP30 repeat pays no one twice: its outputs replace the twin's coins
@@ -32,8 +32,8 @@ static void buildBlockDelta(const BC::Proto::Block &block,
         // the balance and the utxo count of the address stay above what the utxo
         // set holds forever
         if (!coinbaseRepeat) {
-          delta.Received += static_cast<uint64_t>(txout.value);
-          delta.Mined += static_cast<uint64_t>(txout.value);
+          delta.Received += static_cast<uint64_t>(txout.Value);
+          delta.Mined += static_cast<uint64_t>(txout.Value);
           delta.TxOutCount++;
         }
         if (affectedAddresses.insert(address).second) {
@@ -45,17 +45,17 @@ static void buildBlockDelta(const BC::Proto::Block &block,
   }
 
   // Other transactions
-  assert(linkedOutputs.Tx.size() == block.vtx.size());
+  assert(linkedOutputs.Tx.size() == block.Vtx.size());
 
-  for (size_t i = 1; i < block.vtx.size(); i++) {
+  for (size_t i = 1; i < block.Vtx.size(); i++) {
     ankerl::unordered_dense::set<BC::Script::CAddress> affectedAddresses;
-    const auto &tx = block.vtx[i];
+    const auto &tx = block.Vtx[i];
     const auto &linkedTx = linkedOutputs.Tx[i];
 
-    assert(linkedTx.TxIn.size() == tx.txIn.size());
+    assert(linkedTx.TxIn.size() == tx.TxIn.size());
 
     BC::Script::CAddress address;
-    for (size_t j = 0; j < tx.txIn.size(); j++) {
+    for (size_t j = 0; j < tx.TxIn.size(); j++) {
       const auto &linkedTxin = linkedTx.TxIn[j];
       assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
 
@@ -69,10 +69,10 @@ static void buildBlockDelta(const BC::Proto::Block &block,
       }
     }
 
-    for (const auto &txout: tx.txOut) {
+    for (const auto &txout: tx.TxOut) {
       if (BC::Script::extractAddress(txout, address)) {
         CAddrValue &delta = deltaMap[address];
-        delta.Received += static_cast<uint64_t>(txout.value);
+        delta.Received += static_cast<uint64_t>(txout.Value);
         delta.TxOutCount++;
         if (affectedAddresses.insert(address).second)
           delta.TxCount++;
@@ -97,7 +97,7 @@ void AddrDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
   dbengine::CKvWriter<BC::Script::CAddress> writer = liveWriter();
   ankerl::unordered_dense::map<BC::Script::CAddress, CAddrValue> deltaMap;
   for (const CBlockRef &ref: batch) {
-    if (ref.Block->vtx.empty())
+    if (ref.Block->Vtx.empty())
       continue;
 
     deltaMap.clear();
@@ -110,7 +110,7 @@ void AddrDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 }
 
 void AddrDb::disconnect(const BC::Common::BlockIndex *index,
-                            const BC::Proto::Block &block,
+                            const BC::Proto::CBlock &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             const BC::Proto::CBlockValidationData &validationData,
                             BlockInMemoryIndex&,
@@ -118,8 +118,8 @@ void AddrDb::disconnect(const BC::Common::BlockIndex *index,
 {
   dbengine::CKvWriter<BC::Script::CAddress> writer = liveWriter();
   // Nothing to undo, but the position still moves off this block
-  if (block.vtx.empty()) {
-    commit(writer, index->Header.hashPrevBlock);
+  if (block.Vtx.empty()) {
+    commit(writer, index->Header.HashPrevBlock);
     return;
   }
 
@@ -130,7 +130,7 @@ void AddrDb::disconnect(const BC::Common::BlockIndex *index,
     addr.second.negate();
     this->merge(writer, addr.first, addr.second);
   }
-  commit(writer, index->Header.hashPrevBlock);
+  commit(writer, index->Header.HashPrevBlock);
 }
 
 }

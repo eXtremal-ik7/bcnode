@@ -29,7 +29,7 @@ std::string FormatMoney(const UInt<128> &n, int64_t rationalPartSize);
 bool parseMoneyValue(const char *value, const int64_t rationalPartSize, int64_t *out);
 
 template<typename X>
-static inline void genesis_block_hash_assert_eq(const typename X::Proto::BlockHeader &header, const char *targetHash)
+static inline void genesis_block_hash_assert_eq(const typename X::Proto::CBlockHeader &header, const char *targetHash)
 {
   BaseBlob<256> hash;
   hash.setHexLE(targetHash);

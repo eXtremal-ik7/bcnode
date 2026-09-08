@@ -33,7 +33,7 @@ BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
 // Does not check PoW; pass workChecked only if the caller has already verified it.
 BC::Common::BlockIndex *addHeader(BlockInMemoryIndex &blockIndex,
                                  BC::Common::ChainParams &chainParams,
-                                 const BC::Proto::BlockHeader &header,
+                                 const BC::Proto::CBlockHeader &header,
                                  bool workChecked = false);
 
 enum class EBlockDataResult {
@@ -97,9 +97,9 @@ public:
   // ChainWork). Network and API threads may immediately dereference the returned pointer.
   BC::Common::BlockIndex *best() { return BestIndex_.load(std::memory_order_acquire); }
   BC::Common::BlockIndex *genesis() { return GenesisIndex_; }
-  BC::Proto::Block &genesisBlock() { return GenesisBlock_; }
+  BC::Proto::CBlock &genesisBlock() { return GenesisBlock_; }
   void setBest(BC::Common::BlockIndex *index) { BestIndex_.store(index, std::memory_order_release); }
-  void setGenesis(BC::Common::BlockIndex *index, const BC::Proto::Block &block) {
+  void setGenesis(BC::Common::BlockIndex *index, const BC::Proto::CBlock &block) {
     GenesisIndex_ = index;
     GenesisBlock_ = block;
   }
@@ -133,7 +133,7 @@ private:
   tbb::concurrent_unordered_map<uint32_t, BC::Common::BlockIndex*, std::hash<uint32_t>> BlockHeightIndex_;
   std::atomic<BC::Common::BlockIndex*> BestIndex_ = nullptr;
   BC::Common::BlockIndex *GenesisIndex_ = nullptr;
-  BC::Proto::Block GenesisBlock_;
+  BC::Proto::CBlock GenesisBlock_;
 };
 
 class BlockDatabase {

@@ -26,7 +26,7 @@ namespace DB {
 // a database reads it and nothing more
 struct CBlockRef {
   BC::Common::BlockIndex *Index = nullptr;
-  const BC::Proto::Block *Block = nullptr;
+  const BC::Proto::CBlock *Block = nullptr;
   const BC::Proto::CBlockLinkedOutputs *LinkedOutputs = nullptr;
   const BC::Proto::CBlockValidationData *ValidationData = nullptr;
 };
@@ -55,7 +55,7 @@ public:
                        BlockDatabase &blockDb) = 0;
 
   virtual void disconnect(const BC::Common::BlockIndex *index,
-                          const BC::Proto::Block &block,
+                          const BC::Proto::CBlock &block,
                           const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                           const BC::Proto::CBlockValidationData &validationData,
                           BlockInMemoryIndex &blockIndex,

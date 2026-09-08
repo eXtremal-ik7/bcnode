@@ -35,7 +35,7 @@ public:
   // totals): uint64 is enough while the supply in base units fits it
   using BalanceType = uint64_t;
 
-  enum class ServicesTy : uint64_t {
+  enum class EServices : uint64_t {
     Network = 1,
     GetUTXO = 2,
     Bloom = 4,
@@ -43,25 +43,25 @@ public:
     NetworkLimited = 1024
   };
 
-struct NetworkAddressWithoutTime {
-  uint64_t services;
+struct CNetworkAddressWithoutTime {
+  uint64_t Services;
   union {
-    uint8_t u8[16];
-    uint32_t u32[4];
-  } ipv6;
+    uint8_t U8[16];
+    uint32_t U32[4];
+  } Ipv6;
 
   // Port (network byte order)
-  uint16_t port;
+  uint16_t Port;
 
   static constexpr uint8_t ipv4mask[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
 
   void reset() {
-    memset(ipv6.u8, 0, sizeof(ipv6));
+    memset(Ipv6.U8, 0, sizeof(Ipv6));
   }
 
   bool getIpv4(uint32_t *ipv4) const {
-    if (memcmp(ipv6.u8, ipv4mask, sizeof(ipv4mask)) == 0) {
-      *ipv4 = ipv6.u32[3];
+    if (memcmp(Ipv6.U8, ipv4mask, sizeof(ipv4mask)) == 0) {
+      *ipv4 = Ipv6.U32[3];
       return true;
     } else {
       return false;
@@ -69,26 +69,26 @@ struct NetworkAddressWithoutTime {
   }
 
   void setIpv4(uint32_t ipv4) {
-    memcpy(ipv6.u8, ipv4mask, sizeof(ipv4mask));
-    ipv6.u32[3] = ipv4;
+    memcpy(Ipv6.U8, ipv4mask, sizeof(ipv4mask));
+    Ipv6.U32[3] = ipv4;
   }
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
-    op.io(d.services);
-    op.raw(d.ipv6);
-    op.io(d.port);
+    op.io(d.Services);
+    op.raw(d.Ipv6);
+    op.io(d.Port);
   }
 };
 
-struct NetworkAddress {
-  uint32_t time;
-  NetworkAddressWithoutTime addr;
+struct CNetworkAddress {
+  uint32_t Time;
+  CNetworkAddressWithoutTime Addr;
 
   template<typename Op, typename Self>
   static void io(Op &op, Self &d) {
-    op.io(d.time);
-    op.io(d.addr);
+    op.io(d.Time);
+    op.io(d.Addr);
   }
 };
 
@@ -106,13 +106,13 @@ struct NetworkAddress {
   // };
 
 #pragma pack(push, 1)
-  struct BlockHeader {
-    int32_t nVersion;
-    BaseBlob<256> hashPrevBlock;
-    BaseBlob<256> hashMerkleRoot;
-    uint32_t nTime;
-    uint32_t nBits;
-    uint32_t nNonce;
+  struct CBlockHeader {
+    int32_t Version;
+    BaseBlob<256> HashPrevBlock;
+    BaseBlob<256> HashMerkleRoot;
+    uint32_t Time;
+    uint32_t Bits;
+    uint32_t Nonce;
 
     BlockHashTy GetHash() const {
       return sha256d(this, sizeof(*this));
@@ -124,75 +124,75 @@ struct NetworkAddress {
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      static_assert(std::is_same_v<std::remove_cv_t<Self>, BlockHeader>);
-      op.io(d.nVersion);
-      op.io(d.hashPrevBlock);
-      op.io(d.hashMerkleRoot);
-      op.io(d.nTime);
-      op.io(d.nBits);
-      op.io(d.nNonce);
+      static_assert(std::is_same_v<std::remove_cv_t<Self>, CBlockHeader>);
+      op.io(d.Version);
+      op.io(d.HashPrevBlock);
+      op.io(d.HashMerkleRoot);
+      op.io(d.Time);
+      op.io(d.Bits);
+      op.io(d.Nonce);
     }
   };
 #pragma pack(pop)
 
   // GetHash hashes the object as raw bytes: layout must stay equal to the wire format
-  static_assert(sizeof(BlockHeader) == 80);
-  static_assert(std::is_standard_layout_v<BlockHeader>);
+  static_assert(sizeof(CBlockHeader) == 80);
+  static_assert(std::is_standard_layout_v<CBlockHeader>);
 
-  struct TxIn {
-    TxHashTy previousOutputHash;
-    uint32_t previousOutputIndex;
-    xvector<uint8_t> scriptSig;
-    xvector<xvector<uint8_t>> witnessStack;
-    uint32_t sequence;
-
-    template<typename Op, typename Self>
-    static void io(Op &op, Self &d) {
-      op.io(d.previousOutputHash);
-      op.io(d.previousOutputIndex);
-      op.io(d.scriptSig);
-      // witnessStack: written by the transaction
-      op.io(d.sequence);
-    }
-  };
-
-  struct TxOut {
-    int64_t value;
-    xvector<uint8_t> pkScript;
+  struct CTxIn {
+    TxHashTy PreviousOutputHash;
+    uint32_t PreviousOutputIndex;
+    xvector<uint8_t> ScriptSig;
+    xvector<xvector<uint8_t>> WitnessStack;
+    uint32_t Sequence;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.value);
-      op.io(d.pkScript);
+      op.io(d.PreviousOutputHash);
+      op.io(d.PreviousOutputIndex);
+      op.io(d.ScriptSig);
+      // WitnessStack: written by the transaction
+      op.io(d.Sequence);
     }
   };
 
-  struct TxWitness {
-    std::vector<uint8_t> data;
+  struct CTxOut {
+    int64_t Value;
+    xvector<uint8_t> PkScript;
+
+    template<typename Op, typename Self>
+    static void io(Op &op, Self &d) {
+      op.io(d.Value);
+      op.io(d.PkScript);
+    }
+  };
+
+  struct CTxWitness {
+    std::vector<uint8_t> Data;
   };
 
   template<typename T>
-  struct BlockHeaderNetTy {
-    typename T::BlockHeader header;
+  struct CBlockHeaderNetTy {
+    typename T::CBlockHeader Header;
     // Transaction count of the wire form, a headers entry always carries 0
-    VarSize txNum;
+    VarSize TxNum;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.header);
-      op.io(d.txNum);
+      op.io(d.Header);
+      op.io(d.TxNum);
     }
   };
 
-  struct Transaction {
-    int32_t version;
-    xvector<TxIn> txIn;
-    xvector<TxOut> txOut;
-    uint32_t lockTime;
+  struct CTransaction {
+    int32_t Version;
+    xvector<CTxIn> TxIn;
+    xvector<CTxOut> TxOut;
+    uint32_t LockTime;
 
     bool hasWitness() const {
-      for (size_t i = 0; i < txIn.size(); i++) {
-        if (!txIn[i].witnessStack.empty())
+      for (size_t i = 0; i < TxIn.size(); i++) {
+        if (!TxIn[i].WitnessStack.empty())
           return true;
       }
 
@@ -204,33 +204,33 @@ struct NetworkAddress {
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d, bool serializeWitness = true) {
-      op.io(d.version);
+      op.io(d.Version);
       if constexpr (Op::Writing) {
         // segwit: marker and flag ahead of the inputs, witness stacks between the outputs
-        // and lockTime
+        // and LockTime
         bool witness = d.hasWitness() && serializeWitness;
         if (witness) {
           op.put(static_cast<uint8_t>(0));
           op.put(static_cast<uint8_t>(1));
         }
-        op.io(d.txIn);
-        op.io(d.txOut);
+        op.io(d.TxIn);
+        op.io(d.TxOut);
         if (witness) {
-          for (size_t i = 0; i < d.txIn.size(); i++)
-            op.io(d.txIn[i].witnessStack);
+          for (size_t i = 0; i < d.TxIn.size(); i++)
+            op.io(d.TxIn[i].WitnessStack);
         }
       } else {
         // an empty input list is the segwit marker: the flag byte follows, then the real lists
         uint8_t flags = 0;
-        size_t txInCount = op.vec(d.txIn);
+        size_t txInCount = op.vec(d.TxIn);
         if (txInCount == 0) {
           op.get(flags);
           if (flags != 0) {
-            txInCount = op.vec(d.txIn);
-            op.vec(d.txOut);
+            txInCount = op.vec(d.TxIn);
+            op.vec(d.TxOut);
           }
         } else {
-          op.vec(d.txOut);
+          op.vec(d.TxOut);
         }
 
         if (flags & 1) {
@@ -239,7 +239,7 @@ struct NetworkAddress {
           // the marker: reject, as Core does
           bool anyWitness = false;
           for (size_t i = 0; i < txInCount; i++)
-            op.element(d.txIn, i, [&](auto &in) { anyWitness |= op.vec(in.witnessStack) != 0; });
+            op.element(d.TxIn, i, [&](auto &in) { anyWitness |= op.vec(in.WitnessStack) != 0; });
           if (!anyWitness) {
             op.check(false);
             return;
@@ -251,21 +251,21 @@ struct NetworkAddress {
           return;
         }
       }
-      op.io(d.lockTime);
+      op.io(d.LockTime);
     }
   };
 
   template<typename T>
-  struct BlockTy {
-    typename T::BlockHeader header;
-    xvector<typename T::Transaction> vtx;
+  struct CBlockTy {
+    typename T::CBlockHeader Header;
+    xvector<typename T::CTransaction> Vtx;
     // Memory only
     // mutable ValidationData validationData;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d, bool serializeWitness = true) {
-      op.io(d.header, serializeWitness);
-      op.vec(d.vtx, serializeWitness);
+      op.io(d.Header, serializeWitness);
+      op.vec(d.Vtx, serializeWitness);
     }
   };
 
@@ -333,7 +333,7 @@ struct NetworkAddress {
     // earlier one even if this particular block does not. Its coinbase outputs may land
     // on a live coin, so the utxo db must keep them overwrite-safe. Set by the contextual check
     bool CoinbaseMayRepeat = false;
-    // txid of every transaction, parallel to block.vtx ([0] = coinbase);
+    // txid of every transaction, parallel to block.Vtx ([0] = coinbase);
     // checkBlockStandalone verifies them against the header merkle root
     xvector<TxHashTy> TxIds;
     // Byte layout of the same transactions inside the stored block. Computed here
@@ -393,36 +393,36 @@ struct NetworkAddress {
     }
   };
 
-  struct MessageVersion {
-    uint32_t version;
-    uint64_t services;
-    uint64_t timestamp;
-    NetworkAddressWithoutTime addr_recv;
-    NetworkAddressWithoutTime addr_from;
-    uint64_t nonce;
-    std::string user_agent;
-    uint32_t start_height;
-    bool relay;
+  struct CMessageVersion {
+    uint32_t Version;
+    uint64_t Services;
+    uint64_t Timestamp;
+    CNetworkAddressWithoutTime AddrRecv;
+    CNetworkAddressWithoutTime AddrFrom;
+    uint64_t Nonce;
+    std::string UserAgent;
+    uint32_t StartHeight;
+    bool Relay;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      static_assert(std::is_same_v<std::remove_cv_t<Self>, MessageVersion>);
-      op.io(d.version);
-      op.io(d.services);
-      op.io(d.timestamp);
-      op.io(d.addr_recv);
-      if (d.version >= 106) {
-        op.io(d.addr_from);
-        op.io(d.nonce);
-        op.io(d.user_agent);
-        op.io(d.start_height);
-        if (d.version >= 70001)
-          op.io(d.relay);
+      static_assert(std::is_same_v<std::remove_cv_t<Self>, CMessageVersion>);
+      op.io(d.Version);
+      op.io(d.Services);
+      op.io(d.Timestamp);
+      op.io(d.AddrRecv);
+      if (d.Version >= 106) {
+        op.io(d.AddrFrom);
+        op.io(d.Nonce);
+        op.io(d.UserAgent);
+        op.io(d.StartHeight);
+        if (d.Version >= 70001)
+          op.io(d.Relay);
       }
     }
   };
 
-  struct InventoryVector {
+  struct CInventoryVector {
     enum {
       MSG_WITNESS_FLAG = 1 << 30,
 
@@ -436,83 +436,83 @@ struct NetworkAddress {
       MSG_FILTERED_WITNESS_BLOCK = MSG_FILTERED_BLOCK | MSG_WITNESS_FLAG
     };
 
-    uint32_t type;
-    BaseBlob<256> hash;
+    uint32_t Type;
+    BaseBlob<256> Hash;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.type);
-      op.io(d.hash);
+      op.io(d.Type);
+      op.io(d.Hash);
     }
   };
 
   // Template messages
   template<typename T>
-  struct MessageHeadersTy {
-    xvector<BlockHeaderNetTy<T>> headers;
+  struct CMessageHeadersTy {
+    xvector<CBlockHeaderNetTy<T>> Headers;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.headers);
+      op.io(d.Headers);
     }
   };
 
   // BTC messages
-  struct MessagePing {
-    uint64_t nonce;
+  struct CMessagePing {
+    uint64_t Nonce;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.nonce);
+      op.io(d.Nonce);
     }
   };
 
-  struct MessagePong {
-    uint64_t nonce;
+  struct CMessagePong {
+    uint64_t Nonce;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.nonce);
+      op.io(d.Nonce);
     }
   };
 
-  struct MessageAddr {
-    xvector<NetworkAddress> addr_list;
+  struct CMessageAddr {
+    xvector<CNetworkAddress> AddrList;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.addr_list);
+      op.io(d.AddrList);
     }
   };
 
-  struct MessageGetHeaders {
-    uint32_t version;
+  struct CMessageGetHeaders {
+    uint32_t Version;
     xvector<BaseBlob<256>> BlockLocatorHashes;
     BaseBlob<256> HashStop;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.version);
+      op.io(d.Version);
       op.io(d.BlockLocatorHashes);
       op.io(d.HashStop);
     }
   };
 
-  struct MessageGetBlocks {
-    uint32_t version;
+  struct CMessageGetBlocks {
+    uint32_t Version;
     xvector<BaseBlob<256>> BlockLocatorHashes;
     BaseBlob<256> HashStop;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.version);
+      op.io(d.Version);
       op.io(d.BlockLocatorHashes);
       op.io(d.HashStop);
     }
   };
 
-  struct MessageInv {
-    xvector<InventoryVector> Inventory;
+  struct CMessageInv {
+    xvector<CInventoryVector> Inventory;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
@@ -520,34 +520,34 @@ struct NetworkAddress {
     }
   };
 
-  struct MessageGetData {
-    xvector<InventoryVector> inventory;
+  struct CMessageGetData {
+    xvector<CInventoryVector> Inventory;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.inventory);
+      op.io(d.Inventory);
     }
   };
 
-  struct MessageReject {
-    std::string message;
-    int8_t ccode;
-    std::string reason;
-    uint8_t data[32];
+  struct CMessageReject {
+    std::string Message;
+    int8_t Code;
+    std::string Reason;
+    uint8_t Data[32];
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.message);
-      op.io(d.ccode);
-      op.io(d.reason);
+      op.io(d.Message);
+      op.io(d.Code);
+      op.io(d.Reason);
       // TODO: serialize data
     }
   };
 
-  using BlockHeaderNet = BlockHeaderNetTy<BTC::Proto>;
-  using Block = BlockTy<BTC::Proto>;
-  using MessageHeaders = MessageHeadersTy<BTC::Proto>;
-  using MessageBlock = Block;
+  using CBlockHeaderNet = CBlockHeaderNetTy<BTC::Proto>;
+  using CBlock = CBlockTy<BTC::Proto>;
+  using CMessageHeaders = CMessageHeadersTy<BTC::Proto>;
+  using CMessageBlock = CBlock;
 };
 }
 
@@ -595,34 +595,34 @@ static inline void fillBIP30Context(const BlockIndexTy &index,
 }
 
 // Not part of the Io contract: the input being signed is replaced by the utxo it spends
-void serializeForSignature(xmstream &dst, const BTC::Proto::TxIn &data, const uint8_t *utxo, size_t utxoSize);
+void serializeForSignature(xmstream &dst, const BTC::Proto::CTxIn &data, const uint8_t *utxo, size_t utxoSize);
 void serializeForSignature(xmstream &dst,
-                           const BTC::Proto::Transaction &data,
+                           const BTC::Proto::CTransaction &data,
                            size_t targetInput,
                            const uint8_t *utxo,
                            size_t utxoSize);
 
 // What a coin writes after the transaction list, LTC's MWEB extension block being the only one
-template<typename BlockTy>
-static inline size_t blockExtensionSize(const BlockTy &block)
+template<typename CBlockTy>
+static inline size_t blockExtensionSize(const CBlockTy &block)
 {
-  if constexpr (requires { BlockTy::extensionSize(block); })
-    return BlockTy::extensionSize(block);
+  if constexpr (requires { CBlockTy::extensionSize(block); })
+    return CBlockTy::extensionSize(block);
   else
     return 0;
 }
 
-template<typename BlockTy, typename VectorTy>
-static inline void fillTxPositions(const BlockTy &block, VectorTy &out)
+template<typename CBlockTy, typename VectorTy>
+static inline void fillTxPositions(const CBlockTy &block, VectorTy &out)
 {
-  using HeaderTy = std::remove_cvref_t<decltype(block.header)>;
-  using TransactionTy = std::remove_cvref_t<decltype(block.vtx[0])>;
+  using HeaderTy = std::remove_cvref_t<decltype(block.Header)>;
+  using TransactionTy = std::remove_cvref_t<decltype(block.Vtx[0])>;
 
-  size_t offset = Io<HeaderTy>::getSerializedSize(block.header) +
-                  getSerializedVarSizeSize(block.vtx.size());
-  out.resize(block.vtx.size());
-  for (size_t i = 0; i < block.vtx.size(); i++) {
-    size_t size = Io<TransactionTy>::getSerializedSize(block.vtx[i], true);
+  size_t offset = Io<HeaderTy>::getSerializedSize(block.Header) +
+                  getSerializedVarSizeSize(block.Vtx.size());
+  out.resize(block.Vtx.size());
+  for (size_t i = 0; i < block.Vtx.size(); i++) {
+    size_t size = Io<TransactionTy>::getSerializedSize(block.Vtx[i], true);
     out[i] = {static_cast<uint32_t>(offset), static_cast<uint32_t>(size)};
     offset += size;
   }
@@ -630,10 +630,10 @@ static inline void fillTxPositions(const BlockTy &block, VectorTy &out)
 
 // The parse and the bytes on disk must describe the same block, or a position reads
 // somebody else's transaction: the pieces have to add up to the stored size
-template<typename BlockTy, typename VectorTy>
-static inline bool txPositionsMatchStored(const BlockTy &block, const VectorTy &positions, uint32_t storedSize)
+template<typename CBlockTy, typename VectorTy>
+static inline bool txPositionsMatchStored(const CBlockTy &block, const VectorTy &positions, uint32_t storedSize)
 {
-  if (positions.size() != block.vtx.size() || positions.size() == 0)
+  if (positions.size() != block.Vtx.size() || positions.size() == 0)
     return false;
   const CTxPosition &last = positions[positions.size() - 1];
   return last.Offset + last.Size + blockExtensionSize(block) == storedSize;
@@ -642,10 +642,10 @@ static inline bool txPositionsMatchStored(const BlockTy &block, const VectorTy &
 }
 
 // For HTTP API
-void serializeJsonInside(xmstream &stream, const BTC::Proto::BlockHeader &header);
-void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TxIn &txin);
-void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TxOut &txout);
-void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Transaction &data);
+void serializeJsonInside(xmstream &stream, const BTC::Proto::CBlockHeader &header);
+void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::CTxIn &txin);
+void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::CTxOut &txout);
+void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::CTransaction &data);
 
 std::string encodeBase58WithCrc(const uint8_t *prefix, unsigned prefixSize, const uint8_t *address, unsigned addressSize);
 bool decodeBase58WithCrc(const std::string &base58, const uint8_t *prefix, unsigned prefixSize, uint8_t *address, unsigned addressSize);

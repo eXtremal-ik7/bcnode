@@ -13,33 +13,33 @@ static uint32_t getExpectedIndex(uint32_t nNonce, int nChainId, unsigned h)
   return rand % (1 << h);
 }
 
-bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainParams &chainParams, std::string &error)
+bool validateAuxPow(const DOGE::Proto::CBlock &block, const DOGE::Common::ChainParams &chainParams, std::string &error)
 {
-  if (!(block.header.nVersion & DOGE::Proto::BlockHeader::VERSION_AUXPOW))
+  if (!(block.Header.Version & DOGE::Proto::CBlockHeader::VERSION_AUXPOW))
     return true;
 
-  if (block.header.Index != 0) {
+  if (block.Header.Index != 0) {
     error = "AuxPow is not a generate";
     return false;
   }
 
-  uint32_t chainId = block.header.nVersion >> 16;
-  uint32_t parentChainId = block.header.ParentBlock.nVersion >> 16;
+  uint32_t chainId = block.Header.Version >> 16;
+  uint32_t parentChainId = block.Header.ParentBlock.Version >> 16;
 
   if (chainParams.StrictChainId && parentChainId == chainId) {
     error = "Aux POW parent has our chain ID";
     return false;
   }
 
-  if (block.header.ChainMerkleBranch.size() > 30) {
+  if (block.Header.ChainMerkleBranch.size() > 30) {
     error = "Aux POW chain merkle branch too long";
     return false;
   }
 
   // Check parent block merkle tree
   {
-    BaseBlob<256> parentBlockCoinbaseTxHash = block.header.ParentBlockCoinbaseTx.getTxId();
-    if (BTC::calculateMerkleRoot(parentBlockCoinbaseTxHash, &block.header.MerkleBranch[0], block.header.MerkleBranch.size(), 0) != block.header.ParentBlock.hashMerkleRoot) {
+    BaseBlob<256> parentBlockCoinbaseTxHash = block.Header.ParentBlockCoinbaseTx.getTxId();
+    if (BTC::calculateMerkleRoot(parentBlockCoinbaseTxHash, &block.Header.MerkleBranch[0], block.Header.MerkleBranch.size(), 0) != block.Header.ParentBlock.HashMerkleRoot) {
       error = "Aux POW merkle root incorrect";
       return false;
     }
@@ -47,10 +47,10 @@ bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainPa
 
   // Check parent block's coinbase txin format
   BaseBlob<256> chainMerkleRoot =
-    BTC::calculateMerkleRoot(block.header.GetHash(), &block.header.ChainMerkleBranch[0], block.header.ChainMerkleBranch.size(), block.header.ChainIndex);
+    BTC::calculateMerkleRoot(block.Header.GetHash(), &block.Header.ChainMerkleBranch[0], block.Header.ChainMerkleBranch.size(), block.Header.ChainIndex);
   std::reverse(chainMerkleRoot.begin(), chainMerkleRoot.end());
 
-  auto &parentCoinbaseScript = block.header.ParentBlockCoinbaseTx.txIn[0].scriptSig;
+  auto &parentCoinbaseScript = block.Header.ParentBlockCoinbaseTx.TxIn[0].ScriptSig;
   auto chainMerkleRootPos = std::search(parentCoinbaseScript.begin(), parentCoinbaseScript.end(), chainMerkleRoot.begin(), chainMerkleRoot.end());
   auto mergedMiningHeaderPos = std::search(parentCoinbaseScript.begin(), parentCoinbaseScript.end(), pchMergedMiningHeader, pchMergedMiningHeader+sizeof(pchMergedMiningHeader));
 
@@ -89,12 +89,12 @@ bool validateAuxPow(const DOGE::Proto::Block &block, const DOGE::Common::ChainPa
   chainMerkleTreeSize = xletoh(chainMerkleTreeSize);
   extraNoncePart = xletoh(extraNoncePart);
 
-  if (chainMerkleTreeSize != (1u << block.header.ChainMerkleBranch.size())) {
+  if (chainMerkleTreeSize != (1u << block.Header.ChainMerkleBranch.size())) {
     error = "Aux POW merkle branch size does not match parent coinbase";
     return false;
   }
 
-  if (static_cast<uint32_t>(block.header.ChainIndex) != getExpectedIndex(extraNoncePart, chainId, block.header.ChainMerkleBranch.size())) {
+  if (static_cast<uint32_t>(block.Header.ChainIndex) != getExpectedIndex(extraNoncePart, chainId, block.Header.ChainMerkleBranch.size())) {
     error = "Aux POW wrong index";
     return false;
   }

@@ -66,45 +66,45 @@ namespace Common {
 
   unsigned getBlockGeneration(const ChainParams &chainParams, BlockIndex *index);
 
-  static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
+  static inline void initializeValidationContext(const Proto::CBlock &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
 
-  bool checkBlockStandalone(const Proto::Block &block,
+  bool checkBlockStandalone(const Proto::CBlock &block,
                             Proto::CBlockValidationData &validation,
                             const ChainParams &chainParams,
                             std::string &error);
   bool checkBlockContextual(const BlockIndex &index,
-                            const Proto::Block &block,
+                            const Proto::CBlock &block,
                             Proto::CBlockValidationData &validation,
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
                             std::string &error);
 
-  static inline UInt<256> GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) {
+  static inline UInt<256> GetBlockProof(const Proto::CBlockHeader &header, const ChainParams&) {
     return LTC::Common::GetBlockProof(header);
   }
 
   static inline void checkConsensusInitialize(CheckConsensusCtx &ctx) { LTC::Common::checkConsensusInitialize(ctx); }
-  static inline bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) {
-    return header.nVersion & Proto::BlockHeader::VERSION_AUXPOW ?
-      LTC::Common::checkPow(header.ParentBlock, header.nBits, ctx, chainParams.powLimit) :
-      LTC::Common::checkPow(header, header.nBits, ctx, chainParams.powLimit);
+  static inline bool checkConsensus(const Proto::CBlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) {
+    return header.Version & Proto::CBlockHeader::VERSION_AUXPOW ?
+      LTC::Common::checkPow(header.ParentBlock, header.Bits, ctx, chainParams.powLimit) :
+      LTC::Common::checkPow(header, header.Bits, ctx, chainParams.powLimit);
   }
 
   // Auxpow keeps the hashed header and its target apart: sorted out here, before the scrypt path
-  static inline void checkConsensusMulti(const Proto::BlockHeader *const *headers,
+  static inline void checkConsensusMulti(const Proto::CBlockHeader *const *headers,
                                          size_t count,
                                          CheckConsensusCtx&,
                                          ChainParams &chainParams,
                                          bool *results) {
     for (size_t base = 0; base < count; base += SCRYPT_WAYS) {
       size_t num = std::min<size_t>(SCRYPT_WAYS, count - base);
-      const Proto::PureBlockHeader *hashed[SCRYPT_WAYS];
+      const Proto::CPureBlockHeader *hashed[SCRYPT_WAYS];
       uint32_t nBits[SCRYPT_WAYS];
 
       for (size_t i = 0; i < num; i++) {
-        const Proto::BlockHeader *header = headers[base + i];
-        hashed[i] = header->nVersion & Proto::BlockHeader::VERSION_AUXPOW ? &header->ParentBlock : header;
-        nBits[i] = header->nBits;
+        const Proto::CBlockHeader *header = headers[base + i];
+        hashed[i] = header->Version & Proto::CBlockHeader::VERSION_AUXPOW ? &header->ParentBlock : header;
+        nBits[i] = header->Bits;
       }
 
       LTC::Common::checkPowMulti(hashed, nBits, num, chainParams.powLimit, results + base);

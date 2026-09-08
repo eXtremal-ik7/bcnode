@@ -8,24 +8,24 @@
 #include "common/serializeUtils.h"
 #include "common/utils.h"
 
-static ZEC::Proto::Block createGenesisBlock(int64_t genesisReward, uint32_t nTime, uint32_t nBits, const char *nNonceHex, const std::string &equihashSolution)
+static ZEC::Proto::CBlock createGenesisBlock(int64_t genesisReward, uint32_t nTime, uint32_t nBits, const char *nNonceHex, const std::string &equihashSolution)
 {
-  ZEC::Proto::Block block;
-  block.header.nVersion = 4;
-  block.header.hashPrevBlock.setNull();
-  block.header.hashMerkleRoot.setNull();
-  block.header.hashLightClientRoot.setNull();
-  block.header.nTime = nTime;
-  block.header.nBits = nBits;
-  block.header.nNonce.setHexLE(nNonceHex);
-  block.header.nSolution.resize(equihashSolution.size() / 2);
-  hex2bin(equihashSolution.data(), equihashSolution.size(), block.header.nSolution.data());
+  ZEC::Proto::CBlock block;
+  block.Header.Version = 4;
+  block.Header.HashPrevBlock.setNull();
+  block.Header.HashMerkleRoot.setNull();
+  block.Header.HashLightClientRoot.setNull();
+  block.Header.Time = nTime;
+  block.Header.Bits = nBits;
+  block.Header.Nonce.setHexLE(nNonceHex);
+  block.Header.Solution.resize(equihashSolution.size() / 2);
+  hex2bin(equihashSolution.data(), equihashSolution.size(), block.Header.Solution.data());
 
-  ZEC::Proto::Transaction &tx = block.vtx.emplace_back();
+  ZEC::Proto::CTransaction &tx = block.Vtx.emplace_back();
 
-  tx.version = 1;
+  tx.Version = 1;
 
-  ZEC::Proto::TxIn &txin = tx.txIn.emplace_back();
+  ZEC::Proto::CTxIn &txin = tx.TxIn.emplace_back();
   {
     xmstream stream;
     BTC::serialize(stream, static_cast<uint8_t>(0x04));
@@ -34,27 +34,27 @@ static ZEC::Proto::Block createGenesisBlock(int64_t genesisReward, uint32_t nTim
     BTC::serialize(stream, static_cast<uint8_t>(4));
     // blake2s(b'The Economist 2016-10-29 Known unknown: Another crypto-currency is born. BTC#436254 0000000000000000044f321997f336d2908cf8c8d6893e88dbf067e2d949487d ETH#2521903 483039a6b6bd8bd05f0584f9a078d075e454925eb71c1f13eaff59b405a721bb DJIA close on 27 Oct 2016: 18,169.68')
     BTC::serialize(stream, std::string("Zcash0b9c4eef8b7cc417ee5001e3500984b6fea35683a7cac141a043c42064835d34"));
-    xvectorFromStream(std::move(stream), tx.txIn[0].scriptSig);
+    xvectorFromStream(std::move(stream), tx.TxIn[0].ScriptSig);
   }
 
-  txin.previousOutputHash.setNull();
-  txin.previousOutputIndex = 0xFFFFFFFF;
-  txin.sequence = 0xFFFFFFFF;
+  txin.PreviousOutputHash.setNull();
+  txin.PreviousOutputIndex = 0xFFFFFFFF;
+  txin.Sequence = 0xFFFFFFFF;
 
-  ZEC::Proto::TxOut &txout = tx.txOut.emplace_back();
-  txout.value = genesisReward;
+  ZEC::Proto::CTxOut &txout = tx.TxOut.emplace_back();
+  txout.Value = genesisReward;
   {
     static const std::string signature = "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f";
     xmstream stream;
     BTC::serialize(stream, static_cast<uint8_t>(signature.size()/2));
     hex2bin(signature.data(), signature.size(), stream.reserve(signature.size()/2));
     BTC::serialize(stream, static_cast<uint8_t>(BTC::Script::OP_CHECKSIG));
-    xvectorFromStream(std::move(stream), tx.txOut[0].pkScript);
+    xvectorFromStream(std::move(stream), tx.TxOut[0].PkScript);
   }
 
-  tx.lockTime = 0;
+  tx.LockTime = 0;
 
-  block.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(block);
+  block.Header.HashMerkleRoot = BTC::calculateBlockMerkleRoot(block);
   return block;
 }
 
@@ -95,7 +95,7 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
          "de1b9828e7b2e74123dd47062ddcc09b05e7fa13cb2212a6fdbc65d7e852cec463ec6fd929f5b8483cf3052113b13dac91b69f49d1b7d1aec01c4a68e41ce157";
 
       params->GenesisBlock = createGenesisBlock(0, 1477641360, 0x1f07ffff, "0x0000000000000000000000000000000000000000000000000000000000001257", equihashSolution);
-      genesis_block_hash_assert_eq<ZEC::X>(params->GenesisBlock.header, "00040fe8ec8471911baa1db1266ea15dd06b4a8a5c453883c000b031973dce08");
+      genesis_block_hash_assert_eq<ZEC::X>(params->GenesisBlock.Header, "00040fe8ec8471911baa1db1266ea15dd06b4a8a5c453883c000b031973dce08");
     }
 
     // DNS seeds
@@ -140,7 +140,7 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
           "97167ae207c5c5ae54e528c36016a984235e9c5b2f0718d7b3aa93c7822ccc772580b6599671b3c02ece8a21399abd33cfd3028790133167d0a97e7de53dc8ff";
 
       params->GenesisBlock = createGenesisBlock(0, 1477648033, 0x2007ffff, "0x0000000000000000000000000000000000000000000000000000000000000006", equihashSolution);
-      genesis_block_hash_assert_eq<ZEC::X>(params->GenesisBlock.header, "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38");
+      genesis_block_hash_assert_eq<ZEC::X>(params->GenesisBlock.Header, "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38");
     }
 
     // DNS seeds
@@ -184,7 +184,7 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
           "97167ae207c5c5ae54e528c36016a984235e9c5b2f0718d7b3aa93c7822ccc772580b6599671b3c02ece8a21399abd33cfd3028790133167d0a97e7de53dc8ff";
 
       params->GenesisBlock = createGenesisBlock(0, 1296688602, 0x200f0f0f, "0x0000000000000000000000000000000000000000000000000000000000000009", equihashSolution);
-      genesis_block_hash_assert_eq<ZEC::X>(params->GenesisBlock.header, "0000000000000000000000000000000000000000000000000000000000000000");
+      genesis_block_hash_assert_eq<ZEC::X>(params->GenesisBlock.Header, "0000000000000000000000000000000000000000000000000000000000000000");
     }
   } else {
     return false;
@@ -193,17 +193,17 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-bool ZEC::Common::checkPow(const Proto::BlockHeader&, uint32_t, CheckConsensusCtx&, const UInt<256>&)
+bool ZEC::Common::checkPow(const Proto::CBlockHeader&, uint32_t, CheckConsensusCtx&, const UInt<256>&)
 {
   // TODO: equihash check implement
   return true;
 }
 
-UInt<256> ZEC::Common::GetBlockProof(const Proto::BlockHeader &header)
+UInt<256> ZEC::Common::GetBlockProof(const Proto::CBlockHeader &header)
 {
   bool fNegative;
   bool fOverflow;
-  UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
+  UInt<256> bnTarget = uint256Compact(header.Bits, &fNegative, &fOverflow);
   if (fNegative || fOverflow || bnTarget.isZero())
       return UInt<256>::zero();
   // We need to compute 2**256 / (bnTarget+1), but we can't represent 2**256
@@ -213,7 +213,7 @@ UInt<256> ZEC::Common::GetBlockProof(const Proto::BlockHeader &header)
   return (~bnTarget / (bnTarget + 1u)) + 1u;
 }
 
-bool ZEC::Common::checkBlockStandalone(const Proto::Block &block,
+bool ZEC::Common::checkBlockStandalone(const Proto::CBlock &block,
                                       Proto::CBlockValidationData&,
                                       const ChainParams&,
                                       std::string &error)
@@ -231,7 +231,7 @@ bool ZEC::Common::checkBlockStandalone(const Proto::Block &block,
 }
 
 bool ZEC::Common::checkBlockContextual(const BlockIndex&,
-                                      const Proto::Block&,
+                                      const Proto::CBlock&,
                                       const Proto::CBlockValidationData&,
                                       const Proto::CBlockLinkedOutputs&,
                                       const ChainParams&,

@@ -48,9 +48,9 @@ void TxDbRef::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
   dbengine::CKvWriter<BC::Proto::TxHashTy> writer = liveWriter();
   for (const CBlockRef &ref: batch) {
-    const BC::Proto::Block &block = *ref.Block;
+    const BC::Proto::CBlock &block = *ref.Block;
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
-    assert(validationData.TxIds.size() == block.vtx.size());
+    assert(validationData.TxIds.size() == block.Vtx.size());
 
     if (!BTC::txPositionsMatchStored(block, validationData.TxPositions, ref.Index->SerializedBlockSize)) {
       LOG_F(ERROR,
@@ -60,7 +60,7 @@ void TxDbRef::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
     }
 
     // A BIP30 repeat brings a coinbase this database already holds; see firstTx
-    for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++) {
+    for (size_t i = firstTx(validationData), ie = block.Vtx.size(); i != ie; i++) {
       CLogData data;
       data.Height = ref.Index->Height;
       data.Index = i;
@@ -73,17 +73,17 @@ void TxDbRef::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 }
 
 void TxDbRef::disconnect(const BC::Common::BlockIndex *index,
-                             const BC::Proto::Block &block,
+                             const BC::Proto::CBlock &block,
                              const BC::Proto::CBlockLinkedOutputs&,
                              const BC::Proto::CBlockValidationData &validationData,
                              BlockInMemoryIndex&,
                              BlockDatabase&)
 {
   dbengine::CKvWriter<BC::Proto::TxHashTy> writer = liveWriter();
-  assert(validationData.TxIds.size() == block.vtx.size());
-  for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
+  assert(validationData.TxIds.size() == block.Vtx.size());
+  for (size_t i = firstTx(validationData), ie = block.Vtx.size(); i != ie; i++)
     writer.erase(validationData.TxIds[i]);
-  commit(writer, index->Header.hashPrevBlock);
+  commit(writer, index->Header.HashPrevBlock);
 }
 
 }

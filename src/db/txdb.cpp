@@ -48,15 +48,15 @@ void TxDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
   dbengine::CKvWriter<BC::Proto::TxHashTy> writer = liveWriter();
   SmallStream<4096> stream;
   for (const CBlockRef &ref: batch) {
-    const BC::Proto::Block &block = *ref.Block;
+    const BC::Proto::CBlock &block = *ref.Block;
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
-    assert(validationData.TxIds.size() == block.vtx.size());
+    assert(validationData.TxIds.size() == block.Vtx.size());
 
     // A BIP30 repeat carries a coinbase this database already holds, byte for byte
     // the same one: leaving the twin's record alone keeps the key write-once, and a
     // query answers with both inclusions from the chain params
-    for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++) {
-      const auto &tx = block.vtx[i];
+    for (size_t i = firstTx(validationData), ie = block.Vtx.size(); i != ie; i++) {
+      const auto &tx = block.Vtx[i];
 
       stream.reset();
       CLogData *data = stream.reserve<CLogData>(1);
@@ -71,17 +71,17 @@ void TxDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 }
 
 void TxDb::disconnect(const BC::Common::BlockIndex *index,
-                          const BC::Proto::Block &block,
+                          const BC::Proto::CBlock &block,
                           const BC::Proto::CBlockLinkedOutputs&,
                           const BC::Proto::CBlockValidationData &validationData,
                           BlockInMemoryIndex&,
                           BlockDatabase&)
 {
   dbengine::CKvWriter<BC::Proto::TxHashTy> writer = liveWriter();
-  assert(validationData.TxIds.size() == block.vtx.size());
-  for (size_t i = firstTx(validationData), ie = block.vtx.size(); i != ie; i++)
+  assert(validationData.TxIds.size() == block.Vtx.size());
+  for (size_t i = firstTx(validationData), ie = block.Vtx.size(); i != ie; i++)
     writer.erase(validationData.TxIds[i]);
-  commit(writer, index->Header.hashPrevBlock);
+  commit(writer, index->Header.HashPrevBlock);
 }
 
 }

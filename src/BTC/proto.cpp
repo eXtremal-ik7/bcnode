@@ -9,24 +9,24 @@
 
 namespace BTC {
 
-Proto::BlockHashTy Proto::Transaction::getTxId() const
+Proto::BlockHashTy Proto::CTransaction::getTxId() const
 {
   SmallStream<4096> stream;
-  BTC::Io<Proto::Transaction>::serialize(stream, *this, false);
+  BTC::Io<Proto::CTransaction>::serialize(stream, *this, false);
   return sha256d(stream.data(), stream.sizeOf());
 }
 
-Proto::BlockHashTy Proto::Transaction::getWTxid() const
+Proto::BlockHashTy Proto::CTransaction::getWTxid() const
 {
   SmallStream<4096> stream;
-  BTC::Io<Proto::Transaction>::serialize(stream, *this);
+  BTC::Io<Proto::CTransaction>::serialize(stream, *this);
   return sha256d(stream.data(), stream.sizeOf());
 }
 
-void serializeForSignature(xmstream &dst, const BTC::Proto::TxIn &data, const uint8_t *utxo, size_t utxoSize)
+void serializeForSignature(xmstream &dst, const BTC::Proto::CTxIn &data, const uint8_t *utxo, size_t utxoSize)
 {
-  BTC::serialize(dst, data.previousOutputHash);
-  BTC::serialize(dst, data.previousOutputIndex);
+  BTC::serialize(dst, data.PreviousOutputHash);
+  BTC::serialize(dst, data.PreviousOutputIndex);
   if (utxo) {
     serializeVarSize(dst, utxoSize);
     dst.write(utxo, utxoSize);
@@ -34,40 +34,40 @@ void serializeForSignature(xmstream &dst, const BTC::Proto::TxIn &data, const ui
     serializeVarSize(dst, 0);
   }
 
-  BTC::serialize(dst, data.sequence);
+  BTC::serialize(dst, data.Sequence);
 }
 
 void serializeForSignature(xmstream &dst,
-                           const Proto::Transaction &data,
+                           const Proto::CTransaction &data,
                            size_t targetInput,
                            const uint8_t *utxo,
                            size_t utxoSize)
 {
-  BTC::serialize(dst, data.version);
-  serializeVarSize(dst, data.txIn.size());
-  for (size_t i = 0; i < data.txIn.size(); i++) {
+  BTC::serialize(dst, data.Version);
+  serializeVarSize(dst, data.TxIn.size());
+  for (size_t i = 0; i < data.TxIn.size(); i++) {
     if (i == targetInput)
-      BTC::serializeForSignature(dst, data.txIn[i], utxo, utxoSize);
+      BTC::serializeForSignature(dst, data.TxIn[i], utxo, utxoSize);
     else
-      BTC::serializeForSignature(dst, data.txIn[i], nullptr, 0);
+      BTC::serializeForSignature(dst, data.TxIn[i], nullptr, 0);
   }
-  BTC::serialize(dst, data.txOut);
-  BTC::serialize(dst, data.lockTime);
+  BTC::serialize(dst, data.TxOut);
+  BTC::serialize(dst, data.LockTime);
 }
 
 }
 
-void serializeJsonInside(xmstream &stream, const BTC::Proto::BlockHeader &header)
+void serializeJsonInside(xmstream &stream, const BTC::Proto::CBlockHeader &header)
 {
-  serializeJson(stream, "version", header.nVersion); stream.write(',');
-  serializeJson(stream, "hashPrevBlock", header.hashPrevBlock); stream.write(',');
-  serializeJson(stream, "hashMerkleRoot", header.hashMerkleRoot); stream.write(',');
-  serializeJson(stream, "time", header.nTime); stream.write(',');
-  serializeJson(stream, "bits", header.nBits); stream.write(',');
-  serializeJson(stream, "nonce", header.nNonce);
+  serializeJson(stream, "version", header.Version); stream.write(',');
+  serializeJson(stream, "hashPrevBlock", header.HashPrevBlock); stream.write(',');
+  serializeJson(stream, "hashMerkleRoot", header.HashMerkleRoot); stream.write(',');
+  serializeJson(stream, "time", header.Time); stream.write(',');
+  serializeJson(stream, "bits", header.Bits); stream.write(',');
+  serializeJson(stream, "nonce", header.Nonce);
 }
 
-void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TxIn &txin)
+void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::CTxIn &txin)
 {
   if (fieldName) {
     stream.write('\"');
@@ -76,18 +76,18 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tx
   }
 
   stream.write('{');
-  serializeJson(stream, "previousOutputHash", txin.previousOutputHash); stream.write(',');
-  serializeJson(stream, "previousOutputIndex", txin.previousOutputIndex); stream.write(',');
-  serializeJson(stream, "scriptsig", txin.scriptSig); stream.write(',');
-  serializeJson(stream, "sequence", txin.sequence);
-  if (!txin.witnessStack.empty()) {
+  serializeJson(stream, "previousOutputHash", txin.PreviousOutputHash); stream.write(',');
+  serializeJson(stream, "previousOutputIndex", txin.PreviousOutputIndex); stream.write(',');
+  serializeJson(stream, "scriptsig", txin.ScriptSig); stream.write(',');
+  serializeJson(stream, "sequence", txin.Sequence);
+  if (!txin.WitnessStack.empty()) {
     stream.write(',');
-    serializeJson(stream, "witnessStack", txin.witnessStack);
+    serializeJson(stream, "witnessStack", txin.WitnessStack);
   }
   stream.write('}');
 }
 
-void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::TxOut &txout)
+void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::CTxOut &txout)
 {
   if (fieldName) {
     stream.write('\"');
@@ -96,12 +96,12 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tx
   }
 
   stream.write('{');
-  serializeJson(stream, "value", txout.value); stream.write(',');
-  serializeJson(stream, "pkscript", txout.pkScript);
+  serializeJson(stream, "value", txout.Value); stream.write(',');
+  serializeJson(stream, "pkscript", txout.PkScript);
   stream.write('}');
 }
 
-void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Transaction &data) {
+void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::CTransaction &data) {
   if (fieldName) {
     stream.write('\"');
     stream.write(fieldName, strlen(fieldName));
@@ -110,10 +110,10 @@ void serializeJson(xmstream &stream, const char *fieldName, const BTC::Proto::Tr
 
   stream.write('{');
   serializeJson(stream, "txid", data.getTxId()); stream.write(',');
-  serializeJson(stream, "version", data.version); stream.write(',');
-  serializeJson(stream, "txin", data.txIn); stream.write(',');
-  serializeJson(stream, "txout", data.txOut); stream.write(',');
-  serializeJson(stream, "lockTime", data.lockTime);
+  serializeJson(stream, "version", data.Version); stream.write(',');
+  serializeJson(stream, "txin", data.TxIn); stream.write(',');
+  serializeJson(stream, "txout", data.TxOut); stream.write(',');
+  serializeJson(stream, "lockTime", data.LockTime);
   stream.write('}');
 }
 

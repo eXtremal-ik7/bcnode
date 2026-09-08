@@ -173,9 +173,9 @@ void UTXODb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
   dbengine::CKvWriter<CUnspentOutputKey> writer = liveWriter();
   for (const CBlockRef &ref: batch) {
-    const BC::Proto::Block &block = *ref.Block;
+    const BC::Proto::CBlock &block = *ref.Block;
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
-    assert(validationData.TxIds.size() == block.vtx.size());
+    assert(validationData.TxIds.size() == block.Vtx.size());
     const uint32_t height = ref.Index->Height;
 
     if (Cache_.enabled())
@@ -189,19 +189,19 @@ void UTXODb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
     // disconnect that splits it puts the output back
     size_t outOrdinal = 0;
     size_t inOrdinal = 0;
-    for (size_t i = 0; i < block.vtx.size(); i++) {
-      const auto &tx = block.vtx[i];
+    for (size_t i = 0; i < block.Vtx.size(); i++) {
+      const auto &tx = block.Vtx[i];
       const bool isCoinbase = i == 0;
 
       // txin in coinbase can't spent anything
       if (!isCoinbase) {
-        for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+        for (size_t j = 0; j < tx.TxIn.size(); j++, inOrdinal++) {
           if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx ||
               validationData.inputSpendsInBatch(inOrdinal))
             continue;
-          const auto &txIn = tx.txIn[j];
-          key.Tx = txIn.previousOutputHash;
-          key.Index = txIn.previousOutputIndex;
+          const auto &txIn = tx.TxIn[j];
+          key.Tx = txIn.PreviousOutputHash;
+          key.Index = txIn.PreviousOutputIndex;
           writer.erase(key);
           cacheRemove(key);
         }
@@ -214,7 +214,7 @@ void UTXODb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
       // as a live coin nobody can spend
       const bool mayRepeat = isCoinbase && (validationData.CoinbaseRepeat || validationData.CoinbaseMayRepeat);
       key.Tx = validationData.TxIds[i];
-      for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
+      for (size_t j = 0; j < tx.TxOut.size(); j++, outOrdinal++) {
         if (validationData.outputSpentLocally(outOrdinal) || validationData.outputSpentInBatch(outOrdinal))
           continue;
         size_t infoSize;
@@ -241,15 +241,15 @@ void UTXODb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 // took it away, and the marks are dropped right after, so from here both
 // blocks are plain
 void UTXODb::disconnect(const BC::Common::BlockIndex *index,
-                            const BC::Proto::Block &block,
+                            const BC::Proto::CBlock &block,
                             const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                             const BC::Proto::CBlockValidationData &validationData,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
   dbengine::CKvWriter<CUnspentOutputKey> writer = liveWriter();
-  assert(validationData.TxIds.size() == block.vtx.size());
-  assert(linkedOutputs.Tx.size() == block.vtx.size());
+  assert(validationData.TxIds.size() == block.Vtx.size());
+  assert(linkedOutputs.Tx.size() == block.Vtx.size());
   // The creation height of a restored output is unknown here; the height of
   // the disconnected block is an upper bound (and its coinbase flag is
   // unknowable, but a coinbase spend sits 100+ blocks below any reorg). It
@@ -263,24 +263,24 @@ void UTXODb::disconnect(const BC::Common::BlockIndex *index,
   CUnspentOutputKey key;
   size_t outOrdinal = 0;
   size_t inOrdinal = 0;
-  for (size_t i = 0; i < block.vtx.size(); i++) {
-    const auto &tx = block.vtx[i];
+  for (size_t i = 0; i < block.Vtx.size(); i++) {
+    const auto &tx = block.Vtx[i];
 
     // txin in coinbase can't spent anything
     if (i != 0) {
       const auto &linkedTx = linkedOutputs.Tx[i];
-      assert(linkedTx.TxIn.size() == tx.txIn.size());
+      assert(linkedTx.TxIn.size() == tx.TxIn.size());
 
-      for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
+      for (size_t j = 0; j < tx.TxIn.size(); j++, inOrdinal++) {
         if (validationData.InputLocalTx[inOrdinal] != BC::Proto::CBlockValidationData::NoLocalTx)
           continue;
-        const auto &txIn = tx.txIn[j];
+        const auto &txIn = tx.TxIn[j];
         const auto &linkedTxin = linkedTx.TxIn[j];
 
         assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
 
-        key.Tx = txIn.previousOutputHash;
-        key.Index = txIn.previousOutputIndex;
+        key.Tx = txIn.PreviousOutputHash;
+        key.Index = txIn.PreviousOutputIndex;
         // The coin this input spent was created by a block below and may well
         // be there on disk: a later spend of it must leave a real tombstone
         writer.putRestore(key, linkedTxin.data(), linkedTxin.size(), &packed, sizeof(packed));
@@ -289,7 +289,7 @@ void UTXODb::disconnect(const BC::Common::BlockIndex *index,
     }
 
     key.Tx = validationData.TxIds[i];
-    for (size_t j = 0; j < tx.txOut.size(); j++, outOrdinal++) {
+    for (size_t j = 0; j < tx.TxOut.size(); j++, outOrdinal++) {
       if (validationData.outputSpentLocally(outOrdinal))
         continue;
       size_t infoSize;
@@ -303,7 +303,7 @@ void UTXODb::disconnect(const BC::Common::BlockIndex *index,
   }
   assert(inOrdinal == validationData.InputLocalTx.size());
   assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
-  commit(writer, index->Header.hashPrevBlock);
+  commit(writer, index->Header.HashPrevBlock);
 }
 
 }

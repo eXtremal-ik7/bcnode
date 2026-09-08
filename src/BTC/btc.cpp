@@ -48,27 +48,27 @@ bool setupChainParams(ChainParams *params, const char *network)
 
     {
       // Genesis block
-      params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.setNull();
-      params->GenesisBlock.header.nTime = 1231006505;
-      params->GenesisBlock.header.nBits = 0x1d00ffff;
-      params->GenesisBlock.header.nNonce = 2083236893;
+      params->GenesisBlock.Header.Version = 1;
+      params->GenesisBlock.Header.HashPrevBlock.setNull();
+      params->GenesisBlock.Header.Time = 1231006505;
+      params->GenesisBlock.Header.Bits = 0x1d00ffff;
+      params->GenesisBlock.Header.Nonce = 2083236893;
 
-      BTC::Proto::Transaction tx;
-      tx.version = 1;
-      tx.lockTime = 0;
+      BTC::Proto::CTransaction tx;
+      tx.Version = 1;
+      tx.LockTime = 0;
 
       xmstream scriptSig;
-      tx.txIn.resize(1);
-      tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.setNull();
-      tx.txIn[0].previousOutputIndex = -1;
+      tx.TxIn.resize(1);
+      tx.TxIn[0].Sequence = -1;
+      tx.TxIn[0].PreviousOutputHash.setNull();
+      tx.TxIn[0].PreviousOutputIndex = -1;
       serialize(scriptSig, static_cast<uint8_t>(0x04));
       serialize(scriptSig, static_cast<uint32_t>(486604799));
       serialize(scriptSig, static_cast<uint8_t>(1));
       serialize(scriptSig, static_cast<uint8_t>(4));
       serialize(scriptSig, std::string("The Times 03/Jan/2009 Chancellor on brink of second bailout for banks"));
-      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
+      xvectorFromStream(std::move(scriptSig), tx.TxIn[0].ScriptSig);
 
       const unsigned char genesisOutputScript[] = {
         0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67, 0xf1, 0xa6, 0x71, 0x30, 0xb7,
@@ -79,15 +79,15 @@ bool setupChainParams(ChainParams *params, const char *network)
       };
 
       xmstream pkScript;
-      tx.txOut.resize(1);
+      tx.TxOut.resize(1);
       pkScript.write(static_cast<uint8_t>(sizeof(genesisOutputScript)));
       pkScript.write(genesisOutputScript, sizeof(genesisOutputScript));
       pkScript.write(static_cast<uint8_t>(0xAC)); // OP_CHECKSIG
-      tx.txOut[0].value = 50*100000000ULL;
-      xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
-      params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq<BTC::X>(params->GenesisBlock.header, "0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
+      tx.TxOut[0].Value = 50*100000000ULL;
+      xvectorFromStream(std::move(pkScript), tx.TxOut[0].PkScript);
+      params->GenesisBlock.Vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.Header.HashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq<BTC::X>(params->GenesisBlock.Header, "0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
     }
 
     // DNS seeds
@@ -119,27 +119,27 @@ bool setupChainParams(ChainParams *params, const char *network)
 
     {
       // Genesis block
-      params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.setNull();
-      params->GenesisBlock.header.nTime = 1296688602;
-      params->GenesisBlock.header.nBits = 0x1d00ffff;
-      params->GenesisBlock.header.nNonce = 414098458;
+      params->GenesisBlock.Header.Version = 1;
+      params->GenesisBlock.Header.HashPrevBlock.setNull();
+      params->GenesisBlock.Header.Time = 1296688602;
+      params->GenesisBlock.Header.Bits = 0x1d00ffff;
+      params->GenesisBlock.Header.Nonce = 414098458;
 
-      BTC::Proto::Transaction tx;
-      tx.version = 1;
-      tx.lockTime = 0;
+      BTC::Proto::CTransaction tx;
+      tx.Version = 1;
+      tx.LockTime = 0;
 
       xmstream scriptSig;
-      tx.txIn.resize(1);
-      tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.setNull();
-      tx.txIn[0].previousOutputIndex = -1;
+      tx.TxIn.resize(1);
+      tx.TxIn[0].Sequence = -1;
+      tx.TxIn[0].PreviousOutputHash.setNull();
+      tx.TxIn[0].PreviousOutputIndex = -1;
       serialize(scriptSig, static_cast<uint8_t>(0x04));
       serialize(scriptSig, static_cast<uint32_t>(486604799));
       serialize(scriptSig, static_cast<uint8_t>(1));
       serialize(scriptSig, static_cast<uint8_t>(4));
       serialize(scriptSig, std::string("The Times 03/Jan/2009 Chancellor on brink of second bailout for banks"));
-      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
+      xvectorFromStream(std::move(scriptSig), tx.TxIn[0].ScriptSig);
 
       const unsigned char genesisOutputScript[] = {
         0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67, 0xf1, 0xa6, 0x71, 0x30, 0xb7,
@@ -149,16 +149,16 @@ bool setupChainParams(ChainParams *params, const char *network)
         0x5f
       };
 
-      tx.txOut.resize(1);
+      tx.TxOut.resize(1);
       xmstream pkScript;
       pkScript.write(static_cast<uint8_t>(sizeof(genesisOutputScript)));
       pkScript.write(genesisOutputScript, sizeof(genesisOutputScript));
       pkScript.write(static_cast<uint8_t>(0xAC)); // OP_CHECKSIG
-      xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
-      tx.txOut[0].value = 50*100000000ULL;
-      params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq<BTC::X>(params->GenesisBlock.header, "0x000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943");
+      xvectorFromStream(std::move(pkScript), tx.TxOut[0].PkScript);
+      tx.TxOut[0].Value = 50*100000000ULL;
+      params->GenesisBlock.Vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.Header.HashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq<BTC::X>(params->GenesisBlock.Header, "0x000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943");
     }
 
     // DNS seeds
@@ -188,26 +188,26 @@ bool setupChainParams(ChainParams *params, const char *network)
 
     {
       // Genesis block
-      params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.setNull();
-      params->GenesisBlock.header.nTime = 1296688602;
-      params->GenesisBlock.header.nBits = 0x207fffff;
-      params->GenesisBlock.header.nNonce = 2;
+      params->GenesisBlock.Header.Version = 1;
+      params->GenesisBlock.Header.HashPrevBlock.setNull();
+      params->GenesisBlock.Header.Time = 1296688602;
+      params->GenesisBlock.Header.Bits = 0x207fffff;
+      params->GenesisBlock.Header.Nonce = 2;
 
-      BTC::Proto::Transaction tx;
-      tx.version = 1;
-      tx.lockTime = 0;
-      tx.txIn.resize(1);
-      tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.setNull();
-      tx.txIn[0].previousOutputIndex = -1;
+      BTC::Proto::CTransaction tx;
+      tx.Version = 1;
+      tx.LockTime = 0;
+      tx.TxIn.resize(1);
+      tx.TxIn[0].Sequence = -1;
+      tx.TxIn[0].PreviousOutputHash.setNull();
+      tx.TxIn[0].PreviousOutputIndex = -1;
       xmstream scriptSig;
       serialize(scriptSig, static_cast<uint8_t>(0x04));
       serialize(scriptSig, static_cast<uint32_t>(486604799));
       serialize(scriptSig, static_cast<uint8_t>(1));
       serialize(scriptSig, static_cast<uint8_t>(4));
       serialize(scriptSig, std::string("The Times 03/Jan/2009 Chancellor on brink of second bailout for banks"));
-      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
+      xvectorFromStream(std::move(scriptSig), tx.TxIn[0].ScriptSig);
 
       const unsigned char genesisOutputScript[] = {
         0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67, 0xf1, 0xa6, 0x71, 0x30, 0xb7,
@@ -217,16 +217,16 @@ bool setupChainParams(ChainParams *params, const char *network)
         0x5f
       };
 
-      tx.txOut.resize(1);
+      tx.TxOut.resize(1);
       xmstream pkScript;
       pkScript.write(static_cast<uint8_t>(sizeof(genesisOutputScript)));
       pkScript.write(genesisOutputScript, sizeof(genesisOutputScript));
       pkScript.write(static_cast<uint8_t>(0xAC)); // OP_CHECKSIG
-      xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
-      tx.txOut[0].value = 50*100000000ULL;
-      params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq<BTC::X>(params->GenesisBlock.header, "0x0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206");
+      xvectorFromStream(std::move(pkScript), tx.TxOut[0].PkScript);
+      tx.TxOut[0].Value = 50*100000000ULL;
+      params->GenesisBlock.Vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.Header.HashMerkleRoot = calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq<BTC::X>(params->GenesisBlock.Header, "0x0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206");
     }
   } else {
     return false;
@@ -235,11 +235,11 @@ bool setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-UInt<256> GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams&)
+UInt<256> GetBlockProof(const BTC::Proto::CBlockHeader &header, const ChainParams&)
 { 
   bool fNegative;
   bool fOverflow;
-  UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
+  UInt<256> bnTarget = uint256Compact(header.Bits, &fNegative, &fOverflow);
   if (fNegative || fOverflow || bnTarget.isZero())
       return UInt<256>::zero();
   // We need to compute 2**256 / (bnTarget+1), but we can't represent 2**256
@@ -250,11 +250,11 @@ UInt<256> GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams
 }
 
 
-bool checkConsensus(const BTC::Proto::BlockHeader &header, CheckConsensusCtx&, BTC::Common::ChainParams &chainParams)
+bool checkConsensus(const BTC::Proto::CBlockHeader &header, CheckConsensusCtx&, BTC::Common::ChainParams &chainParams)
 {
   bool fNegative;
   bool fOverflow;
-  UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
+  UInt<256> bnTarget = uint256Compact(header.Bits, &fNegative, &fOverflow);
 
   // Check range
   if (fNegative || bnTarget.isZero() || fOverflow || bnTarget > chainParams.powLimit)
@@ -267,7 +267,7 @@ bool checkConsensus(const BTC::Proto::BlockHeader &header, CheckConsensusCtx&, B
   return true;
 }
 
-bool checkBlockStandalone(const Proto::Block &block, Proto::CBlockValidationData &validation, const ChainParams&, std::string &error)
+bool checkBlockStandalone(const Proto::CBlock &block, Proto::CBlockValidationData &validation, const ChainParams&, std::string &error)
 {
   bool isValid = true;
   bool hasWitnessData = false;
@@ -284,7 +284,7 @@ bool checkBlockStandalone(const Proto::Block &block, Proto::CBlockValidationData
 }
 
 bool checkBlockContextual(const BlockIndex &index,
-                          const Proto::Block &block,
+                          const Proto::CBlock &block,
                           Proto::CBlockValidationData &validation,
                           const Proto::CBlockLinkedOutputs&,
                           const ChainParams &chainParams,

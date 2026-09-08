@@ -90,7 +90,7 @@ public:
   }
 
   const SerializedDataObject &blockData() const { return BlockData_; }
-  BC::Proto::Block *block() const { return static_cast<BC::Proto::Block*>(BlockData_.unpackedData()); }
+  BC::Proto::CBlock *block() const { return static_cast<BC::Proto::CBlock*>(BlockData_.unpackedData()); }
   bool relay() const { return Relay_; }
   Proto::CBlockValidationData &validationData() { return ValidationData_; }
   const Proto::CBlockValidationData &validationDataConst() const { return ValidationData_; }
@@ -105,7 +105,7 @@ private:
 public:
   std::atomic<uint32_t> Flags = 0;
 
-  typename T::BlockHeader Header;
+  typename T::CBlockHeader Header;
   uint32_t Height = std::numeric_limits<uint32_t>::max();
   uint32_t FileNo = std::numeric_limits<uint32_t>::max();
   uint32_t FileOffset = std::numeric_limits<uint32_t>::max();
@@ -195,13 +195,13 @@ template<typename T> struct Io<Common::BlockIndexTy<T>> {
 
 // For HTTP API
 template<typename T>
-void serializeJson(xmstream &stream, const BTC::Common::BlockIndexTy<T> &index, const BTC::Proto::BlockTy<T> &block) {
+void serializeJson(xmstream &stream, const BTC::Common::BlockIndexTy<T> &index, const BTC::Proto::CBlockTy<T> &block) {
   stream.write('{');
   serializeJsonInside(stream, index.Header); stream.write(',');
   serializeJson(stream, "height", index.Height); stream.write(',');
   if (index.Next) {
     serializeJson(stream, "next", index.Next->Header.GetHash()); stream.write(',');
   }
-  serializeJson(stream, "tx", block.vtx);
+  serializeJson(stream, "tx", block.Vtx);
   stream.write('}');
 }

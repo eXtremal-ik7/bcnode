@@ -37,10 +37,10 @@ bool isBareMultisig(const uint8_t *script, size_t size)
 
 namespace BTC {
 
-bool Script::extractAddress(const BC::Proto::TxOut &txOut, CAddress &address)
+bool Script::extractAddress(const BC::Proto::CTxOut &txOut, CAddress &address)
 {
-  const uint8_t *scriptData = txOut.pkScript.data();
-  size_t scriptSize = txOut.pkScript.size();
+  const uint8_t *scriptData = txOut.PkScript.data();
+  size_t scriptSize = txOut.PkScript.size();
 
   if (scriptSize == 25 &&
       scriptData[0] == OP_DUP &&
@@ -231,9 +231,9 @@ bool Script::addressFromString(const std::string &hrAddress,
   return false;
 }
 
-void Script::parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspentOutputInfo)
+void Script::parseTransactionOutput(const BC::Proto::CTxOut &out, xmstream &unspentOutputInfo)
 {
-  const uint8_t *script = out.pkScript.data();
+  const uint8_t *script = out.PkScript.data();
 
   // Records of many outputs are appended to one stream (the parsed output blob
   // of a block), so every seek inside this one is relative to where it started
@@ -243,24 +243,24 @@ void Script::parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspe
   // not set) goes to disk with the record: zero it, or the same coin gets
   // different bytes in different runs
   memset(static_cast<void*>(info), 0, sizeof(UnspentOutputInfo));
-  info->Value = out.value;
+  info->Value = out.Value;
 
-  if (out.pkScript.size() >= 1 && script[0] == OP_RETURN) {
+  if (out.PkScript.size() >= 1 && script[0] == OP_RETURN) {
     info->Type = UnspentOutputInfo::EOpReturn;
-  } else if (out.pkScript.size() == 35 && script[0] == OP_PUSH_33 && script[34] == OP_CHECKSIG) {
+  } else if (out.PkScript.size() == 35 && script[0] == OP_PUSH_33 && script[34] == OP_CHECKSIG) {
     // P2PK compressed
     // PUSH_33(PublicKey) OP_CHECKSIG
     info->Type = UnspentOutputInfo::EPubKey;
     info->IsPubKeyCompressed = true;
     memcpy(info->PubKeyCompressed, script+1, 33);
-  } else if (out.pkScript.size() == 67 && script[0] == OP_PUSH_65 && script[66] == OP_CHECKSIG) {
+  } else if (out.PkScript.size() == 67 && script[0] == OP_PUSH_65 && script[66] == OP_CHECKSIG) {
     // P2PK uncompressed
     // PUSH_65(PublicKey) OP_CHECKSIG
     info->Type = UnspentOutputInfo::EPubKey;
     info->IsPubKeyCompressed = false;
     unspentOutputInfo.seekSet(base + UnspentOutputInfo::customDataOffset());
     unspentOutputInfo.write(script+1, 65);
-  } else if (out.pkScript.size() == 25 &&
+  } else if (out.PkScript.size() == 25 &&
              script[0] == OP_DUP &&
              script[1] == OP_HASH160 &&
              script[2] == OP_PUSH20 &&
@@ -270,7 +270,7 @@ void Script::parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspe
     // OP_DUP OP_HASH160 OP_PUSH20(Address) OP_EQUALVERIFY OP_CHECKSIG
     info->Type = UnspentOutputInfo::EPubKeyHash;
     memcpy(info->PubKeyHash.begin(), script+3, 20);
-  } else if (out.pkScript.size() == 23 &&
+  } else if (out.PkScript.size() == 23 &&
              script[0] == OP_HASH160 &&
              script[1] == OP_PUSH20 &&
              script[22] == OP_EQUAL) {
@@ -278,29 +278,29 @@ void Script::parseTransactionOutput(const BC::Proto::TxOut &out, xmstream &unspe
     // OP_HASH160 OP_PUSH20(RedeemScriptHash) OP_EQUAL
     info->Type = UnspentOutputInfo::EScriptHash;
     memcpy(info->ScriptHash.begin(), script+2, 20);
-  } else if (out.pkScript.size() == 22 && script[0] == OP_0 && script[1] == OP_PUSH20) {
+  } else if (out.PkScript.size() == 22 && script[0] == OP_0 && script[1] == OP_PUSH20) {
     // P2WPKH
     // OP_0 OP_PUSH20(PubKeyHash)
     info->Type = UnspentOutputInfo::EWitnessPubKeyHash;
     memcpy(info->WitnessProgram, script+2, 20);
-  } else if (out.pkScript.size() == 34 && script[0] == OP_0 && script[1] == OP_PUSH32) {
+  } else if (out.PkScript.size() == 34 && script[0] == OP_0 && script[1] == OP_PUSH32) {
     // P2WSH
     // OP_0 OP_PUSH32(WitnessScriptHash)
     info->Type = UnspentOutputInfo::EWitnessScriptHash;
     memcpy(info->WitnessProgram, script+2, 32);
-  } else if (out.pkScript.size() == 34 && script[0] == OP_1 && script[1] == OP_PUSH32) {
+  } else if (out.PkScript.size() == 34 && script[0] == OP_1 && script[1] == OP_PUSH32) {
     // P2TR
     // OP_1 OP_PUSH32(XOnlyPubKey)
     info->Type = UnspentOutputInfo::EWitnessTaproot;
     memcpy(info->WitnessProgram, script+2, 32);
-  } else if (isBareMultisig(script, out.pkScript.size())) {
+  } else if (isBareMultisig(script, out.PkScript.size())) {
     // The spend path needs only the synthetic identity, not the keys
     info->Type = UnspentOutputInfo::EMultisig;
-    info->ScriptHash = sha256FollowRipemd160(script, out.pkScript.size());
+    info->ScriptHash = sha256FollowRipemd160(script, out.PkScript.size());
   } else {
     info->Type = UnspentOutputInfo::ENonStandard;
     unspentOutputInfo.seekSet(base + UnspentOutputInfo::customDataOffset());
-    unspentOutputInfo.write(script, out.pkScript.size());
+    unspentOutputInfo.write(script, out.PkScript.size());
   }
 
   // Custom data shorter than the union it replaces still leaves a whole record

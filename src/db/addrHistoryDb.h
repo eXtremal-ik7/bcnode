@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "BC/script.h"
 #include "db/common.h"
 #include "db/queries.h"
 #include "db/chaindb.h"
@@ -40,7 +41,7 @@ public:
                BlockDatabase &blockDb) final;
 
   void disconnect(const BC::Common::BlockIndex *index,
-                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlock &block,
                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                   const BC::Proto::CBlockValidationData &validationData,
                   BlockInMemoryIndex &blockIndex,

@@ -85,50 +85,50 @@ public:
     write("Ignore message; type: %s\n", type.c_str());
   }
 
-  void onAddr(BC::Network::Connection<TextTerminal>*, const BC::Proto::MessageAddr &addr) {
-    for (const auto &address: addr.addr_list) {
+  void onAddr(BC::Network::Connection<TextTerminal>*, const BC::Proto::CMessageAddr &addr) {
+    for (const auto &address: addr.AddrList) {
       uint32_t ipv4;
-      if (address.addr.getIpv4(&ipv4)) {
+      if (address.Addr.getIpv4(&ipv4)) {
         struct in_addr inaddr;
         inaddr.s_addr = ipv4;
-        write("address: %s:%hu, services: %" PRIu64 "\n", inet_ntoa(inaddr), xbetoh(address.addr.port), address.addr.services);
+        write("address: %s:%hu, services: %" PRIu64 "\n", inet_ntoa(inaddr), xbetoh(address.Addr.Port), address.Addr.Services);
       } else {
-        write("address: ?ipv6:%hu, services: %" PRIu64 "\n", xbetoh(address.addr.port), address.addr.services);
+        write("address: ?ipv6:%hu, services: %" PRIu64 "\n", xbetoh(address.Addr.Port), address.Addr.Services);
       }
     }
 
-    write("Total received: %zu peers\n", addr.addr_list.size());
+    write("Total received: %zu peers\n", addr.AddrList.size());
   }
 
   void onGetAddr(BC::Network::Connection<TextTerminal>*) { write("message: getaddr\n"); }
 
-  void onGetHeaders(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageGetHeaders&) { write("message: getheaders\n"); }
-  void onInv(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageInv &msg) {
+  void onGetHeaders(BC::Network::Connection<TextTerminal>*, BC::Proto::CMessageGetHeaders&) { write("message: getheaders\n"); }
+  void onInv(BC::Network::Connection<TextTerminal>*, BC::Proto::CMessageInv &msg) {
     write("inv: %zu elements\n", msg.Inventory.size());
     for (const auto &inv: msg.Inventory) {
-      switch (inv.type) {
-        case BC::Proto::InventoryVector::ERROR : {
+      switch (inv.Type) {
+        case BC::Proto::CInventoryVector::ERROR : {
           write("'error'\n");
           break;
         }
 
-        case BC::Proto::InventoryVector::MSG_TX : {
-          write("transaction %s\n", inv.hash.getHexLE().c_str());
+        case BC::Proto::CInventoryVector::MSG_TX : {
+          write("transaction %s\n", inv.Hash.getHexLE().c_str());
           break;
         }
 
-        case BC::Proto::InventoryVector::MSG_BLOCK : {
-          write("block %s\n", inv.hash.getHexLE().c_str());
+        case BC::Proto::CInventoryVector::MSG_BLOCK : {
+          write("block %s\n", inv.Hash.getHexLE().c_str());
           break;
         }
 
-        case BC::Proto::InventoryVector::MSG_CMPCT_BLOCK : {
-          write("compact block %s\n", inv.hash.getHexLE().c_str());
+        case BC::Proto::CInventoryVector::MSG_CMPCT_BLOCK : {
+          write("compact block %s\n", inv.Hash.getHexLE().c_str());
           break;
         }
 
-        case BC::Proto::InventoryVector::MSG_FILTERED_BLOCK : {
-          write("filtered block %s\n", inv.hash.getHexLE().c_str());
+        case BC::Proto::CInventoryVector::MSG_FILTERED_BLOCK : {
+          write("filtered block %s\n", inv.Hash.getHexLE().c_str());
           break;
         }
       }
@@ -140,12 +140,12 @@ public:
     write("Latency: %lims\n", latency);
   }
 
-  void onReject(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageReject &reject) { write("Reject message: %s; reason: %s\n", reject.message.c_str(), reject.reason.c_str()); }
+  void onReject(BC::Network::Connection<TextTerminal>*, BC::Proto::CMessageReject &reject) { write("Reject message: %s; reason: %s\n", reject.Message.c_str(), reject.Reason.c_str()); }
 
-  void onGetBlocks(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageGetBlocks&) { write("message: getblocks\n"); }
-  void onGetData(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageGetData&) { write("message: getdata\n"); }
-  void onBlock(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageBlock&) { write("message: block\n"); }
-  void onHeaders(BC::Network::Connection<TextTerminal>*, BC::Proto::MessageHeaders&) { write("message: headers\n"); }
+  void onGetBlocks(BC::Network::Connection<TextTerminal>*, BC::Proto::CMessageGetBlocks&) { write("message: getblocks\n"); }
+  void onGetData(BC::Network::Connection<TextTerminal>*, BC::Proto::CMessageGetData&) { write("message: getdata\n"); }
+  void onBlock(BC::Network::Connection<TextTerminal>*, BC::Proto::CMessageBlock&) { write("message: block\n"); }
+  void onHeaders(BC::Network::Connection<TextTerminal>*, BC::Proto::CMessageHeaders&) { write("message: headers\n"); }
 
   void onInvalidMessageFormat(BC::Network::Connection<TextTerminal>*, const std::string &type) {
     write("Can't unserialize incoming message, type: %s\n", type.c_str());

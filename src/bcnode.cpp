@@ -222,7 +222,7 @@ int main(int argc, char **argv)
     // Add genesis block to index
     BC::Common::BlockIndex *genesisIndex = BC::Common::BlockIndex::create();
     genesisIndex->Height = 0;
-    genesisIndex->Header = context.ChainParams.GenesisBlock.header;
+    genesisIndex->Header = context.ChainParams.GenesisBlock.Header;
     genesisIndex->ChainWork = BC::Common::GetBlockProof(genesisIndex->Header, context.ChainParams);
     genesisIndex->Flags.store(BFHeaderWriteStarted | BFHeaderDone | BFDataWriteStarted | BFDataDone |
                               BFWorkChecked | BFHeaderReady | BFDataReady | BFParentDataReady | BFOnChain,
@@ -237,13 +237,13 @@ int main(int argc, char **argv)
 
       size_t unpackedSize = 0;
       stream.seekSet(0);
-      BC::Proto::Block *unpacked = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
+      BC::Proto::CBlock *unpacked = BTC::unpack2<BC::Proto::CBlock>(stream, &unpackedSize);
       BC::Common::CIndexCacheObject *genesisObject = new BC::Common::CIndexCacheObject(nullptr, nullptr, stream.sizeOf(), 0, unpacked, unpackedSize);
 
       auto &outputs = genesisObject->linkedOutputs();
-      outputs.Tx.resize(context.ChainParams.GenesisBlock.vtx.size());
-      for (size_t i = 0; i < context.ChainParams.GenesisBlock.vtx.size(); i++)
-        outputs.Tx[i].TxIn.resize(context.ChainParams.GenesisBlock.vtx[i].txIn.size());
+      outputs.Tx.resize(context.ChainParams.GenesisBlock.Vtx.size());
+      for (size_t i = 0; i < context.ChainParams.GenesisBlock.Vtx.size(); i++)
+        outputs.Tx[i].TxIn.resize(context.ChainParams.GenesisBlock.Vtx[i].TxIn.size());
 
       BC::Common::initializeValidationContext(*unpacked, genesisObject->validationData());
       genesisObject->validationData().InputsResolved = true;
@@ -251,7 +251,7 @@ int main(int argc, char **argv)
       genesisIndex->Serialized.reset(genesisObject);
     }
 
-    BC::Proto::BlockHashTy hash = context.ChainParams.GenesisBlock.header.GetHash();
+    BC::Proto::BlockHashTy hash = context.ChainParams.GenesisBlock.Header.GetHash();
     context.BlockIndex.blockIndex().insert(std::pair(hash, genesisIndex));
     context.BlockIndex.blockHeightIndex().insert(std::pair(0, genesisIndex));
     context.BlockIndex.setGenesis(genesisIndex, context.ChainParams.GenesisBlock);

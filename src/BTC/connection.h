@@ -49,8 +49,8 @@ public:
     uint64_t nonce = rand();
     PingMap_[nonce] = std::chrono::steady_clock::now();
 
-    BC::Proto::MessagePing ping;
-    ping.nonce = nonce;
+    BC::Proto::CMessagePing ping;
+    ping.Nonce = nonce;
     BC::serialize(localStream, ping);
     sendMessage(MessageTy::ping, localStream.data(), localStream.sizeOf());
   }
@@ -152,20 +152,20 @@ private:
     }
 
     // Send version message
-    BC::Proto::MessageVersion msg;
-    msg.version = BC::Configuration::ProtocolVersion;
-    msg.services = 1; // NODE
-    msg.timestamp = static_cast<uint64_t>(time(nullptr));
-    msg.addr_recv.services = 0;
-    msg.addr_recv.setIpv4(0);
-    msg.addr_recv.port = 0;
-    msg.addr_from.services = 0; // NODE
-    msg.addr_from.reset();
-    msg.addr_from.port = 0;
-    msg.nonce = rand();
-    msg.user_agent = BC::Configuration::UserAgent;
-    msg.start_height = 1;
-    msg.relay = 1;
+    BC::Proto::CMessageVersion msg;
+    msg.Version = BC::Configuration::ProtocolVersion;
+    msg.Services = 1; // NODE
+    msg.Timestamp = static_cast<uint64_t>(time(nullptr));
+    msg.AddrRecv.Services = 0;
+    msg.AddrRecv.setIpv4(0);
+    msg.AddrRecv.Port = 0;
+    msg.AddrFrom.Services = 0; // NODE
+    msg.AddrFrom.reset();
+    msg.AddrFrom.Port = 0;
+    msg.Nonce = rand();
+    msg.UserAgent = BC::Configuration::UserAgent;
+    msg.StartHeight = 1;
+    msg.Relay = 1;
 
     SmallStream<1024> localStream;
     BC::serialize(localStream, msg);
@@ -185,47 +185,47 @@ private:
     switch (command) {
       // "real time" operations
       case MessageTy::addr :
-        result = callHandler<BC::Proto::MessageAddr>("addr", &Connection::onAddr);
+        result = callHandler<BC::Proto::CMessageAddr>("addr", &Connection::onAddr);
         break;
       case MessageTy::getaddr :
         result = callHandlerEmpty(&Connection::onGetAddr);
         break;
       case MessageTy::getheaders :
-        result = callHandler<BC::Proto::MessageGetHeaders>("getheaders", &Connection::onGetHeaders);
+        result = callHandler<BC::Proto::CMessageGetHeaders>("getheaders", &Connection::onGetHeaders);
         break;
       case MessageTy::inv :
-        result = callHandler<BC::Proto::MessageInv>("inv", &Connection::onInv);
+        result = callHandler<BC::Proto::CMessageInv>("inv", &Connection::onInv);
         break;
       case MessageTy::ping :
-        result = callHandler<BC::Proto::MessagePing>("ping", &Connection::onPing);
+        result = callHandler<BC::Proto::CMessagePing>("ping", &Connection::onPing);
         break;
       case MessageTy::pong :
-        result = callHandler<BC::Proto::MessagePong>("pong", &Connection::onPong);
+        result = callHandler<BC::Proto::CMessagePong>("pong", &Connection::onPong);
         break;
       case MessageTy::reject :
-        result = callHandler<BC::Proto::MessageReject>("reject", &Connection::onReject);
+        result = callHandler<BC::Proto::CMessageReject>("reject", &Connection::onReject);
         break;
       case MessageTy::verack :
         result = callHandlerEmpty(&Connection::onVerack);
         break;
       case MessageTy::version :
-        result = callHandler<BC::Proto::MessageVersion>("version", &Connection::onVersion);
+        result = callHandler<BC::Proto::CMessageVersion>("version", &Connection::onVersion);
         break;
 
       // Heavy operations
       case MessageTy::getblocks :
-        result = callHandler<BC::Proto::MessageGetBlocks>("getblocks", &Connection::onGetBlocks);
+        result = callHandler<BC::Proto::CMessageGetBlocks>("getblocks", &Connection::onGetBlocks);
         break;
       case MessageTy::getdata :
-        result = callHandler<BC::Proto::MessageGetData>("getdata", &Connection::onGetData);
+        result = callHandler<BC::Proto::CMessageGetData>("getdata", &Connection::onGetData);
         break;
 
       // Special handlers
       case MessageTy::block :
-        result = callHandler<BC::Proto::MessageBlock>("block", &Connection::onBlock);
+        result = callHandler<BC::Proto::CMessageBlock>("block", &Connection::onBlock);
         break;
       case MessageTy::headers :
-        result = callHandler<BC::Proto::MessageHeaders>("headers", &Connection::onHeaders);
+        result = callHandler<BC::Proto::CMessageHeaders>("headers", &Connection::onHeaders);
         break;
       default :
         Handler_.onUnknownMessage(this, Command_);
@@ -239,7 +239,7 @@ private:
     }
   }
 
-  void onAddr(BC::Proto::MessageAddr &addr) {
+  void onAddr(BC::Proto::CMessageAddr &addr) {
     Handler_.onAddr(this, addr);
   }
 
@@ -247,25 +247,25 @@ private:
     Handler_.onGetAddr(this);
   }
 
-  void onGetHeaders(BC::Proto::MessageGetHeaders &getheaders) {
+  void onGetHeaders(BC::Proto::CMessageGetHeaders &getheaders) {
     Handler_.onGetHeaders(this, getheaders);
   }
 
-  void onInv(BC::Proto::MessageInv &inv) {
+  void onInv(BC::Proto::CMessageInv &inv) {
     Handler_.onInv(this, inv);
   }
 
-  void onPing(BC::Proto::MessagePing &ping) {
+  void onPing(BC::Proto::CMessagePing &ping) {
     SmallStream<1024> localStream;
-    BC::Proto::MessagePong pong;
-    pong.nonce = ping.nonce;
+    BC::Proto::CMessagePong pong;
+    pong.Nonce = ping.Nonce;
     BC::serialize(localStream, pong);
     sendMessage(MessageTy::pong, localStream.data(), localStream.sizeOf());
     Handler_.onPing(this);
   }
 
-  void onPong(BC::Proto::MessagePong &pong) {
-    auto It = PingMap_.find(pong.nonce);
+  void onPong(BC::Proto::CMessagePong &pong) {
+    auto It = PingMap_.find(pong.Nonce);
     if (It != PingMap_.end()) {
       auto pingTime = It->second;
       auto now = std::chrono::steady_clock::now();
@@ -274,7 +274,7 @@ private:
     }
   }
 
-  void onReject(BC::Proto::MessageReject &reject) {
+  void onReject(BC::Proto::CMessageReject &reject) {
     Handler_.onReject(this, reject);
   }
 
@@ -287,11 +287,11 @@ private:
     }
   }
 
-  void onVersion(BC::Proto::MessageVersion &version) {
-    StartHeight_ = version.start_height;
-    ProtocolVersion_ = version.version;
-    Services_ = version.services;
-    UserAgent_ = version.user_agent;
+  void onVersion(BC::Proto::CMessageVersion &version) {
+    StartHeight_ = version.StartHeight;
+    ProtocolVersion_ = version.Version;
+    Services_ = version.Services;
+    UserAgent_ = version.UserAgent;
 
     VersionReceived_ = true;
     if (!IsConnected_ && (VersionReceived_ & VerackReceived_)) {
@@ -303,19 +303,19 @@ private:
     sendMessage(MessageTy::verack, nullptr, 0);
   }
 
-  void onGetBlocks(BC::Proto::MessageGetBlocks &getblocks) {
+  void onGetBlocks(BC::Proto::CMessageGetBlocks &getblocks) {
     Handler_.onGetBlocks(this, getblocks);
   }
 
-  void onGetData(BC::Proto::MessageGetData &getdata) {
+  void onGetData(BC::Proto::CMessageGetData &getdata) {
     Handler_.onGetData(this, getdata);
   }
 
-  void onBlock(BC::Proto::MessageBlock &block) {
+  void onBlock(BC::Proto::CMessageBlock &block) {
     Handler_.onBlock(this, block);
   }
 
-  void onHeaders(BC::Proto::MessageHeaders &headers) {
+  void onHeaders(BC::Proto::CMessageHeaders &headers) {
     Handler_.onHeaders(this, headers);
   }
 

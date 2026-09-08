@@ -44,7 +44,7 @@ public:
   static constexpr const char *DefaultDataDir = "bcnodexpm";
   static constexpr const char *UserAgent = "/bcnode/xpm-0.1/";
   static constexpr uint32_t ProtocolVersion = 70002;
-  static constexpr uint64_t ServicesEnabled = static_cast<uint64_t>(BTC::Proto::ServicesTy::Network);
+  static constexpr uint64_t ServicesEnabled = static_cast<uint64_t>(BTC::Proto::EServices::Network);
 };
 
 using Script = BTC::Script;
@@ -61,7 +61,7 @@ namespace Common {
   struct ChainParams {
     int networkId;
     uint32_t magic;
-    XPM::Proto::Block GenesisBlock;
+    XPM::Proto::CBlock GenesisBlock;
 
     uint32_t BIP34Height;
     // No BIP30 repeats on XPM; kept for the shared HTTP code
@@ -95,12 +95,12 @@ namespace Common {
   void initialize();
   static inline bool hasWitness() { return false; }
 
-  UInt<256> GetBlockProof(const XPM::Proto::BlockHeader &header, const ChainParams &chainParams);
+  UInt<256> GetBlockProof(const XPM::Proto::CBlockHeader &header, const ChainParams &chainParams);
 
   // Consensus (PoW)
   void checkConsensusInitialize(CheckConsensusCtx &ctx);
-  bool checkConsensus(const XPM::Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
-  static inline void checkConsensusMulti(const XPM::Proto::BlockHeader *const *headers,
+  bool checkConsensus(const XPM::Proto::CBlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
+  static inline void checkConsensusMulti(const XPM::Proto::CBlockHeader *const *headers,
                                          size_t count,
                                          CheckConsensusCtx &ctx,
                                          ChainParams &chainParams,
@@ -109,14 +109,14 @@ namespace Common {
       results[i] = checkConsensus(*headers[i], ctx, chainParams);
   }
 
-  static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
+  static inline void initializeValidationContext(const Proto::CBlock &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
 
-  bool checkBlockStandalone(const Proto::Block &block,
+  bool checkBlockStandalone(const Proto::CBlock &block,
                             Proto::CBlockValidationData &validation,
                             const ChainParams &chainParams,
                             std::string &error);
   bool checkBlockContextual(const BlockIndex &index,
-                            const Proto::Block &block,
+                            const Proto::CBlock &block,
                             Proto::CBlockValidationData &validation,
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,

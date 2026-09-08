@@ -33,27 +33,27 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->SegwitHeight = 1201536;
 
     {
-      params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.setNull();
-      params->GenesisBlock.header.nTime = 1317972665;
-      params->GenesisBlock.header.nBits = 0x1e0ffff0;
-      params->GenesisBlock.header.nNonce = 2084524493;
+      params->GenesisBlock.Header.Version = 1;
+      params->GenesisBlock.Header.HashPrevBlock.setNull();
+      params->GenesisBlock.Header.Time = 1317972665;
+      params->GenesisBlock.Header.Bits = 0x1e0ffff0;
+      params->GenesisBlock.Header.Nonce = 2084524493;
 
-      LTC::Proto::Transaction tx;
-      tx.version = 1;
-      tx.lockTime = 0;
+      LTC::Proto::CTransaction tx;
+      tx.Version = 1;
+      tx.LockTime = 0;
 
-      tx.txIn.resize(1);
-      tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.setNull();
-      tx.txIn[0].previousOutputIndex = -1;
+      tx.TxIn.resize(1);
+      tx.TxIn[0].Sequence = -1;
+      tx.TxIn[0].PreviousOutputHash.setNull();
+      tx.TxIn[0].PreviousOutputIndex = -1;
       xmstream scriptSig;
       BTC::serialize(scriptSig, static_cast<uint8_t>(0x04));
       BTC::serialize(scriptSig, static_cast<uint32_t>(486604799));
       BTC::serialize(scriptSig, static_cast<uint8_t>(1));
       BTC::serialize(scriptSig, static_cast<uint8_t>(4));
       BTC::serialize(scriptSig, std::string("NY Times 05/Oct/2011 Steve Jobs, Apple’s Visionary, Dies at 56"));
-      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
+      xvectorFromStream(std::move(scriptSig), tx.TxIn[0].ScriptSig);
 
       const unsigned char genesisOutputScript[65] = {
           0x04, 0x01, 0x84, 0x71, 0x0f, 0xa6, 0x89, 0xad, 0x50, 0x23, 0x69, 0x0c, 0x80, 0xf3, 0xa4, 0x9c, 0x8f, 0x13, 0xf8, 0xd4, 0x5b, 0x8c, 0x85, 0x7f, 0xbc, 0xbc, 0x8b, 0xc4, 0xa8, 0xe4, 0xd3, 0xeb,
@@ -61,15 +61,15 @@ bool setupChainParams(ChainParams *params, const char *network)
       };
 
       xmstream pkScript;
-      tx.txOut.resize(1);
+      tx.TxOut.resize(1);
       pkScript.write(static_cast<uint8_t>(sizeof(genesisOutputScript)));
       pkScript.write(genesisOutputScript, sizeof(genesisOutputScript));
       pkScript.write(static_cast<uint8_t>(0xAC)); // OP_CHECKSIG
-      xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
-      tx.txOut[0].value = 50*100000000ULL;
-      params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.header, "12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2");
+      xvectorFromStream(std::move(pkScript), tx.TxOut[0].PkScript);
+      tx.TxOut[0].Value = 50*100000000ULL;
+      params->GenesisBlock.Vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.Header.HashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.Header, "12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2");
     }
 
     // DNS seeds
@@ -98,27 +98,27 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->SegwitHeight = 14667;
 
     {
-      params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.setNull();
-      params->GenesisBlock.header.nTime = 1486949366;
-      params->GenesisBlock.header.nBits = 0x1e0ffff0;
-      params->GenesisBlock.header.nNonce = 293345;
+      params->GenesisBlock.Header.Version = 1;
+      params->GenesisBlock.Header.HashPrevBlock.setNull();
+      params->GenesisBlock.Header.Time = 1486949366;
+      params->GenesisBlock.Header.Bits = 0x1e0ffff0;
+      params->GenesisBlock.Header.Nonce = 293345;
 
-      LTC::Proto::Transaction tx;
-      tx.version = 1;
-      tx.lockTime = 0;
+      LTC::Proto::CTransaction tx;
+      tx.Version = 1;
+      tx.LockTime = 0;
 
       xmstream scriptSig;
-      tx.txIn.resize(1);
-      tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.setNull();
-      tx.txIn[0].previousOutputIndex = -1;
+      tx.TxIn.resize(1);
+      tx.TxIn[0].Sequence = -1;
+      tx.TxIn[0].PreviousOutputHash.setNull();
+      tx.TxIn[0].PreviousOutputIndex = -1;
       BTC::serialize(scriptSig, static_cast<uint8_t>(0x04));
       BTC::serialize(scriptSig, static_cast<uint32_t>(486604799));
       BTC::serialize(scriptSig, static_cast<uint8_t>(1));
       BTC::serialize(scriptSig, static_cast<uint8_t>(4));
       BTC::serialize(scriptSig, std::string("NY Times 05/Oct/2011 Steve Jobs, Apple’s Visionary, Dies at 56"));
-      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
+      xvectorFromStream(std::move(scriptSig), tx.TxIn[0].ScriptSig);
 
       const unsigned char genesisOutputScript[65] = {
           0x04, 0x01, 0x84, 0x71, 0x0f, 0xa6, 0x89, 0xad, 0x50, 0x23, 0x69, 0x0c, 0x80, 0xf3, 0xa4, 0x9c, 0x8f, 0x13, 0xf8, 0xd4, 0x5b, 0x8c, 0x85, 0x7f, 0xbc, 0xbc, 0x8b, 0xc4, 0xa8, 0xe4, 0xd3, 0xeb,
@@ -126,15 +126,15 @@ bool setupChainParams(ChainParams *params, const char *network)
       };
 
       xmstream pkScript;
-      tx.txOut.resize(1);
+      tx.TxOut.resize(1);
       pkScript.write(static_cast<uint8_t>(sizeof(genesisOutputScript)));
       pkScript.write(genesisOutputScript, sizeof(genesisOutputScript));
       pkScript.write(static_cast<uint8_t>(0xAC)); // OP_CHECKSIG
-      xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
-      tx.txOut[0].value = 50*100000000ULL;
-      params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.header, "4966625a4b2851d9fdee139e56211a0d88575f59ed816ff5e6a63deb4e3e29a0");
+      xvectorFromStream(std::move(pkScript), tx.TxOut[0].PkScript);
+      tx.TxOut[0].Value = 50*100000000ULL;
+      params->GenesisBlock.Vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.Header.HashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.Header, "4966625a4b2851d9fdee139e56211a0d88575f59ed816ff5e6a63deb4e3e29a0");
     }
 
     // DNS seeds
@@ -158,7 +158,7 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->SegwitHeight = std::numeric_limits<uint32_t>::max();
 
     {
-      genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
+      genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.Header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
     }
   } else {
     return false;
@@ -189,14 +189,14 @@ static bool powMatch(const uint8_t hash[32], uint32_t nBits, const UInt<256> &po
   return true;
 }
 
-bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx&, const UInt<256> &powLimit)
+bool checkPow(const Proto::CBlockHeader &header, uint32_t nBits, CheckConsensusCtx&, const UInt<256> &powLimit)
 {
   uint8_t hash[32];
   scrypt_1024_1_1_256(&header, hash);
   return powMatch(hash, nBits, powLimit);
 }
 
-void checkPowMulti(const Proto::BlockHeader *const *headers,
+void checkPowMulti(const Proto::CBlockHeader *const *headers,
                    const uint32_t *nBits,
                    size_t count,
                    const UInt<256> &powLimit,
@@ -215,7 +215,7 @@ void checkPowMulti(const Proto::BlockHeader *const *headers,
   }
 }
 
-void checkConsensusMulti(const Proto::BlockHeader *const *headers,
+void checkConsensusMulti(const Proto::CBlockHeader *const *headers,
                          size_t count,
                          CheckConsensusCtx&,
                          ChainParams &chainParams,
@@ -225,16 +225,16 @@ void checkConsensusMulti(const Proto::BlockHeader *const *headers,
     size_t num = std::min<size_t>(SCRYPT_WAYS, count - base);
     uint32_t nBits[SCRYPT_WAYS];
     for (size_t i = 0; i < num; i++)
-      nBits[i] = headers[base + i]->nBits;
+      nBits[i] = headers[base + i]->Bits;
     checkPowMulti(headers + base, nBits, num, chainParams.powLimit, results + base);
   }
 }
 
-UInt<256> GetBlockProof(const Proto::BlockHeader &header)
+UInt<256> GetBlockProof(const Proto::CBlockHeader &header)
 {
   bool fNegative;
   bool fOverflow;
-  UInt<256> bnTarget = uint256Compact(header.nBits, &fNegative, &fOverflow);
+  UInt<256> bnTarget = uint256Compact(header.Bits, &fNegative, &fOverflow);
   if (fNegative || fOverflow || bnTarget.isZero())
     return UInt<256>::zero();
   // We need to compute 2**256 / (bnTarget+1), but we can't represent 2**256
@@ -244,7 +244,7 @@ UInt<256> GetBlockProof(const Proto::BlockHeader &header)
   return (~bnTarget / (bnTarget + 1u)) + 1u;
 }
 
-bool checkBlockStandalone(const LTC::Proto::Block &block,
+bool checkBlockStandalone(const LTC::Proto::CBlock &block,
                           LTC::Proto::CBlockValidationData &validation,
                           const LTC::Common::ChainParams&,
                           std::string &error)
@@ -255,7 +255,7 @@ bool checkBlockStandalone(const LTC::Proto::Block &block,
   // Block validation
   // The extension block is outside the size limit, as it is outside Core's
   isValid &= BTC::validateBlockSize(block, LTC::Configuration::MaxBlockSize, error,
-                                    LTC::Proto::SerializeCtx(false, false));
+                                    LTC::Proto::CSerializeCtx(false, false));
   isValid &= BTC::validateMerkleRoot(block, validation.TxIds, error);
   isValid &= BTC::validateWitnessCommitment(block, hasWitnessData, error);
 
@@ -266,7 +266,7 @@ bool checkBlockStandalone(const LTC::Proto::Block &block,
 }
 
 bool checkBlockContextual(const BlockIndex &index,
-                          const Proto::Block &block,
+                          const Proto::CBlock &block,
                           Proto::CBlockValidationData &validation,
                           const Proto::CBlockLinkedOutputs&,
                           const ChainParams &chainParams,

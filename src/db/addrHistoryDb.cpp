@@ -76,11 +76,11 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
   };
 
   for (const CBlockRef &ref: batch) {
-    const BC::Proto::Block &block = *ref.Block;
+    const BC::Proto::CBlock &block = *ref.Block;
     const BC::Proto::CBlockLinkedOutputs &linkedOutputs = *ref.LinkedOutputs;
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
-    assert(validationData.TxPositions.size() == block.vtx.size());
-    if (block.vtx.empty())
+    assert(validationData.TxPositions.size() == block.Vtx.size());
+    if (block.Vtx.empty())
       continue;
 
     const uint32_t height = ref.Index->Height;
@@ -105,10 +105,10 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
 
     // Coinbase
     {
-      const auto &coinbaseTx = block.vtx[0];
+      const auto &coinbaseTx = block.Vtx[0];
       BC::Script::CAddress address;
       txSerial++;
-      for (const auto &txout: coinbaseTx.txOut) {
+      for (const auto &txout: coinbaseTx.TxOut) {
         if (BC::Script::extractAddress(txout, address)) {
           // A BIP30 repeat replaces the twin's coins with identical ones and only
           // one of the two can ever be spent: the address gets the history element
@@ -116,7 +116,7 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
           // equal to what the utxo set holds
           touch(address, validationData.CoinbaseRepeat ?
                            BC::Proto::BalanceType{} :
-                           BC::Proto::BalanceType(static_cast<uint64_t>(txout.value)));
+                           BC::Proto::BalanceType(static_cast<uint64_t>(txout.Value)));
         }
       }
 
@@ -125,17 +125,17 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
     }
 
     // Other transactions
-    assert(linkedOutputs.Tx.size() == block.vtx.size());
+    assert(linkedOutputs.Tx.size() == block.Vtx.size());
 
-    for (size_t i = 1; i < block.vtx.size(); i++) {
-      const auto &tx = block.vtx[i];
+    for (size_t i = 1; i < block.Vtx.size(); i++) {
+      const auto &tx = block.Vtx[i];
       const auto &linkedTx = linkedOutputs.Tx[i];
 
-      assert(linkedTx.TxIn.size() == tx.txIn.size());
+      assert(linkedTx.TxIn.size() == tx.TxIn.size());
 
       BC::Script::CAddress address;
       txSerial++;
-      for (size_t j = 0; j < tx.txIn.size(); j++) {
+      for (size_t j = 0; j < tx.TxIn.size(); j++) {
         const auto &linkedTxin = linkedTx.TxIn[j];
         assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
 
@@ -144,9 +144,9 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
           touch(address, -BC::Proto::BalanceType(static_cast<uint64_t>(outputInfo->Value)));
       }
 
-      for (const auto &txout: tx.txOut) {
+      for (const auto &txout: tx.TxOut) {
         if (BC::Script::extractAddress(txout, address))
-          touch(address, BC::Proto::BalanceType(static_cast<uint64_t>(txout.value)));
+          touch(address, BC::Proto::BalanceType(static_cast<uint64_t>(txout.Value)));
       }
 
       flushTx(i);
@@ -166,7 +166,7 @@ void AddrHistoryDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabas
 }
 
 void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
-                                   const BC::Proto::Block &block,
+                                   const BC::Proto::CBlock &block,
                                    const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                                    const BC::Proto::CBlockValidationData&,
                                    BlockInMemoryIndex&,
@@ -174,8 +174,8 @@ void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
 {
   dbengine::CKvWriter<BC::Script::CAddress> writer = liveWriter();
   // Nothing to undo, but the position still moves off this block
-  if (block.vtx.empty()) {
-    commit(writer, index->Header.hashPrevBlock);
+  if (block.Vtx.empty()) {
+    commit(writer, index->Header.HashPrevBlock);
     return;
   }
 
@@ -183,10 +183,10 @@ void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
 
   // Coinbase
   {
-    const auto &coinbaseTx = block.vtx[0];
+    const auto &coinbaseTx = block.Vtx[0];
     std::unordered_set<BC::Script::CAddress> affectedAddresses;
     BC::Script::CAddress address;
-    for (const auto &txout: coinbaseTx.txOut) {
+    for (const auto &txout: coinbaseTx.TxOut) {
       if (BC::Script::extractAddress(txout, address)) {
         if (affectedAddresses.insert(address).second)
           txMap[address]++;
@@ -195,17 +195,17 @@ void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
   }
 
   // Other transactions
-  assert(linkedOutputs.Tx.size() == block.vtx.size());
+  assert(linkedOutputs.Tx.size() == block.Vtx.size());
 
-  for (size_t i = 1; i < block.vtx.size(); i++) {
+  for (size_t i = 1; i < block.Vtx.size(); i++) {
     std::unordered_set<BC::Script::CAddress> affectedAddresses;
-    const auto &tx = block.vtx[i];
+    const auto &tx = block.Vtx[i];
     const auto &linkedTx = linkedOutputs.Tx[i];
 
-    assert(linkedTx.TxIn.size() == tx.txIn.size());
+    assert(linkedTx.TxIn.size() == tx.TxIn.size());
 
     BC::Script::CAddress address;
-    for (size_t j = 0; j < tx.txIn.size(); j++) {
+    for (size_t j = 0; j < tx.TxIn.size(); j++) {
       const auto &linkedTxin = linkedTx.TxIn[j];
       assert(linkedTxin.size() >= sizeof(BC::Script::UnspentOutputInfo));
 
@@ -214,7 +214,7 @@ void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
         txMap[address]++;
     }
 
-    for (const auto &txout: tx.txOut) {
+    for (const auto &txout: tx.TxOut) {
       if (BC::Script::extractAddress(txout, address)) {
         if (affectedAddresses.insert(address).second)
           txMap[address]++;
@@ -224,7 +224,7 @@ void AddrHistoryDb::disconnect(const BC::Common::BlockIndex *index,
 
   for (const auto &addr: txMap)
     this->truncate(writer, addr.first, addr.second);
-  commit(writer, index->Header.hashPrevBlock);
+  commit(writer, index->Header.HashPrevBlock);
 }
 
 }

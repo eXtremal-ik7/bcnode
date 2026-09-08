@@ -29,27 +29,27 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->SegwitHeight = 0;
 
     {
-      params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.setNull();
-      params->GenesisBlock.header.nTime = 1386325540;
-      params->GenesisBlock.header.nBits = 0x1e0ffff0;
-      params->GenesisBlock.header.nNonce = 99943;
+      params->GenesisBlock.Header.Version = 1;
+      params->GenesisBlock.Header.HashPrevBlock.setNull();
+      params->GenesisBlock.Header.Time = 1386325540;
+      params->GenesisBlock.Header.Bits = 0x1e0ffff0;
+      params->GenesisBlock.Header.Nonce = 99943;
 
-      Proto::Transaction tx;
-      tx.version = 1;
-      tx.lockTime = 0;
+      Proto::CTransaction tx;
+      tx.Version = 1;
+      tx.LockTime = 0;
 
-      tx.txIn.resize(1);
-      tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.setNull();
-      tx.txIn[0].previousOutputIndex = -1;
+      tx.TxIn.resize(1);
+      tx.TxIn[0].Sequence = -1;
+      tx.TxIn[0].PreviousOutputHash.setNull();
+      tx.TxIn[0].PreviousOutputIndex = -1;
       xmstream scriptSig;
       BTC::serialize(scriptSig, static_cast<uint8_t>(0x04));
       BTC::serialize(scriptSig, static_cast<uint32_t>(486604799));
       BTC::serialize(scriptSig, static_cast<uint8_t>(1));
       BTC::serialize(scriptSig, static_cast<uint8_t>(4));
       BTC::serialize(scriptSig, std::string("Nintondo"));
-      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
+      xvectorFromStream(std::move(scriptSig), tx.TxIn[0].ScriptSig);
 
       const unsigned char genesisOutputScript[65] = {
           0x04, 0x01, 0x84, 0x71, 0x0f, 0xa6, 0x89, 0xad, 0x50, 0x23, 0x69, 0x0c, 0x80, 0xf3, 0xa4, 0x9c,
@@ -60,15 +60,15 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
       };
 
       xmstream pkScript;
-      tx.txOut.resize(1);
+      tx.TxOut.resize(1);
       pkScript.write(static_cast<uint8_t>(sizeof(genesisOutputScript)));
       pkScript.write(genesisOutputScript, sizeof(genesisOutputScript));
       pkScript.write(static_cast<uint8_t>(0xAC)); // OP_CHECKSIG
-      xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
-      tx.txOut[0].value = 88*100000000ULL;
-      params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.header, "1a91e3dace36e2be3bf030a65679fe821aa1d6ef92e7c9902eb318182c355691");
+      xvectorFromStream(std::move(pkScript), tx.TxOut[0].PkScript);
+      tx.TxOut[0].Value = 88*100000000ULL;
+      params->GenesisBlock.Vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.Header.HashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.Header, "1a91e3dace36e2be3bf030a65679fe821aa1d6ef92e7c9902eb318182c355691");
     }
 
     // DNS seeds
@@ -97,27 +97,27 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->SegwitHeight = 0;
 
     {
-      params->GenesisBlock.header.nVersion = 1;
-      params->GenesisBlock.header.hashPrevBlock.setNull();
-      params->GenesisBlock.header.nTime = 1391503289;
-      params->GenesisBlock.header.nBits = 0x1e0ffff0;
-      params->GenesisBlock.header.nNonce = 997879;
+      params->GenesisBlock.Header.Version = 1;
+      params->GenesisBlock.Header.HashPrevBlock.setNull();
+      params->GenesisBlock.Header.Time = 1391503289;
+      params->GenesisBlock.Header.Bits = 0x1e0ffff0;
+      params->GenesisBlock.Header.Nonce = 997879;
 
-      DOGE::Proto::Transaction tx;
-      tx.version = 1;
-      tx.lockTime = 0;
+      DOGE::Proto::CTransaction tx;
+      tx.Version = 1;
+      tx.LockTime = 0;
 
       xmstream scriptSig;
-      tx.txIn.resize(1);
-      tx.txIn[0].sequence = -1;
-      tx.txIn[0].previousOutputHash.setNull();
-      tx.txIn[0].previousOutputIndex = -1;
+      tx.TxIn.resize(1);
+      tx.TxIn[0].Sequence = -1;
+      tx.TxIn[0].PreviousOutputHash.setNull();
+      tx.TxIn[0].PreviousOutputIndex = -1;
       BTC::serialize(scriptSig, static_cast<uint8_t>(0x04));
       BTC::serialize(scriptSig, static_cast<uint32_t>(486604799));
       BTC::serialize(scriptSig, static_cast<uint8_t>(1));
       BTC::serialize(scriptSig, static_cast<uint8_t>(4));
       BTC::serialize(scriptSig, std::string("Nintondo"));
-      xvectorFromStream(std::move(scriptSig), tx.txIn[0].scriptSig);
+      xvectorFromStream(std::move(scriptSig), tx.TxIn[0].ScriptSig);
 
       const unsigned char genesisOutputScript[65] = {
           0x04, 0x01, 0x84, 0x71, 0x0f, 0xa6, 0x89, 0xad, 0x50, 0x23, 0x69, 0x0c, 0x80, 0xf3, 0xa4, 0x9c, 0x8f, 0x13, 0xf8, 0xd4, 0x5b, 0x8c, 0x85, 0x7f, 0xbc, 0xbc, 0x8b, 0xc4, 0xa8, 0xe4, 0xd3, 0xeb,
@@ -125,15 +125,15 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
       };
 
       xmstream pkScript;
-      tx.txOut.resize(1);
+      tx.TxOut.resize(1);
       pkScript.write(static_cast<uint8_t>(sizeof(genesisOutputScript)));
       pkScript.write(genesisOutputScript, sizeof(genesisOutputScript));
       pkScript.write(static_cast<uint8_t>(0xAC)); // OP_CHECKSIG
-      xvectorFromStream(std::move(pkScript), tx.txOut[0].pkScript);
-      tx.txOut[0].value = 88*100000000ULL;
-      params->GenesisBlock.vtx.emplace_back(std::move(tx));
-      params->GenesisBlock.header.hashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
-      genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.header, "bb0a78264637406b6360aad926284d544d7049f45189db5664f3c4d07350559e");
+      xvectorFromStream(std::move(pkScript), tx.TxOut[0].PkScript);
+      tx.TxOut[0].Value = 88*100000000ULL;
+      params->GenesisBlock.Vtx.emplace_back(std::move(tx));
+      params->GenesisBlock.Header.HashMerkleRoot = BTC::calculateBlockMerkleRoot(params->GenesisBlock);
+      genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.Header, "bb0a78264637406b6360aad926284d544d7049f45189db5664f3c4d07350559e");
     }
 
     // DNS seeds
@@ -154,7 +154,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->SegwitHeight = std::numeric_limits<uint32_t>::max();
 
     {
-      genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
+      genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.Header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
     }
 
     // AuxPoW parameters
@@ -166,7 +166,7 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
   return true;
 }
 
-bool DOGE::Common::checkBlockStandalone(const Proto::Block &block,
+bool DOGE::Common::checkBlockStandalone(const Proto::CBlock &block,
                                         Proto::CBlockValidationData &validation,
                                         const ChainParams &chainParams,
                                         std::string &error)
@@ -187,7 +187,7 @@ bool DOGE::Common::checkBlockStandalone(const Proto::Block &block,
 }
 
 bool DOGE::Common::checkBlockContextual(const BlockIndex &index,
-                                        const Proto::Block &block,
+                                        const Proto::CBlock &block,
                                         Proto::CBlockValidationData &validation,
                                         const Proto::CBlockLinkedOutputs&,
                                         const ChainParams &chainParams,
@@ -201,14 +201,14 @@ bool DOGE::Common::checkBlockContextual(const BlockIndex &index,
   return isValid;
 }
 
-void serializeJsonInside(xmstream &stream, const DOGE::Proto::BlockHeader &header)
+void serializeJsonInside(xmstream &stream, const DOGE::Proto::CBlockHeader &header)
 {
-  serializeJson(stream, "version", header.nVersion); stream.write(',');
-  serializeJson(stream, "hashPrevBlock", header.hashPrevBlock); stream.write(',');
-  serializeJson(stream, "hashMerkleRoot", header.hashMerkleRoot); stream.write(',');
-  serializeJson(stream, "time", header.nTime); stream.write(',');
-  serializeJson(stream, "bits", header.nBits); stream.write(',');
-  serializeJson(stream, "nonce", header.nNonce); stream.write(',');
+  serializeJson(stream, "version", header.Version); stream.write(',');
+  serializeJson(stream, "hashPrevBlock", header.HashPrevBlock); stream.write(',');
+  serializeJson(stream, "hashMerkleRoot", header.HashMerkleRoot); stream.write(',');
+  serializeJson(stream, "time", header.Time); stream.write(',');
+  serializeJson(stream, "bits", header.Bits); stream.write(',');
+  serializeJson(stream, "nonce", header.Nonce); stream.write(',');
   serializeJson(stream, "parentBlockCoinbaseTx", header.ParentBlockCoinbaseTx); stream.write(',');
   serializeJson(stream, "hashBlock", header.HashBlock); stream.write(',');
   serializeJson(stream, "merkleBranch", header.MerkleBranch); stream.write(',');

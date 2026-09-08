@@ -62,33 +62,33 @@ namespace Common {
 
   unsigned getBlockGeneration(const ChainParams &chainParams, LTC::Common::BlockIndex *index);
 
-  bool checkPow(const Proto::BlockHeader &header, uint32_t nBits, CheckConsensusCtx &, const UInt<256> &powLimit);
+  bool checkPow(const Proto::CBlockHeader &header, uint32_t nBits, CheckConsensusCtx &, const UInt<256> &powLimit);
   // Group of headers at once: hashing is all a block check costs, and a multi-way kernel wants
   // its inputs collected. Targets come apart - auxpow hashes the parent against the child target
-  void checkPowMulti(const Proto::BlockHeader *const *headers,
+  void checkPowMulti(const Proto::CBlockHeader *const *headers,
                      const uint32_t *nBits,
                      size_t count,
                      const UInt<256> &powLimit,
                      bool *results);
-  UInt<256> GetBlockProof(const Proto::BlockHeader &header);
+  UInt<256> GetBlockProof(const Proto::CBlockHeader &header);
 
-  static inline UInt<256> GetBlockProof(const Proto::BlockHeader &header, const ChainParams&) { return GetBlockProof(header); }
+  static inline UInt<256> GetBlockProof(const Proto::CBlockHeader &header, const ChainParams&) { return GetBlockProof(header); }
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
-  static inline bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) { return checkPow(header, header.nBits, ctx, chainParams.powLimit); }
-  void checkConsensusMulti(const Proto::BlockHeader *const *headers,
+  static inline bool checkConsensus(const Proto::CBlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams) { return checkPow(header, header.Bits, ctx, chainParams.powLimit); }
+  void checkConsensusMulti(const Proto::CBlockHeader *const *headers,
                            size_t count,
                            CheckConsensusCtx &ctx,
                            ChainParams &chainParams,
                            bool *results);
 
-  static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
+  static inline void initializeValidationContext(const Proto::CBlock &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
 
-  bool checkBlockStandalone(const Proto::Block &block,
+  bool checkBlockStandalone(const Proto::CBlock &block,
                             Proto::CBlockValidationData &validation,
                             const ChainParams &chainParams,
                             std::string &error);
   bool checkBlockContextual(const BlockIndex &index,
-                            const Proto::Block &block,
+                            const Proto::CBlock &block,
                             Proto::CBlockValidationData &validation,
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,

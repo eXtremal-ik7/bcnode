@@ -297,7 +297,7 @@ template<> struct Io<xvector<uint8_t>> {
 // and all five operations are that procedure walked by one of the operation classes below.
 // Members left out are not on the wire; a group present under a condition is an ordinary if;
 // genuinely asymmetric formats (the segwit marker) branch on Op::Writing. A type serving as
-// the base of a format-changing heir (BTC::Proto::MessageVersion, whose XPM heir drops the
+// the base of a format-changing heir (BTC::Proto::CMessageVersion, whose XPM heir drops the
 // relay field) opens its io with
 //
 //   static_assert(std::is_same_v<std::remove_cv_t<Self>, X>);

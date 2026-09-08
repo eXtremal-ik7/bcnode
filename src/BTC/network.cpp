@@ -163,20 +163,20 @@ void Peer::onConnect(AsyncOpStatus status)
   }
 
   // Send version message
-  BC::Proto::MessageVersion msg;
-  msg.version = BC::Configuration::ProtocolVersion;
-  msg.services = 1; // NODE
-  msg.timestamp = static_cast<uint64_t>(time(nullptr));
-  msg.addr_recv.services = 0;
-  msg.addr_recv.setIpv4(0);
-  msg.addr_recv.port = 0;
-  msg.addr_from.services = BC::Configuration::ServicesEnabled;
-  msg.addr_from.reset();
-  msg.addr_from.port = 0;
-  msg.nonce = ParentNode->localHostNonce();
-  msg.user_agent = BC::Configuration::UserAgent;
-  msg.start_height = BlockIndex_.best()->Height;
-  msg.relay = 1;
+  BC::Proto::CMessageVersion msg;
+  msg.Version = BC::Configuration::ProtocolVersion;
+  msg.Services = 1; // NODE
+  msg.Timestamp = static_cast<uint64_t>(time(nullptr));
+  msg.AddrRecv.Services = 0;
+  msg.AddrRecv.setIpv4(0);
+  msg.AddrRecv.Port = 0;
+  msg.AddrFrom.Services = BC::Configuration::ServicesEnabled;
+  msg.AddrFrom.reset();
+  msg.AddrFrom.Port = 0;
+  msg.Nonce = ParentNode->localHostNonce();
+  msg.UserAgent = BC::Configuration::UserAgent;
+  msg.StartHeight = BlockIndex_.best()->Height;
+  msg.Relay = 1;
 
   SmallStream<16384> stream;
   BC::serialize(stream, msg);
@@ -205,43 +205,43 @@ void Peer::onMessage(AsyncOpStatus status)
   switch (command) {
     // "real time" operations
     case MessageTy::addr :
-      result = callHandler<BC::Proto::MessageAddr>("addr", &Peer::onAddr);
+      result = callHandler<BC::Proto::CMessageAddr>("addr", &Peer::onAddr);
       break;
     case MessageTy::getaddr :
       result = callHandlerEmpty(&Peer::onGetAddr);
       break;
     case MessageTy::getheaders :
-      result = callHandler<BC::Proto::MessageGetHeaders>("getheaders", &Peer::onGetHeaders);
+      result = callHandler<BC::Proto::CMessageGetHeaders>("getheaders", &Peer::onGetHeaders);
       break;
     case MessageTy::inv :
-      result = callHandler<BC::Proto::MessageInv>("inv", &Peer::onInv);
+      result = callHandler<BC::Proto::CMessageInv>("inv", &Peer::onInv);
       break;
     case MessageTy::ping :
-      result = callHandler<BC::Proto::MessagePing>("ping", &Peer::onPing);
+      result = callHandler<BC::Proto::CMessagePing>("ping", &Peer::onPing);
       break;
     case MessageTy::pong :
-      result = callHandler<BC::Proto::MessagePong>("pong", &Peer::onPong);
+      result = callHandler<BC::Proto::CMessagePong>("pong", &Peer::onPong);
       break;
     case MessageTy::reject :
-      result = callHandler<BC::Proto::MessageReject>("reject", &Peer::onReject);
+      result = callHandler<BC::Proto::CMessageReject>("reject", &Peer::onReject);
       break;
     case MessageTy::verack :
       result = callHandlerEmpty(&Peer::onVerAck);
       break;
     case MessageTy::version :
-      result = callHandler<BC::Proto::MessageVersion>("version", &Peer::onVersion);
+      result = callHandler<BC::Proto::CMessageVersion>("version", &Peer::onVersion);
       break;
 
     // CPU bound operation
     case MessageTy::getblocks :
       result = startHeavyOperation(&heavyOperation, &heavyOperationStarted) ?
-        callHandler<BC::Proto::MessageGetBlocks>("getblocks", &Peer::onGetBlocks) :
-        pushInternalMessage<BC::Proto::MessageGetBlocks>("getblocks", MessageTy::getblocks);
+        callHandler<BC::Proto::CMessageGetBlocks>("getblocks", &Peer::onGetBlocks) :
+        pushInternalMessage<BC::Proto::CMessageGetBlocks>("getblocks", MessageTy::getblocks);
       break;
     case MessageTy::getdata :
       result = startHeavyOperation(&heavyOperation, &heavyOperationStarted) ?
-        callHandler<BC::Proto::MessageGetData>("getdata", &Peer::onGetData) :
-        pushInternalMessage<BC::Proto::MessageGetData>("getdata", MessageTy::getdata);
+        callHandler<BC::Proto::CMessageGetData>("getdata", &Peer::onGetData) :
+        pushInternalMessage<BC::Proto::CMessageGetData>("getdata", MessageTy::getdata);
       break;
 
     // Special handlers
@@ -275,7 +275,7 @@ void Peer::onMessage(AsyncOpStatus status)
     case MessageTy::headers : {
       bool inlineProcessing = startHeavyOperation(&heavyOperation, &heavyOperationStarted);
       size_t unpackedSize = 0;
-      BC::Proto::MessageHeaders *unpacked = BC::unpack2<BC::Proto::MessageHeaders>(ReceiveStream, &unpackedSize);
+      BC::Proto::CMessageHeaders *unpacked = BC::unpack2<BC::Proto::CMessageHeaders>(ReceiveStream, &unpackedSize);
       bool accepted = unpacked && !ReceiveStream.remaining();
 
       // Counted before the next message can be read: last point where messages of this peer are
@@ -319,10 +319,10 @@ void Peer::processMessageQueue()
     switch (internalMsg->Type) {
       // CPU bound operation
       case MessageTy::getblocks :
-        peer->onGetBlocks(*static_cast<BC::Proto::MessageGetBlocks*>(internalMsg->Data));
+        peer->onGetBlocks(*static_cast<BC::Proto::CMessageGetBlocks*>(internalMsg->Data));
         break;
       case MessageTy::getdata :
-        peer->onGetData(*static_cast<BC::Proto::MessageGetData*>(internalMsg->Data));
+        peer->onGetData(*static_cast<BC::Proto::CMessageGetData*>(internalMsg->Data));
         break;
 
       // Special handlers
@@ -333,7 +333,7 @@ void Peer::processMessageQueue()
         break;
       }
       case MessageTy::headers :
-        peer->onHeaders(*static_cast<BC::Proto::MessageHeaders*>(internalMsg->Data), std::move(internalMsg->HeadersToken));
+        peer->onHeaders(*static_cast<BC::Proto::CMessageHeaders*>(internalMsg->Data), std::move(internalMsg->HeadersToken));
         break;
 
       default :
@@ -345,23 +345,23 @@ void Peer::processMessageQueue()
   }
 }
 
-void Peer::onVersion(BC::Proto::MessageVersion &version)
+void Peer::onVersion(BC::Proto::CMessageVersion &version)
 {
-  if (version.nonce == ParentNode->localHostNonce()) {
+  if (version.Nonce == ParentNode->localHostNonce()) {
     LOG_F(INFO, "Connect to ourself detected");
     ParentNode->RemovePeer(this);
     return;
   }
 
-  StartHeight = version.start_height;
-  ProtocolVersion = version.version;
-  Services = version.services;
-  UserAgent_ = version.user_agent;
+  StartHeight = version.StartHeight;
+  ProtocolVersion = version.Version;
+  Services = version.Services;
+  UserAgent_ = version.UserAgent;
 
   VersionReceived.store(true, std::memory_order_release);
   finishHandshake();
 
-  LOG_F(INFO, "Received version message from %s; user agent: %s, protocol: %u, start height: %u", Name.c_str(), version.user_agent.c_str(), version.version, StartHeight.load());
+  LOG_F(INFO, "Received version message from %s; user agent: %s, protocol: %u, start height: %u", Name.c_str(), version.UserAgent.c_str(), version.Version, StartHeight.load());
   sendMessage(MessageTy::verack, nullptr, 0);
 }
 
@@ -386,14 +386,14 @@ void Peer::onGetAddr()
   ParentNode->OnGetAddr(this);
 }
 
-void Peer::onAddr(BC::Proto::MessageAddr &addr)
+void Peer::onAddr(BC::Proto::CMessageAddr &addr)
 {
-  LOG_F(WARNING, "Ignore addr message with %zu elements", addr.addr_list.size());
+  LOG_F(WARNING, "Ignore addr message with %zu elements", addr.AddrList.size());
 }
 
-void Peer::onHeaders(BC::Proto::MessageHeaders &headers, HeadersMessageToken &&token)
+void Peer::onHeaders(BC::Proto::CMessageHeaders &headers, HeadersMessageToken &&token)
 {
-  if (!headerChainHeight.isNull() && !headers.headers.empty() && headers.headers[0].header.hashPrevBlock != headerChainHeight) {
+  if (!headerChainHeight.isNull() && !headers.Headers.empty() && headers.Headers[0].Header.HashPrevBlock != headerChainHeight) {
     // Dropped message: the token returns its accounting to the block source
     LOG_F(INFO, "%s: invalid header sequence received", Name.c_str());
     return;
@@ -401,13 +401,13 @@ void Peer::onHeaders(BC::Proto::MessageHeaders &headers, HeadersMessageToken &&t
     auto now = std::chrono::steady_clock::now();
     auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(now - HeaderDownloadingStartTime_).count();
     HeaderDownloadingStartTime_ = TimeUnknown;
-    ParentNode->Sync(this, headers.headers, static_cast<unsigned>(interval), std::move(token));
+    ParentNode->Sync(this, headers.Headers, static_cast<unsigned>(interval), std::move(token));
   }
 }
 
-void Peer::onGetHeaders(BC::Proto::MessageGetHeaders &getheaders)
+void Peer::onGetHeaders(BC::Proto::CMessageGetHeaders &getheaders)
 {
-  BC::Proto::MessageHeaders headers;
+  BC::Proto::CMessageHeaders headers;
   for (const auto &hash: getheaders.BlockLocatorHashes) {
     auto It = BlockIndex_.blockIndex().find(hash);
     if (It != BlockIndex_.blockIndex().end()) {
@@ -417,10 +417,10 @@ void Peer::onGetHeaders(BC::Proto::MessageGetHeaders &getheaders)
       while (index && counter < 2000) {
         if (index->Header.GetHash() == getheaders.HashStop)
           break;
-        BC::Proto::BlockHeaderNet header;
+        BC::Proto::CBlockHeaderNet header;
         // TODO: don't copy header!
-        header.header = index->Header;
-        headers.headers.emplace_back(std::move(header));
+        header.Header = index->Header;
+        headers.Headers.emplace_back(std::move(header));
         index = index->Next;
         counter++;
       }
@@ -430,15 +430,15 @@ void Peer::onGetHeaders(BC::Proto::MessageGetHeaders &getheaders)
   }
 
   // The first entry sizes the whole batch; per-entry drift (auxpow, prime multiplier) is covered by the slack or stream growth
-  xmstream stream(!headers.headers.empty() ? BTC::getSerializedSize(headers.headers.front()) * headers.headers.size() + 256 : 64);
+  xmstream stream(!headers.Headers.empty() ? BTC::getSerializedSize(headers.Headers.front()) * headers.Headers.size() + 256 : 64);
   BC::serialize(stream, headers);
   sendMessage(MessageTy::headers, stream.data(), stream.sizeOf());
 }
 
-void Peer::onGetBlocks(BC::Proto::MessageGetBlocks &getblocks)
+void Peer::onGetBlocks(BC::Proto::CMessageGetBlocks &getblocks)
 {
-  BC::Proto::MessageInv inv;
-  BC::Proto::MessageInv inv2;
+  BC::Proto::CMessageInv inv;
+  BC::Proto::CMessageInv inv2;
   for (const auto &hash: getblocks.BlockLocatorHashes) {
     auto It = BlockIndex_.blockIndex().find(hash);
     if (It != BlockIndex_.blockIndex().end()) {
@@ -448,9 +448,9 @@ void Peer::onGetBlocks(BC::Proto::MessageGetBlocks &getblocks)
       while (index && counter < 500) {
         if (index->Header.GetHash() == getblocks.HashStop)
           break;
-        BC::Proto::InventoryVector iv;
-        iv.type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
-        iv.hash = index->Header.GetHash();
+        BC::Proto::CInventoryVector iv;
+        iv.Type = BC::Common::hasWitness() ? BC::Proto::CInventoryVector::MSG_WITNESS_BLOCK : BC::Proto::CInventoryVector::MSG_BLOCK;
+        iv.Hash = index->Header.GetHash();
         inv.Inventory.emplace_back(iv);
         index = index->Next;
         counter++;
@@ -464,7 +464,7 @@ void Peer::onGetBlocks(BC::Proto::MessageGetBlocks &getblocks)
   sendMessage(MessageTy::inv, stream.data(), stream.sizeOf());
 }
 
-void Peer::onGetData(BC::Proto::MessageGetData &getdata)
+void Peer::onGetData(BC::Proto::CMessageGetData &getdata)
 {
   auto handler = [this](void *data, size_t size) {
     sendMessage(MessageTy::block, data, size);
@@ -472,10 +472,10 @@ void Peer::onGetData(BC::Proto::MessageGetData &getdata)
 
   {
     BlockSearcher searcher(Storage_.blockDb(), handler, [this](){ postQuitOperation(Base); });
-    for (const auto &inv: getdata.inventory) {
-      if (inv.type == BC::Proto::InventoryVector::MSG_BLOCK || inv.type == BC::Proto::InventoryVector::MSG_WITNESS_BLOCK) {
+    for (const auto &inv: getdata.Inventory) {
+      if (inv.Type == BC::Proto::CInventoryVector::MSG_BLOCK || inv.Type == BC::Proto::CInventoryVector::MSG_WITNESS_BLOCK) {
         // TODO: don't send witness data on MSG_BLOCK request
-        searcher.add(BlockIndex_, inv.hash);
+        searcher.add(BlockIndex_, inv.Hash);
       } else {
         // Other data types not supported now
       }
@@ -484,27 +484,27 @@ void Peer::onGetData(BC::Proto::MessageGetData &getdata)
 
   if (ProtocolVersion == 70001) {
     SmallStream<16384> stream;
-    BC::Proto::MessageInv inv;
+    BC::Proto::CMessageInv inv;
     inv.Inventory.resize(1);
-    inv.Inventory[0].type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
-    inv.Inventory[0].hash = BlockIndex_.best()->Header.GetHash();
+    inv.Inventory[0].Type = BC::Common::hasWitness() ? BC::Proto::CInventoryVector::MSG_WITNESS_BLOCK : BC::Proto::CInventoryVector::MSG_BLOCK;
+    inv.Inventory[0].Hash = BlockIndex_.best()->Header.GetHash();
     BC::serialize(stream, inv);
     sendMessage(MessageTy::inv, stream.data(), stream.sizeOf());
   }
 }
 
-void Peer::onPing(BC::Proto::MessagePing &ping)
+void Peer::onPing(BC::Proto::CMessagePing &ping)
 {
   SmallStream<16384> stream;
-  BC::Proto::MessagePong outMsg;
-  outMsg.nonce = ping.nonce;
+  BC::Proto::CMessagePong outMsg;
+  outMsg.Nonce = ping.Nonce;
   BC::serialize(stream, outMsg);
   sendMessage(MessageTy::pong, stream.data(), stream.sizeOf());
 }
 
-void Peer::onPong(BC::Proto::MessagePong &pong)
+void Peer::onPong(BC::Proto::CMessagePong &pong)
 {
-  if (pong.nonce == PingLastNonce_) {
+  if (pong.Nonce == PingLastNonce_) {
     auto now = std::chrono::steady_clock::now();
     auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - PingStartTime_).count();
     PingStartTime_ = TimeUnknown;
@@ -523,45 +523,45 @@ void Peer::onPong(BC::Proto::MessagePong &pong)
   }
 }
 
-void Peer::onInv(BC::Proto::MessageInv &inv)
+void Peer::onInv(BC::Proto::CMessageInv &inv)
 {
-  BC::Proto::MessageGetData getBlocks;
+  BC::Proto::CMessageGetData getBlocks;
   for (const auto &element: inv.Inventory) {
-    switch (element.type) {
-      case BC::Proto::InventoryVector::ERROR :
-        LOG_F(WARNING, "Peer %s send error: %s", Name.c_str(), element.hash.getHexLE().c_str());
+    switch (element.Type) {
+      case BC::Proto::CInventoryVector::ERROR :
+        LOG_F(WARNING, "Peer %s send error: %s", Name.c_str(), element.Hash.getHexLE().c_str());
         break;
-      case BC::Proto::InventoryVector::MSG_TX :
-      case BC::Proto::InventoryVector::MSG_WITNESS_TX :
+      case BC::Proto::CInventoryVector::MSG_TX :
+      case BC::Proto::CInventoryVector::MSG_WITNESS_TX :
         break;
-      case BC::Proto::InventoryVector::MSG_BLOCK :
-      case BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : {
+      case BC::Proto::CInventoryVector::MSG_BLOCK :
+      case BC::Proto::CInventoryVector::MSG_WITNESS_BLOCK : {
         // A started data write suppresses another download; it does not make the data readable.
-        auto it = BlockIndex_.blockIndex().find(element.hash);
+        auto it = BlockIndex_.blockIndex().find(element.Hash);
         if (it == BlockIndex_.blockIndex().end() || !it->second->hasFlags(BFDataWriteStarted)) {
-          BC::Proto::InventoryVector iv;
-          iv.type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
-          iv.hash = element.hash;
-          getBlocks.inventory.emplace_back(iv);
+          BC::Proto::CInventoryVector iv;
+          iv.Type = BC::Common::hasWitness() ? BC::Proto::CInventoryVector::MSG_WITNESS_BLOCK : BC::Proto::CInventoryVector::MSG_BLOCK;
+          iv.Hash = element.Hash;
+          getBlocks.Inventory.emplace_back(iv);
         }
         break;
       }
-      case BC::Proto::InventoryVector::MSG_FILTERED_BLOCK :
+      case BC::Proto::CInventoryVector::MSG_FILTERED_BLOCK :
         break;
-      case BC::Proto::InventoryVector::MSG_CMPCT_BLOCK :
+      case BC::Proto::CInventoryVector::MSG_CMPCT_BLOCK :
         break;
 
     }
   }
 
-  if (!getBlocks.inventory.empty())
+  if (!getBlocks.Inventory.empty())
     getData(getBlocks);
 }
 
 void Peer::onBlockData(void *data, size_t size, size_t memorySize, std::chrono::time_point<std::chrono::steady_clock> receivedTime)
 {
   // Header only: it is all the download bookkeeping needs and it names the index
-  BC::Proto::BlockHeader header;
+  BC::Proto::CBlockHeader header;
   {
     xmstream stream(data, size);
     if (!unserializeAndCheck(stream, header)) {
@@ -599,17 +599,17 @@ void Peer::onBlockData(void *data, size_t size, size_t memorySize, std::chrono::
   ParentNode->Sync(this, hash, data, size, memorySize, scheduledBlock, downloadFinished);
 }
 
-void Peer::onReject(BC::Proto::MessageReject &reject)
+void Peer::onReject(BC::Proto::CMessageReject &reject)
 {
-  LOG_F(WARNING, "Reject message: %s; reason: %s", reject.message.c_str(), reject.reason.c_str());
+  LOG_F(WARNING, "Reject message: %s; reason: %s", reject.Message.c_str(), reject.Reason.c_str());
 }
 
 void Peer::downloadHeaders(xvector<BC::Proto::BlockHashTy> &&blockLocator, const BC::Proto::BlockHashTy &hashStop)
 {
   SmallStream<16384> stream;
-  BC::Proto::MessageGetHeaders msg;
+  BC::Proto::CMessageGetHeaders msg;
   // TODO: set correct version
-  msg.version = 70015;
+  msg.Version = 70015;
   msg.BlockLocatorHashes = blockLocator;
   msg.HashStop = hashStop;
   BC::serialize(stream, msg);
@@ -625,20 +625,20 @@ void Peer::downloadHeaders(xvector<BC::Proto::BlockHashTy> &&blockLocator, const
   HeaderDownloadingStartTime_ = std::chrono::steady_clock::now();
 }
 
-void Peer::getData(const BC::Proto::MessageGetData &getdata)
+void Peer::getData(const BC::Proto::CMessageGetData &getdata)
 {
-  xmstream stream(getdata.inventory.size()*36 + 16);
+  xmstream stream(getdata.Inventory.size()*36 + 16);
   BC::serialize(stream, getdata);
   sendMessage(MessageTy::getdata, stream.data(), stream.sizeOf());
 }
 
 void Peer::inv(const xvector<BC::Proto::BlockHashTy> &hashes)
 {
-  BC::Proto::MessageInv inv;
+  BC::Proto::CMessageInv inv;
   inv.Inventory.resize(hashes.size());
   for (size_t i = 0, ie = hashes.size(); i < ie; i++) {
-    inv.Inventory[i].type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
-    inv.Inventory[i].hash = hashes[i];
+    inv.Inventory[i].Type = BC::Common::hasWitness() ? BC::Proto::CInventoryVector::MSG_WITNESS_BLOCK : BC::Proto::CInventoryVector::MSG_BLOCK;
+    inv.Inventory[i].Hash = hashes[i];
   }
 
   SmallStream<16384> stream;
@@ -683,20 +683,20 @@ void Peer::scheduleBlocksDownload(uint64_t usTimeout)
 void Peer::downloadBlocks(std::vector<BC::Proto::BlockHashTy> &hashes)
 {
   ScheduledToDownload_.clear();
-  BC::Proto::MessageGetData msg;
+  BC::Proto::CMessageGetData msg;
   for (const auto &hash: hashes) {
     ScheduledToDownload_.insert(hash);
-    BC::Proto::InventoryVector inv;
-    inv.type = BC::Common::hasWitness() ? BC::Proto::InventoryVector::MSG_WITNESS_BLOCK : BC::Proto::InventoryVector::MSG_BLOCK;
-    inv.hash = hash;
-    msg.inventory.emplace_back(inv);
+    BC::Proto::CInventoryVector inv;
+    inv.Type = BC::Common::hasWitness() ? BC::Proto::CInventoryVector::MSG_WITNESS_BLOCK : BC::Proto::CInventoryVector::MSG_BLOCK;
+    inv.Hash = hash;
+    msg.Inventory.emplace_back(inv);
   }
 
   receivedBlocks = 0;
   LastBatchSize_ = hashes.size();
 
   blockDownloading.fetch_add(1);
-  xmstream stream(msg.inventory.size()*36 + 16);
+  xmstream stream(msg.Inventory.size()*36 + 16);
   BC::serialize(stream, msg);
 
   BlockDownloadingStartTime_ = std::chrono::steady_clock::now();
@@ -714,8 +714,8 @@ void Peer::ping()
   SmallStream<16384> stream;
   PingLastNonce_ = static_cast<uint64_t>(rand());
 
-  BC::Proto::MessagePing outMsg;
-  outMsg.nonce = PingLastNonce_;
+  BC::Proto::CMessagePing outMsg;
+  outMsg.Nonce = PingLastNonce_;
   BC::serialize(stream, outMsg);
 
   sendMessage(MessageTy::ping, stream.data(), stream.sizeOf());
@@ -891,20 +891,20 @@ void Node::OnPeerConnected(Peer *connectedPeer)
 
 void Node::OnGetAddr(Peer *peer)
 {
-  BC::Proto::MessageAddr addr;
+  BC::Proto::CMessageAddr addr;
 
   enumeratePeers([&addr](Peer *connectedPeer) {
-    BC::Proto::NetworkAddress networkAddress;
-    networkAddress.addr.setIpv4(connectedPeer->Address.ipv4);
-    networkAddress.addr.port = htons(connectedPeer->Address.port);
-    networkAddress.addr.services = connectedPeer->Services;
-    networkAddress.time = static_cast<uint32_t>(time(nullptr));
-    addr.addr_list.emplace_back(networkAddress);
+    BC::Proto::CNetworkAddress networkAddress;
+    networkAddress.Addr.setIpv4(connectedPeer->Address.ipv4);
+    networkAddress.Addr.Port = htons(connectedPeer->Address.port);
+    networkAddress.Addr.Services = connectedPeer->Services;
+    networkAddress.Time = static_cast<uint32_t>(time(nullptr));
+    addr.AddrList.emplace_back(networkAddress);
   });
 
-  if (!addr.addr_list.empty()) {
-    LOG_F(INFO, "Peer %s: send %zu peers in addr message", peer->Name.c_str(), addr.addr_list.size());
-    xmstream stream(addr.addr_list.size()*30 + 16);
+  if (!addr.AddrList.empty()) {
+    LOG_F(INFO, "Peer %s: send %zu peers in addr message", peer->Name.c_str(), addr.AddrList.size());
+    xmstream stream(addr.AddrList.size()*30 + 16);
     BC::serialize(stream, addr);
     peer->sendMessage(Peer::MessageTy::addr, stream.data(), stream.sizeOf());
   }
@@ -1019,7 +1019,7 @@ void Node::Sync(Peer *peer)
   scheduleBlocksDownload(peer);
 }
 
-void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &headers, unsigned, HeadersMessageToken &&token)
+void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::CBlockHeaderNet> &headers, unsigned, HeadersMessageToken &&token)
 {
   intrusive_ptr<BlockSource> blockSourcePtr(currentPeer->BlockSource_);
   BlockSource *blockSource = blockSourcePtr.get();
@@ -1037,7 +1037,7 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
     indexes.resize(headers.size());
 
     // Continue downloading headers
-    BC::Proto::BlockHashTy hash = headers.back().header.GetHash();
+    BC::Proto::BlockHashTy hash = headers.back().Header.GetHash();
     BC::Proto::BlockHashTy hashStop;
     hashStop.setNull();
     currentPeer->downloadHeaders({hash}, hashStop);
@@ -1047,15 +1047,15 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
     // every accepted index records that its work is already paid for.
     BC::Common::CheckConsensusCtx ccCtx;
     BC::Common::checkConsensusInitialize(ccCtx);
-    std::vector<const BC::Proto::BlockHeader*> headersToCheck;
+    std::vector<const BC::Proto::CBlockHeader*> headersToCheck;
     std::vector<size_t> checkPositions;
     headersToCheck.reserve(headers.size());
     checkPositions.reserve(headers.size());
     std::unique_ptr<bool[]> workValid(new bool[headers.size()]);
     BC::Proto::BlockHashTy prevHash;
     for (size_t i = 0, ie = headers.size(); i != ie; i++) {
-      const BC::Proto::BlockHeader &header = headers[i].header;
-      if (i && header.hashPrevBlock != prevHash) {
+      const BC::Proto::CBlockHeader &header = headers[i].Header;
+      if (i && header.HashPrevBlock != prevHash) {
         // TODO: stop downloading process using this peer
         LOG_F(INFO, "%s: invalid header sequence received", currentPeer->Name.c_str());
         disconnectPeerFromBlockSource(currentPeer, blockSourcePtr);
@@ -1088,30 +1088,30 @@ void Node::Sync(Peer *currentPeer, const xvector<BC::Proto::BlockHeaderNet> &hea
     BC::Common::BlockIndex *index = nullptr;
     for (size_t i = 0; i < headers.size(); i++) {
       if (!workValid[i]) {
-        LOG_F(INFO, "%s: invalid header with hash %s received", currentPeer->Name.c_str(), headers[i].header.GetHash().getHexLE().c_str());
+        LOG_F(INFO, "%s: invalid header with hash %s received", currentPeer->Name.c_str(), headers[i].Header.GetHash().getHexLE().c_str());
         disconnectPeerFromBlockSource(currentPeer, blockSourcePtr);
         return;
       }
 
-      index = addHeader(*BlockIndex_, *ChainParams_, headers[i].header, /*workChecked=*/true);
+      index = addHeader(*BlockIndex_, *ChainParams_, headers[i].Header, /*workChecked=*/true);
       indexes[i] = index;
     }
 
     currentPeer->noteHeight(index->knownHeight());
     // Use the received header: indexes.front()->Prev may still be under construction.
-    auto *prev = BlockIndex_->indexByHash(headers.front().header.hashPrevBlock);
+    auto *prev = BlockIndex_->indexByHash(headers.front().Header.HashPrevBlock);
     blockSource->enqueue(std::move(indexes), prev, token.consume(blockSource));
   } else {
     if (headers.empty())
       return;
 
-    if (headers.front().header.GetHash() == currentPeer->LastAskedBlock_->Header.GetHash()) {
+    if (headers.front().Header.GetHash() == currentPeer->LastAskedBlock_->Header.GetHash()) {
       // Current peer still on same chain with linked block source
       currentPeer->LastKnownBlock_ = currentPeer->LastAskedBlock_;
     } else {
       // Current peer have more short chain than block source or on another chain
       bool currentPeerOnAnotherChain = true;
-      auto I = BlockIndex_->blockIndex().find(headers.front().header.GetHash());
+      auto I = BlockIndex_->blockIndex().find(headers.front().Header.GetHash());
       if (I != BlockIndex_->blockIndex().end()) {
         BC::Common::BlockIndex *index = currentPeer->LastAskedBlock_;
         BC::Common::BlockIndex *receivedIndex = I->second;
@@ -1150,7 +1150,7 @@ void Node::Sync(Peer *peer,
   BC::Common::BlockIndex *attached = nullptr;
   size_t unpackedSize = 0;
   xmstream stream(data, size);
-  auto *block = BTC::unpack2<BC::Proto::Block>(stream, &unpackedSize);
+  auto *block = BTC::unpack2<BC::Proto::CBlock>(stream, &unpackedSize);
   EBlockDataResult result = EBlockDataResult::Invalid;
   if (block && stream.remaining() == 0) {
     intrusive_ptr<BC::Common::CIndexCacheObject> object(
@@ -1288,7 +1288,7 @@ void Node::buildBlockLocator(xvector<BC::Proto::BlockHashTy> &hashes, BC::Common
     }
   }
 
-  hashes.emplace_back(ChainParams_->GenesisBlock.header.GetHash());
+  hashes.emplace_back(ChainParams_->GenesisBlock.Header.GetHash());
 }
 
 bool Node::connectPeerToBlockSource(Peer *peer, BlockSource *current, BlockSource *next, bool isProducer)

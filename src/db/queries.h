@@ -11,6 +11,7 @@
 // reads never sees the connect side - and a database that only writes never
 // sees this file
 
+#include "BC/script.h"
 #include "common/blockDataBase.h"
 #include "common/uint.h"
 
@@ -30,7 +31,7 @@ enum EInterfaceTy {
 };
 
 struct CQueryTransactionResult {
-  BC::Proto::Transaction Tx;
+  BC::Proto::CTransaction Tx;
   BC::Proto::CTxLinkedOutputs LinkedOutputs;
   BC::Proto::BlockHashTy Block;
   uint32_t TxNum;

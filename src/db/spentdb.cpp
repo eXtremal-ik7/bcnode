@@ -52,21 +52,21 @@ void SpentDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
   CSpentValue value;
 
   for (const CBlockRef &ref: batch) {
-    const BC::Proto::Block &block = *ref.Block;
+    const BC::Proto::CBlock &block = *ref.Block;
     const BC::Proto::CBlockValidationData &validationData = *ref.ValidationData;
-    assert(validationData.TxIds.size() == block.vtx.size());
+    assert(validationData.TxIds.size() == block.Vtx.size());
     value.Height = ref.Index->Height;
 
     // vtx[0] is the coinbase and spends nothing. Same-block and same-run pairs
     // get their mark like any other spend: the pair skip of the utxo db hides an
     // output that was still created and still spent, and this database is the
     // only place that says so
-    for (size_t i = 1, ie = block.vtx.size(); i != ie; i++) {
-      const auto &tx = block.vtx[i];
+    for (size_t i = 1, ie = block.Vtx.size(); i != ie; i++) {
+      const auto &tx = block.Vtx[i];
       value.SpentBy = validationData.TxIds[i];
-      for (size_t j = 0, je = tx.txIn.size(); j != je; j++) {
-        key.Tx = tx.txIn[j].previousOutputHash;
-        key.Index = tx.txIn[j].previousOutputIndex;
+      for (size_t j = 0, je = tx.TxIn.size(); j != je; j++) {
+        key.Tx = tx.TxIn[j].PreviousOutputHash;
+        key.Index = tx.TxIn[j].PreviousOutputIndex;
         value.InputIndex = static_cast<uint32_t>(j);
         // An outpoint is spent once on the chain this database follows, so
         // nothing below can hold a mark for it. The exception is a BIP30 twin
@@ -81,7 +81,7 @@ void SpentDb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 }
 
 void SpentDb::disconnect(const BC::Common::BlockIndex *index,
-                             const BC::Proto::Block &block,
+                             const BC::Proto::CBlock &block,
                              const BC::Proto::CBlockLinkedOutputs&,
                              const BC::Proto::CBlockValidationData&,
                              BlockInMemoryIndex&,
@@ -92,15 +92,15 @@ void SpentDb::disconnect(const BC::Common::BlockIndex *index,
 
   // Only the marks this block wrote go away. Its own outputs cannot be spent
   // while it is being disconnected - whoever spent them was disconnected first
-  for (size_t i = 1, ie = block.vtx.size(); i != ie; i++) {
-    const auto &tx = block.vtx[i];
-    for (size_t j = 0, je = tx.txIn.size(); j != je; j++) {
-      key.Tx = tx.txIn[j].previousOutputHash;
-      key.Index = tx.txIn[j].previousOutputIndex;
+  for (size_t i = 1, ie = block.Vtx.size(); i != ie; i++) {
+    const auto &tx = block.Vtx[i];
+    for (size_t j = 0, je = tx.TxIn.size(); j != je; j++) {
+      key.Tx = tx.TxIn[j].PreviousOutputHash;
+      key.Index = tx.TxIn[j].PreviousOutputIndex;
       writer.erase(key);
     }
   }
-  commit(writer, index->Header.hashPrevBlock);
+  commit(writer, index->Header.HashPrevBlock);
 }
 
 }

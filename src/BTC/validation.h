@@ -19,13 +19,13 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
   validation.InputsResolved = false;
   validation.InputsInvalid = false;
   validation.LocalSpendInvalid = false;
-  validation.TxIds.resize(block.vtx.size());
-  for (size_t i = 0; i < block.vtx.size(); i++)
-    validation.TxIds[i] = block.vtx[i].getTxId();
+  validation.TxIds.resize(block.Vtx.size());
+  for (size_t i = 0; i < block.Vtx.size(); i++)
+    validation.TxIds[i] = block.Vtx[i].getTxId();
   BTC::fillTxPositions(block, validation.TxPositions);
-  validation.TxData.resize(block.vtx.size());
-  for (size_t i = 0; i < block.vtx.size(); i++) {
-    validation.TxData[i].ScriptSigKnownValid.resize(block.vtx[i].txIn.size());
+  validation.TxData.resize(block.Vtx.size());
+  for (size_t i = 0; i < block.Vtx.size(); i++) {
+    validation.TxData[i].ScriptSigKnownValid.resize(block.Vtx[i].TxIn.size());
     for (auto &v: validation.TxData[i].ScriptSigKnownValid) {
       v.ScriptSigKnownValid = false;
     }
@@ -42,10 +42,10 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
   // would re-spend its own inputs), unspendable in its own block by maturity
   size_t inputsNum = 0;
   uint64_t outputsNum = 0;
-  for (size_t i = 0; i < block.vtx.size(); i++) {
-    outputsNum += block.vtx[i].txOut.size();
+  for (size_t i = 0; i < block.Vtx.size(); i++) {
+    outputsNum += block.Vtx[i].TxOut.size();
     if (i)
-      inputsNum += block.vtx[i].txIn.size();
+      inputsNum += block.Vtx[i].TxIn.size();
   }
   validation.InputLocalTx.resize(inputsNum);
   validation.OutputSpentLocally.resize((outputsNum + 63) / 64);
@@ -61,12 +61,12 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
     validation.OutputDataOffset.resize(outputsNum + 1);
 
     size_t ordinal = 0;
-    for (size_t i = 0; i < block.vtx.size(); i++) {
-      const auto &tx = block.vtx[i];
-      for (size_t j = 0; j < tx.txOut.size(); j++, ordinal++) {
+    for (size_t i = 0; i < block.Vtx.size(); i++) {
+      const auto &tx = block.Vtx[i];
+      for (size_t j = 0; j < tx.TxOut.size(); j++, ordinal++) {
         size_t begin = outputData.offsetOf();
         validation.OutputDataOffset[ordinal] = static_cast<uint32_t>(begin);
-        Script::parseTransactionOutput(tx.txOut[j], outputData);
+        Script::parseTransactionOutput(tx.TxOut[j], outputData);
         const Script::UnspentOutputInfo *info =
           reinterpret_cast<const Script::UnspentOutputInfo*>(outputData.data<uint8_t>() + begin);
         if (info->Type == Script::UnspentOutputInfo::EOpReturn)
@@ -82,23 +82,23 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
   std::unordered_map<Proto::TxHashTy, uint64_t> txIndexMap;
   size_t inOrdinal = 0;
   uint64_t outOrdinal = 0;
-  if (!block.vtx.empty()) {
+  if (!block.Vtx.empty()) {
     txIndexMap[validation.TxIds[0]] = 0;
-    outOrdinal = block.vtx[0].txOut.size();
+    outOrdinal = block.Vtx[0].TxOut.size();
   }
-  for (size_t i = 1; i < block.vtx.size(); i++) {
-    const auto &tx = block.vtx[i];
-    for (size_t j = 0; j < tx.txIn.size(); j++, inOrdinal++) {
-      const auto &txin = tx.txIn[j];
-      auto It = txIndexMap.find(txin.previousOutputHash);
+  for (size_t i = 1; i < block.Vtx.size(); i++) {
+    const auto &tx = block.Vtx[i];
+    for (size_t j = 0; j < tx.TxIn.size(); j++, inOrdinal++) {
+      const auto &txin = tx.TxIn[j];
+      auto It = txIndexMap.find(txin.PreviousOutputHash);
       if (It == txIndexMap.end()) {
         validation.InputLocalTx[inOrdinal] = Proto::CBlockValidationData::NoLocalTx;
         continue;
       }
       uint32_t localTxIdx = static_cast<uint32_t>(It->second);
       validation.InputLocalTx[inOrdinal] = localTxIdx;
-      if (txin.previousOutputIndex < block.vtx[localTxIdx].txOut.size()) {
-        uint64_t bit = (It->second >> 32) + txin.previousOutputIndex;
+      if (txin.PreviousOutputIndex < block.Vtx[localTxIdx].TxOut.size()) {
+        uint64_t bit = (It->second >> 32) + txin.PreviousOutputIndex;
         uint64_t mask = 1ull << (bit & 63);
         // Already spent by an earlier input of this block: the block is invalid, and saying so
         // here saves the linker a set per block
@@ -110,7 +110,7 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
       }
     }
     txIndexMap[validation.TxIds[i]] = static_cast<uint64_t>(i) | (outOrdinal << 32);
-    outOrdinal += tx.txOut.size();
+    outOrdinal += tx.TxOut.size();
   }
 }
 
@@ -129,7 +129,7 @@ bool validateBlockSize(const BlockTy &block, size_t limit, std::string &error, C
 
 template<typename BlockTy>
 bool validateMerkleRoot(const BlockTy &block, std::string &error) {
-  bool result = calculateBlockMerkleRoot(block) == block.header.hashMerkleRoot;
+  bool result = calculateBlockMerkleRoot(block) == block.Header.HashMerkleRoot;
   if (!result)
     error = "bad-merkleroot";
   return result;
@@ -140,10 +140,10 @@ bool validateMerkleRoot(const BlockTy &block, std::string &error) {
 // calculateMerkleRoot folds the array in place, hence the copy
 template<typename BlockTy>
 bool validateMerkleRoot(const BlockTy &block, const xvector<Proto::TxHashTy> &txIds, std::string &error) {
-  assert(txIds.size() == block.vtx.size());
+  assert(txIds.size() == block.Vtx.size());
   std::unique_ptr<BaseBlob<256>[]> hashes(new BaseBlob<256>[txIds.size()]);
   std::copy(txIds.begin(), txIds.end(), hashes.get());
-  bool result = calculateMerkleRoot(hashes.get(), txIds.size()) == block.header.hashMerkleRoot;
+  bool result = calculateMerkleRoot(hashes.get(), txIds.size()) == block.Header.HashMerkleRoot;
   if (!result)
     error = "bad-merkleroot";
   return result;
@@ -151,16 +151,16 @@ bool validateMerkleRoot(const BlockTy &block, const xvector<Proto::TxHashTy> &tx
 
 template<typename BlockTy>
 bool validateWitnessCommitment(const BlockTy &block, bool &hasWitness, std::string &error) {
-  if (block.vtx.empty() || block.vtx[0].txIn.empty()) {
+  if (block.Vtx.empty() || block.Vtx[0].TxIn.empty()) {
     error = "bad-coinbase-missing";
     return false;
   }
-  const auto &coinbaseTxIn = block.vtx[0].txIn[0];
+  const auto &coinbaseTxIn = block.Vtx[0].TxIn[0];
 
   // Get commitment txout index
   size_t commitmentPos = std::numeric_limits<size_t>::max();
-  for (size_t i = 0, ie = block.vtx[0].txOut.size(); i != ie; ++i) {
-    const xvector<uint8_t> &pkScript = block.vtx[0].txOut[i].pkScript;
+  for (size_t i = 0, ie = block.Vtx[0].TxOut.size(); i != ie; ++i) {
+    const xvector<uint8_t> &pkScript = block.Vtx[0].TxOut[i].PkScript;
     if (pkScript.size() >= 38 &&
         pkScript[0] == BTC::Script::OP_RETURN &&
         pkScript[1] == 0x24 &&
@@ -174,11 +174,11 @@ bool validateWitnessCommitment(const BlockTy &block, bool &hasWitness, std::stri
   }
 
   if (commitmentPos == std::numeric_limits<size_t>::max()) {
-    for (size_t i = 0, ie = block.vtx.size(); i != ie; ++i) {
-      const auto &tx = block.vtx[i];
-      for (size_t j = 0, je = tx.txIn.size(); j != je; ++j) {
-        const auto &txIn = tx.txIn[j];
-        if (!txIn.witnessStack.empty()) {
+    for (size_t i = 0, ie = block.Vtx.size(); i != ie; ++i) {
+      const auto &tx = block.Vtx[i];
+      for (size_t j = 0, je = tx.TxIn.size(); j != je; ++j) {
+        const auto &txIn = tx.TxIn[j];
+        if (!txIn.WitnessStack.empty()) {
           error = "witness-data-without-commitment";
           return false;
         }
@@ -189,18 +189,18 @@ bool validateWitnessCommitment(const BlockTy &block, bool &hasWitness, std::stri
 
   hasWitness = true;
 
-  const uint8_t *commitmentData = block.vtx[0].txOut[commitmentPos].pkScript.data();
+  const uint8_t *commitmentData = block.Vtx[0].TxOut[commitmentPos].PkScript.data();
 
   // Check witness nonce
-  if (coinbaseTxIn.witnessStack.size() != 1 || coinbaseTxIn.witnessStack[0].size() != 32) {
+  if (coinbaseTxIn.WitnessStack.size() != 1 || coinbaseTxIn.WitnessStack[0].size() != 32) {
     // Miners embedded the commitment output before segwit activation, in
     // blocks with no witness data at all; Core checks it only after activation.
     // Height-free equivalent: skip the check when nothing carries witness data
     bool blockHasWitnessData = false;
-    for (size_t i = 0, ie = block.vtx.size(); i != ie && !blockHasWitnessData; ++i) {
-      const auto &tx = block.vtx[i];
-      for (size_t j = 0, je = tx.txIn.size(); j != je; ++j) {
-        if (!tx.txIn[j].witnessStack.empty()) {
+    for (size_t i = 0, ie = block.Vtx.size(); i != ie && !blockHasWitnessData; ++i) {
+      const auto &tx = block.Vtx[i];
+      for (size_t j = 0, je = tx.TxIn.size(); j != je; ++j) {
+        if (!tx.TxIn[j].WitnessStack.empty()) {
           blockHasWitnessData = true;
           break;
         }
@@ -215,7 +215,7 @@ bool validateWitnessCommitment(const BlockTy &block, bool &hasWitness, std::stri
     error = "bad-witness-nonce";
     return false;
   }
-  const uint8_t *witnessNonce = coinbaseTxIn.witnessStack[0].data();
+  const uint8_t *witnessNonce = coinbaseTxIn.WitnessStack[0].data();
 
   // Calculate witness merkle root
   BaseBlob<256> witnessMerkleRoot = calculateBlockWitnessMerkleRoot(block);
@@ -233,14 +233,14 @@ bool validateBIP34(uint32_t height, const BlockTy &block, uint32_t bip34Height, 
   if (height < bip34Height)
     return true;
 
-  if (block.vtx.empty() || block.vtx[0].txIn.empty()) {
+  if (block.Vtx.empty() || block.Vtx[0].TxIn.empty()) {
     error = "coinbase-height-missing";
     return false;
   }
 
-  auto &coinbaseTxIn = block.vtx[0].txIn[0];
+  auto &coinbaseTxIn = block.Vtx[0].TxIn[0];
 
-  xmstream src(coinbaseTxIn.scriptSig.data(), coinbaseTxIn.scriptSig.size());
+  xmstream src(coinbaseTxIn.ScriptSig.data(), coinbaseTxIn.ScriptSig.size());
 
   // Read size followed by little endian number
   uint8_t size = src.read<uint8_t>();
@@ -263,20 +263,20 @@ static inline bool validateUnexpectedWitness(uint32_t height, bool hasWitnessDat
 }
 
 template<typename X>
-bool validateUnexpectedWitness(const typename X::BlockIndex &index, const typename X::Proto::Block &block, const typename X::ChainParams &chainParams, std::string &error) {
+bool validateUnexpectedWitness(const typename X::BlockIndex &index, const typename X::Proto::CBlock &block, const typename X::ChainParams &chainParams, std::string &error) {
   bool result = !(index.Height < chainParams.SegwitHeight && block.validationData.HasWitness);
   error = "unexpected-witness-data";
   return result;
 }
 
 template<typename X>
-bool validateScriptSig(const typename X::Proto::ValidationData&, const typename X::Proto::Transaction&, const typename X::ChainParams&, std::string&)
+bool validateScriptSig(const typename X::Proto::ValidationData&, const typename X::Proto::CTransaction&, const typename X::ChainParams&, std::string&)
 {
   return true;
 }
 
 template<typename X>
-bool validateAmount(const typename X::Proto::ValidationData&, const typename X::Proto::Transaction&, const typename X::ChainParams&, std::string&)
+bool validateAmount(const typename X::Proto::ValidationData&, const typename X::Proto::CTransaction&, const typename X::ChainParams&, std::string&)
 {
   return true;
 }

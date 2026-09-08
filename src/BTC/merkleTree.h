@@ -16,12 +16,12 @@ BaseBlob<256> calculateMerkleRoot(BaseBlob<256> hash, BaseBlob<256> *tree, size_
 template<typename BlockTy>
 BaseBlob<256> calculateBlockMerkleRoot(const BlockTy &block)
 {
-  size_t txNum = block.vtx.size();
+  size_t txNum = block.Vtx.size();
   std::unique_ptr<BaseBlob<256>[]> hashes(new BaseBlob<256>[txNum]);
 
   // Get hashes for all transactions
   for (size_t i = 0; i < txNum; i++)
-    hashes[i] = block.vtx[i].getTxId();
+    hashes[i] = block.Vtx[i].getTxId();
 
   return calculateMerkleRoot(hashes.get(), txNum);
 }
@@ -29,14 +29,14 @@ BaseBlob<256> calculateBlockMerkleRoot(const BlockTy &block)
 template<typename BlockTy>
 BaseBlob<256> calculateBlockWitnessMerkleRoot(const BlockTy &block)
 {
-  size_t txNum = block.vtx.size();
+  size_t txNum = block.Vtx.size();
   std::unique_ptr<BaseBlob<256>[]> hashes(new BaseBlob<256>[txNum]);
 
   // Get hashes for all transactions
   if (txNum >= 1)
     hashes[0].setNull();
   for (size_t i = 1; i < txNum; i++)
-    hashes[i] = block.vtx[i].getWTxid();
+    hashes[i] = block.Vtx[i].getWTxid();
 
   return calculateMerkleRoot(hashes.get(), txNum);
 }

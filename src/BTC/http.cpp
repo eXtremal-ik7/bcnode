@@ -546,7 +546,7 @@ void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document &request)
   }
 
   const BC::Common::BlockIndex *best = BlockIndex_.best();
-  const BC::Proto::Block &block = *object.get()->block();
+  const BC::Proto::CBlock &block = *object.get()->block();
   const BC::Proto::CBlockLinkedOutputs &blockOutputs = object.get()->linkedOutputs();
 
   xmstream stream;
@@ -560,16 +560,16 @@ void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document &request)
       JSON::Object blockObject(stream);
       blockObject.addString("hash", index->Header.GetHash().getHexLE());
       blockObject.addInt("height", index->Height);
-      blockObject.addInt("timestamp", index->Header.nTime);
-      blockObject.addInt("tx_count", block.vtx.size());
+      blockObject.addInt("timestamp", index->Header.Time);
+      blockObject.addInt("tx_count", block.Vtx.size());
     }
     reply.addField("items");
 
     {
       JSON::Array itemsArray(stream);
 
-      for (size_t i = pagination.offset; i < block.vtx.size() && i - pagination.offset < pagination.limit; i++) {
-        const BC::Proto::Transaction &tx = block.vtx[i];
+      for (size_t i = pagination.offset; i < block.Vtx.size() && i - pagination.offset < pagination.limit; i++) {
+        const BC::Proto::CTransaction &tx = block.Vtx[i];
         const BC::Proto::CTxLinkedOutputs &txOutputs = blockOutputs.Tx[i];
         itemsArray.addField();
         serializeTx(stream, tx, txOutputs, index, i == 0, best->Height - index->Height);
@@ -579,7 +579,7 @@ void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document &request)
     reply.addField("pagination");
     {
       JSON::Object paginationObject(stream);
-      paginationObject.addInt("total", block.vtx.size());
+      paginationObject.addInt("total", block.Vtx.size());
       paginationObject.addInt("limit", pagination.limit);
       paginationObject.addInt("offset", pagination.offset);
     }
@@ -916,7 +916,7 @@ void BC::Network::HttpApiConnection::serializeBlock(xmstream &stream,
                                                     const BC::Common::CIndexCacheObject *object,
                                                     const BC::Proto::BlockHashTy &hash)
 {
-  uint32_t bits = xhtobe(index->Header.nBits);
+  uint32_t bits = xhtobe(index->Header.Bits);
 
   JSON::Object blockObject(stream);
   blockObject.addInt("height", index->Height);
@@ -931,22 +931,22 @@ void BC::Network::HttpApiConnection::serializeBlock(xmstream &stream,
   else
     blockObject.addNull("next_hash");
 
-  blockObject.addInt("timestamp", index->Header.nTime);
-  blockObject.addString("merkle_root", index->Header.hashMerkleRoot.getHexLE());
-  blockObject.addInt("version", index->Header.nVersion);
+  blockObject.addInt("timestamp", index->Header.Time);
+  blockObject.addString("merkle_root", index->Header.HashMerkleRoot.getHexLE());
+  blockObject.addInt("version", index->Header.Version);
   blockObject.addString("bits", bin2hexLowerCase(&bits, sizeof(bits)));
-  addNonce(blockObject, index->Header.nNonce);
+  addNonce(blockObject, index->Header.Nonce);
   blockObject.addInt("size_bytes", index->SerializedBlockSize);
   blockObject.addNull("weight");
-  blockObject.addInt("tx_count", object->block()->vtx.size());
+  blockObject.addInt("tx_count", object->block()->Vtx.size());
   blockObject.addNull("difficulty");
   // TODO: best block has 0 or 1 confirmations ?
   blockObject.addInt("confirmations", BlockIndex_.best()->Height - index->Height);
 
   int64_t reward = 0;
-  BC::Proto::Transaction &coinbase = object->block()->vtx[0];
-  for (const auto &txOut : coinbase.txOut)
-    reward += txOut.value;
+  BC::Proto::CTransaction &coinbase = object->block()->Vtx[0];
+  for (const auto &txOut : coinbase.TxOut)
+    reward += txOut.Value;
 
   blockObject.addString("reward", FormatMoney(reward, BC::Configuration::RationalPartSize));
   blockObject.addNull("fees_total");
@@ -965,7 +965,7 @@ const BTC::Common::CBIP30Repeat *BC::Network::HttpApiConnection::bip30Repeat(con
 }
 
 void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
-                                                 const BC::Proto::Transaction &tx,
+                                                 const BC::Proto::CTransaction &tx,
                                                  const BC::Proto::CTxLinkedOutputs &txOutputs,
                                                  const BC::Common::BlockIndex *index,
                                                  bool isCoinbase,
@@ -977,8 +977,8 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   int64_t valueIn = 0;
   int64_t valueOut = 0;
   int64_t fee = 0;
-  for (const auto &txOut: tx.txOut)
-    valueOut += txOut.value;
+  for (const auto &txOut: tx.TxOut)
+    valueOut += txOut.Value;
 
   if (!isCoinbase) {
     for (const auto &linkedTxin: txOutputs.TxIn) {
@@ -994,16 +994,16 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   // null: the reply keeps its shape whatever the node is configured with
   std::vector<DB::CQuerySpentResult> spent;
   if (Storage_->SpentDb_)
-    Storage_->SpentDb_->querySpentOutputs(txid, static_cast<uint32_t>(tx.txOut.size()), spent);
+    Storage_->SpentDb_->querySpentOutputs(txid, static_cast<uint32_t>(tx.TxOut.size()), spent);
 
   txObject.addString("txid", txid.getHexLE());
   txObject.addString("hash", tx.getWTxid().getHexLE());
   txObject.addString("block_hash", index->Header.GetHash().getHexLE());
   txObject.addInt("block_height", index->Height);
-  txObject.addInt("timestamp", index->Header.nTime);
-  txObject.addInt("size_bytes", BC::Io<BC::Proto::Transaction>::getSerializedSize(tx, true));
-  txObject.addInt("version", tx.version);
-  txObject.addInt("locktime", tx.lockTime);
+  txObject.addInt("timestamp", index->Header.Time);
+  txObject.addInt("size_bytes", BC::Io<BC::Proto::CTransaction>::getSerializedSize(tx, true));
+  txObject.addInt("version", tx.Version);
+  txObject.addInt("locktime", tx.LockTime);
   txObject.addInt("confirmations", confirmations);
   txObject.addString("value_in", FormatMoney(valueIn, BC::Configuration::RationalPartSize));
   txObject.addString("value_out", FormatMoney(valueOut, BC::Configuration::RationalPartSize));
@@ -1035,8 +1035,8 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   txObject.addField("inputs");
   {
     JSON::Array inputsArray(stream);
-    for (size_t i = 0; i < tx.txIn.size(); i++) {
-      const BC::Proto::TxIn &txin = tx.txIn[i];
+    for (size_t i = 0; i < tx.TxIn.size(); i++) {
+      const BC::Proto::CTxIn &txin = tx.TxIn[i];
       const auto &linkedTxin = txOutputs.TxIn[i];
       std::string address58;
       BC::Script::CAddress address;
@@ -1052,8 +1052,8 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
       inputsArray.addField();
       {
         JSON::Object inputObject(stream);
-        inputObject.addString("txid", txin.previousOutputHash.getHexLE());
-        inputObject.addInt("vout_index", txin.previousOutputIndex);
+        inputObject.addString("txid", txin.PreviousOutputHash.getHexLE());
+        inputObject.addInt("vout_index", txin.PreviousOutputIndex);
         if (!address58.empty())
           inputObject.addString("address", address58);
         else
@@ -1072,10 +1072,10 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
   txObject.addField("outputs");
   {
     JSON::Array outputsArray(stream);
-    for (size_t i = 0; i < tx.txOut.size(); i++) {
+    for (size_t i = 0; i < tx.TxOut.size(); i++) {
       std::string address58;
       BC::Script::CAddress address;
-      const BC::Proto::TxOut &txOut = tx.txOut[i];
+      const BC::Proto::CTxOut &txOut = tx.TxOut[i];
 
       if (BC::Script::extractAddress(txOut, address))
         address58 = BC::Script::addressToString(address, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix, ChainParams_.Bech32Prefix);
@@ -1088,8 +1088,8 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
           outputObject.addString("address", address58);
         else
           outputObject.addNull("address");
-        outputObject.addString("value", FormatMoney(txOut.value, BC::Configuration::RationalPartSize));
-        outputObject.addString("script_pub_key", bin2hexLowerCase(txOut.pkScript.begin(), txOut.pkScript.size()));
+        outputObject.addString("value", FormatMoney(txOut.Value, BC::Configuration::RationalPartSize));
+        outputObject.addString("script_pub_key", bin2hexLowerCase(txOut.PkScript.begin(), txOut.PkScript.size()));
 
         if (i < spent.size() && spent[i].Found) {
           outputObject.addBoolean("spent", true);

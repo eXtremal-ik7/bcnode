@@ -11,7 +11,7 @@
 #include "dbengine/kvbase.h"
 #include "db/outpointKey.h"
 #include "dbengine/swmrcache.h"
-#include "BTC/script.h"
+#include "BC/script.h"
 
 // The key is the outpoint shared with spentdb; the name says what it means here
 using CUnspentOutputKey = COutpointKey;
@@ -27,7 +27,7 @@ namespace DB {
 struct CUtxoCacheValue {
   uint32_t Height;    // creation height, drives the eviction floor
   uint8_t IsCoinbase; // maturity metadata, mirrors the on-disk suffix bit; rides in former padding
-  uint8_t Data[sizeof(BTC::Script::UnspentOutputInfo)];
+  uint8_t Data[sizeof(BC::Script::UnspentOutputInfo)];
 };
 
 // On-disk value: serialized UnspentOutputInfo followed by a uint32 suffix
@@ -63,7 +63,7 @@ public:
                BlockDatabase &blockDb) final;
 
   void disconnect(const BC::Common::BlockIndex *index,
-                  const BC::Proto::Block &block,
+                  const BC::Proto::CBlock &block,
                   const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
                   const BC::Proto::CBlockValidationData &validationData,
                   BlockInMemoryIndex &blockIndex,

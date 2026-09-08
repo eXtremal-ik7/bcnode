@@ -22,8 +22,8 @@ bool readTransactionAt(BC::Common::BlockIndex *index,
   // Still in memory: the parsed block is there, no file read and no unserialize
   intrusive_ptr<BC::Common::CIndexCacheObject> serializedPtr(index->Serialized);
   if (serializedPtr.get()) {
-    BC::Proto::Block *block = serializedPtr.get()->block();
-    result.Tx = block->vtx[txIndex];
+    BC::Proto::CBlock *block = serializedPtr.get()->block();
+    result.Tx = block->Vtx[txIndex];
     result.LinkedOutputs = serializedPtr.get()->linkedOutputs().Tx[txIndex];
     return true;
   }

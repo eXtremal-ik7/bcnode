@@ -127,20 +127,20 @@ private:
   void onMessage(AsyncOpStatus status);
   static void processMessageQueue();
 
-  void onVersion(BC::Proto::MessageVersion &version);
+  void onVersion(BC::Proto::CMessageVersion &version);
   void onVerAck();
   void onGetAddr();
-  void onAddr(BC::Proto::MessageAddr &addr);
-  void onHeaders(BC::Proto::MessageHeaders &getheaders, HeadersMessageToken &&token);
-  void onGetBlocks(BC::Proto::MessageGetBlocks &getblocks);
-  void onGetData(BC::Proto::MessageGetData &getdata);
-  void onGetHeaders(BC::Proto::MessageGetHeaders &getheaders);
-  void onPing(BC::Proto::MessagePing &ping);
-  void onPong(BC::Proto::MessagePong &pong);
-  void onInv(BC::Proto::MessageInv &inv);
+  void onAddr(BC::Proto::CMessageAddr &addr);
+  void onHeaders(BC::Proto::CMessageHeaders &getheaders, HeadersMessageToken &&token);
+  void onGetBlocks(BC::Proto::CMessageGetBlocks &getblocks);
+  void onGetData(BC::Proto::CMessageGetData &getdata);
+  void onGetHeaders(BC::Proto::CMessageGetHeaders &getheaders);
+  void onPing(BC::Proto::CMessagePing &ping);
+  void onPong(BC::Proto::CMessagePong &pong);
+  void onInv(BC::Proto::CMessageInv &inv);
   // Takes ownership of the serialized block data
   void onBlockData(void *data, size_t size, size_t memorySize, std::chrono::time_point<std::chrono::steady_clock> receivedTime);
-  void onReject(BC::Proto::MessageReject &reject);
+  void onReject(BC::Proto::CMessageReject &reject);
 
   // Synchronization
   void downloadHeaders(xvector<BC::Proto::BlockHashTy> &&blockLocator, const BC::Proto::BlockHashTy &hashStop);
@@ -151,7 +151,7 @@ private:
 
   bool fetchQueuedBlocks(xvector<BC::Proto::BlockHashTy> &hashes);
   void scheduleBlocksDownload(uint64_t usTimeout);
-  void getData(const BC::Proto::MessageGetData &getdata);
+  void getData(const BC::Proto::CMessageGetData &getdata);
   void inv(const xvector<BC::Proto::BlockHashTy> &hashes);
 
   // Timer events are started from worker threads while RemovePeer can run on another one; a start
@@ -446,7 +446,7 @@ public:
   // Synchronization functions
   void Sync();
   void Sync(Peer *peer);
-  void Sync(Peer *peer, const xvector<BC::Proto::BlockHeaderNet> &headers, unsigned downloadTimeInMilliSeconds, HeadersMessageToken &&token);
+  void Sync(Peer *peer, const xvector<BC::Proto::CBlockHeaderNet> &headers, unsigned downloadTimeInMilliSeconds, HeadersMessageToken &&token);
   // Takes ownership of the serialized block data; header and hash are parsed from it
   void Sync(Peer *peer,
             const BC::Proto::BlockHashTy &hash,

@@ -83,14 +83,14 @@ void Io<mpz_class>::read(Ser::CReaderState &op, xmstream &src, mpz_class &data)
 
 }
 
-void serializeJsonInside(xmstream &stream, const XPM::Proto::BlockHeader &header)
+void serializeJsonInside(xmstream &stream, const XPM::Proto::CBlockHeader &header)
 {
-  std::string bnPrimeChainMultiplier = header.bnPrimeChainMultiplier.get_str();
-  serializeJson(stream, "version", header.nVersion); stream.write(',');
-  serializeJson(stream, "hashPrevBlock", header.hashPrevBlock); stream.write(',');
-  serializeJson(stream, "hashMerkleRoot", header.hashMerkleRoot); stream.write(',');
-  serializeJson(stream, "time", header.nTime); stream.write(',');
-  serializeJson(stream, "bits", header.nBits); stream.write(',');
-  serializeJson(stream, "nonce", header.nNonce); stream.write(',');
+  std::string bnPrimeChainMultiplier = header.PrimeChainMultiplier.get_str();
+  serializeJson(stream, "version", header.Version); stream.write(',');
+  serializeJson(stream, "hashPrevBlock", header.HashPrevBlock); stream.write(',');
+  serializeJson(stream, "hashMerkleRoot", header.HashMerkleRoot); stream.write(',');
+  serializeJson(stream, "time", header.Time); stream.write(',');
+  serializeJson(stream, "bits", header.Bits); stream.write(',');
+  serializeJson(stream, "nonce", header.Nonce); stream.write(',');
   serializeJson(stream, "bnPrimeChainMultiplier", bnPrimeChainMultiplier);
 }

@@ -26,8 +26,8 @@ public:
   static constexpr bool HasWitness = true;
   static constexpr uint32_t ProtocolVersion = 70015;
   static constexpr uint64_t ServicesEnabled =
-    static_cast<uint64_t>(BTC::Proto::ServicesTy::Network) |
-    static_cast<uint64_t>(BTC::Proto::ServicesTy::Witness);
+    static_cast<uint64_t>(BTC::Proto::EServices::Network) |
+    static_cast<uint64_t>(BTC::Proto::EServices::Witness);
 
   static constexpr const char *ProjectName = "Bitcoin";
   static constexpr const char *TickerName = "BTC";
@@ -48,7 +48,7 @@ namespace Common {
     int networkId;
     uint32_t magic;
     // The coin's own block type: LTC's is not the generic BlockTy the others alias
-    typename T::Block GenesisBlock;
+    typename T::CBlock GenesisBlock;
 
     // Soft&hard forks
     uint32_t BIP34Height;
@@ -82,14 +82,14 @@ namespace Common {
   bool setupChainParams(ChainParams *params, const char *network);
   static inline bool hasWitness() { return true; }
 
-  UInt<256> GetBlockProof(const BTC::Proto::BlockHeader &header, const ChainParams &chainParams);
+  UInt<256> GetBlockProof(const BTC::Proto::CBlockHeader &header, const ChainParams &chainParams);
 
   // Check functions
   static inline void checkConsensusInitialize(CheckConsensusCtx&) {}
-  bool checkConsensus(const Proto::BlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
+  bool checkConsensus(const Proto::CBlockHeader &header, CheckConsensusCtx &ctx, ChainParams &chainParams);
   // Group check: the pipeline hands over a whole chunk so a chain with a multi-way hash kernel
   // can use it. Here the group is just walked
-  static inline void checkConsensusMulti(const Proto::BlockHeader *const *headers,
+  static inline void checkConsensusMulti(const Proto::CBlockHeader *const *headers,
                                          size_t count,
                                          CheckConsensusCtx &ctx,
                                          ChainParams &chainParams,
@@ -98,16 +98,16 @@ namespace Common {
       results[i] = checkConsensus(*headers[i], ctx, chainParams);
   }
 
-  static inline void initializeValidationContext(const Proto::Block &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
+  static inline void initializeValidationContext(const Proto::CBlock &block, Proto::CBlockValidationData &ctx) { BTC::validationDataInitialize(block, ctx); }
 
-  bool checkBlockStandalone(const Proto::Block &block,
+  bool checkBlockStandalone(const Proto::CBlock &block,
                             Proto::CBlockValidationData &validation,
                             const ChainParams &chainParams,
                             std::string &error);
   // Validation data is non-const: this is where a block learns the consensus
   // exemptions its place in the chain grants it
   bool checkBlockContextual(const BlockIndex &index,
-                            const Proto::Block &block,
+                            const Proto::CBlock &block,
                             Proto::CBlockValidationData &validation,
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
