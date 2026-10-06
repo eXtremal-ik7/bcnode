@@ -32,9 +32,10 @@ private:
   void grow() { reallocate(MemorySize_ ? MemorySize_*2 : 1); }
 
   void grow(size_t newSize) {
-    // Own capacity that already fits: resize() shrinks Size_, so a reused vector would
-    // otherwise double its buffer every time a record comes back bigger than the last
-    if (Own_ && newSize <= MemorySize_)
+    // Capacity that already fits, owned or an arena's: resize() shrinks Size_, so a reused vector
+    // would otherwise double its buffer every time a record comes back bigger than the last, and
+    // an arena vector would leave room of its own for the heap
+    if (newSize <= MemorySize_)
       return;
 
     size_t newMemorySize_ = MemorySize_ ? MemorySize_*2 : 1;

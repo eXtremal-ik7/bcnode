@@ -275,15 +275,67 @@ struct CNetworkAddress {
     }
   };
 
+  // The vectors live in one arena: build() lays it out for a block about to be linked, unpack2
+  // for a stored one. A value longer than its room (uncompressed P2PK, non-standard script) moves
+  // to the heap by itself, as xvector does. Owns the arena, so it is never copied
   struct CBlockLinkedOutputs {
     xvector<CTxLinkedOutputs> Tx;
     // The utxo coin word of every spent output (creation height and flags, db/utxodb.h) by input
     // ordinal, as in the validation data: a disconnect puts the coin back exactly
     xvector<uint32_t> Meta;
 
-    // One allocation per input, so the accounting has to walk it
+    CBlockLinkedOutputs() = default;
+    CBlockLinkedOutputs(const CBlockLinkedOutputs&) = delete;
+    CBlockLinkedOutputs &operator=(const CBlockLinkedOutputs&) = delete;
+
+    ~CBlockLinkedOutputs() {
+      if (!Arena_)
+        return;
+      // An arena vector destroys none of its elements, so a value that went to the heap is
+      // freed here
+      for (CTxLinkedOutputs &tx: Tx) {
+        for (xvector<uint8_t> &txIn: tx.TxIn)
+          txIn.~xvector();
+      }
+      operator delete(Arena_);
+    }
+
+    // Every input gets valueSize bytes of room, empty until it is linked
+    template<typename CBlockTy>
+    void build(const CBlockTy &block, size_t valueSize) {
+      const size_t txCount = block.Vtx.size();
+      size_t inputs = 0;
+      for (size_t i = 1; i < txCount; i++)
+        inputs += block.Vtx[i].TxIn.size();
+
+      ArenaSize_ = txCount * sizeof(CTxLinkedOutputs) +
+                   inputs * (sizeof(xvector<uint8_t>) + sizeof(uint32_t) + valueSize);
+      uint8_t *cursor = static_cast<uint8_t*>(operator new(ArenaSize_));
+      Arena_ = cursor;
+
+      Tx.set(place<CTxLinkedOutputs>(cursor, txCount), txCount, txCount, false);
+      xvector<uint8_t> *txIn = place<xvector<uint8_t>>(cursor, inputs);
+      Meta.set(place<uint32_t>(cursor, inputs), inputs, inputs, false);
+      // the coinbase links nothing
+      for (size_t i = 1; i < txCount; i++) {
+        const size_t count = block.Vtx[i].TxIn.size();
+        Tx[i].TxIn.set(txIn, count, count, false);
+        for (size_t j = 0; j < count; j++, txIn++, cursor += valueSize)
+          txIn->set(cursor, 0, valueSize, false);
+      }
+    }
+
+    // Takes over what unpack2 returned: that head is the start of its arena
+    void adopt(CBlockLinkedOutputs *unpacked, size_t size) {
+      Tx.set(unpacked->Tx.data(), unpacked->Tx.size(), unpacked->Tx.size(), false);
+      Meta.set(unpacked->Meta.data(), unpacked->Meta.size(), unpacked->Meta.size(), false);
+      Arena_ = unpacked;
+      ArenaSize_ = size;
+    }
+
+    // Values that left the arena are allocations of their own, so the accounting walks them
     size_t memorySize() const {
-      size_t size = Tx.memoryBytes() + Meta.memoryBytes();
+      size_t size = ArenaSize_ + Tx.memoryBytes() + Meta.memoryBytes();
       for (const CTxLinkedOutputs &tx: Tx)
         size += tx.memorySize();
       return size;
@@ -294,6 +346,18 @@ struct CNetworkAddress {
       op.io(d.Tx);
       op.io(d.Meta);
     }
+
+  private:
+    template<typename T> static T *place(uint8_t *&cursor, size_t count) {
+      T *items = reinterpret_cast<T*>(cursor);
+      for (size_t i = 0; i < count; i++)
+        new (items + i) T();
+      cursor += count * sizeof(T);
+      return items;
+    }
+
+    void *Arena_ = nullptr;
+    size_t ArenaSize_ = 0;
   };
 
   struct CTxInValidationData {

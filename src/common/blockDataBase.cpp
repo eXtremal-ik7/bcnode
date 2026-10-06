@@ -9,7 +9,6 @@
 #include "db/storage.h"
 #include "common/fopen.h"
 #include "common/parallelRunner.h"
-#include "common/serializeUtils.h"
 #include "common/smallStream.h"
 #include "common/utils.h"
 #include <asyncio/asyncio.h>
@@ -55,8 +54,9 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
   ankerl::unordered_dense::set<CUnspentOutputKey> removed;
 
   assert(validationData.TxIds.size() == block.Vtx.size());
-  linkedOutputs.Tx.resize(block.Vtx.size());
-  linkedOutputs.Meta.resize(validationData.InputLocalTx.size());
+  // Built already when a run answered some of the inputs
+  if (linkedOutputs.Tx.empty())
+    linkedOutputs.build(block, sizeof(BC::Script::CUnspentOutputInfo));
 
   bool resolved = true;
   size_t inOrdinal = 0;
@@ -64,7 +64,6 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
     BC::Proto::CTransaction &tx = block.Vtx[txIdx];
     auto &txLinked = linkedOutputs.Tx[txIdx];
 
-    txLinked.TxIn.resize(tx.TxIn.size());
     for (size_t txinIdx = 0; txinIdx < tx.TxIn.size(); txinIdx++, inOrdinal++) {
       const auto &txin = tx.TxIn[txinIdx];
       auto &txinLinked = txLinked.TxIn[txinIdx];
@@ -94,11 +93,11 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
             return false;
           }
 
-          xmstream s;
+          SmallStream<128> s;
           BC::Script::parseTransactionOutput(localReferencedTx, txin.PreviousOutputIndex, s);
-          BC::Script::CUnspentOutputInfo *info = s.data<BC::Script::CUnspentOutputInfo>();
-          info->IsLocalTx = 1;
-          xvectorFromStream(std::move(s), txinLinked);
+          s.data<BC::Script::CUnspentOutputInfo>()->IsLocalTx = 1;
+          txinLinked.resize(s.sizeOf());
+          memcpy(txinLinked.begin(), s.data(), s.sizeOf());
           meta = BC::DB::utxoMeta(height, BC::DB::utxoCreationFlags(localReferencedTx, localTxIdx, txin.PreviousOutputIndex));
         } else {
           resolved = false;
@@ -325,8 +324,11 @@ intrusive_ptr<BC::Common::CIndexCacheObject> objectFromStoredBytes(BC::Common::B
 
   {
     xmstream stream(const_cast<void*>(linkedOutputsData), linkedOutputsSize);
-    if (!BTC::unserializeAndCheck(stream, object.get()->linkedOutputs()))
+    size_t size = 0;
+    BC::Proto::CBlockLinkedOutputs *unpacked = BTC::unpack2<BC::Proto::CBlockLinkedOutputs>(stream, &size);
+    if (!unpacked)
       return nullptr;
+    object.get()->linkedOutputs().adopt(unpacked, size);
   }
 
   // Same invariant as a fresh block: validation data is filled before any connect/disconnect.
@@ -604,8 +606,9 @@ static void resolveSegmentInputs(CSegment &segment, const BC::Common::ChainParam
       continue;
     }
 
-    linkedOutputs.Tx.resize(block.Vtx.size());
-    linkedOutputs.Meta.resize(validationData.InputLocalTx.size());
+    // Built already when the block was prepared before, or loaded with its links
+    if (linkedOutputs.Tx.empty())
+      linkedOutputs.build(block, sizeof(BC::Script::CUnspentOutputInfo));
 
     // An input left unresolved keeps its block out of the chain; the truncation happens after
     // the linking, so nothing else has to stop here
@@ -616,7 +619,6 @@ static void resolveSegmentInputs(CSegment &segment, const BC::Common::ChainParam
     for (size_t txIdx = 1; txIdx < block.Vtx.size(); txIdx++) {
       BC::Proto::CTransaction &tx = block.Vtx[txIdx];
       auto &txLinked = linkedOutputs.Tx[txIdx];
-      txLinked.TxIn.resize(tx.TxIn.size());
 
       for (size_t j = 0; j < tx.TxIn.size(); j++, inOrdinal++) {
         const auto &txin = tx.TxIn[j];
@@ -627,11 +629,11 @@ static void resolveSegmentInputs(CSegment &segment, const BC::Common::ChainParam
         uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];
         if (localTxIdx != BC::Proto::CBlockValidationData::NoLocalTx) {
           const BC::Proto::CTransaction &localTx = block.Vtx[localTxIdx];
-          xmstream s;
+          SmallStream<128> s;
           BC::Script::parseTransactionOutput(localTx, txin.PreviousOutputIndex, s);
-          BC::Script::CUnspentOutputInfo *info = s.data<BC::Script::CUnspentOutputInfo>();
-          info->IsLocalTx = 1;
-          xvectorFromStream(std::move(s), txinLinked);
+          s.data<BC::Script::CUnspentOutputInfo>()->IsLocalTx = 1;
+          txinLinked.resize(s.sizeOf());
+          memcpy(txinLinked.begin(), s.data(), s.sizeOf());
           meta = BC::DB::utxoMeta(height, BC::DB::utxoCreationFlags(localTx, localTxIdx, txin.PreviousOutputIndex));
           if (!coinMature(meta, height, chainParams))
             completable = false;

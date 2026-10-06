@@ -59,11 +59,14 @@ bool readTransactionAt(BC::Common::BlockIndex *index,
 
   stream.seekSet(0);
   // The engine's own form, always in Bitcoin's encoding; see the writer in blockDataBase
-  if (!BTC::unserializeAndCheck(stream, linkedOutputs)) {
+  size_t size = 0;
+  BC::Proto::CBlockLinkedOutputs *unpacked = BTC::unpack2<BC::Proto::CBlockLinkedOutputs>(stream, &size);
+  if (!unpacked) {
     result.DataCorrupted = true;
     return false;
   }
 
+  linkedOutputs.adopt(unpacked, size);
   result.LinkedOutputs = linkedOutputs.Tx[txIndex];
   return true;
 }
