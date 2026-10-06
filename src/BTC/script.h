@@ -58,9 +58,10 @@ public:
       EInvalid
     };
 
-    uint8_t Type;
-    uint8_t IsLocalTx;
-    uint8_t IsPubKeyCompressed;
+    // One byte, kept as it is by the stored form of linked outputs (BTC/proto.h)
+    uint8_t Type : 4;
+    uint8_t IsLocalTx : 1;
+    uint8_t IsPubKeyCompressed : 1;
 
     int64_t Value;
 
@@ -74,6 +75,9 @@ public:
 
     static size_t customDataOffset() { return offsetof(CUnspentOutputInfo, CustomData); }
   };
+
+  static_assert(sizeof(CUnspentOutputInfo) == 1 + 8 + 33, "the flags must pack into one byte");
+  static_assert(offsetof(CUnspentOutputInfo, Value) == BTC::Proto::CTxLinkedOutputs::AmountOffset);
 
   // Typed address, the addrdb/addrhistorydb key. Type is part of the key:
   // P2PKH and P2WPKH share the hash160 but are distinct addresses. P2PK folds

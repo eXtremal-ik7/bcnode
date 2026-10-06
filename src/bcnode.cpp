@@ -240,10 +240,7 @@ int main(int argc, char **argv)
       BC::Proto::CBlock *unpacked = BC::unpack2<BC::Proto::CBlock>(stream, &unpackedSize);
       BC::Common::CIndexCacheObject *genesisObject = new BC::Common::CIndexCacheObject(nullptr, nullptr, stream.sizeOf(), 0, unpacked, unpackedSize);
 
-      auto &outputs = genesisObject->linkedOutputs();
-      outputs.Tx.resize(context.ChainParams.GenesisBlock.Vtx.size());
-      for (size_t i = 0; i < context.ChainParams.GenesisBlock.Vtx.size(); i++)
-        outputs.Tx[i].TxIn.resize(context.ChainParams.GenesisBlock.Vtx[i].TxIn.size());
+      genesisObject->linkedOutputs().build(context.ChainParams.GenesisBlock, sizeof(BC::Script::CUnspentOutputInfo));
 
       BC::Common::initializeValidationContext(*unpacked, genesisObject->validationData());
       genesisObject->validationData().InputsResolved = true;

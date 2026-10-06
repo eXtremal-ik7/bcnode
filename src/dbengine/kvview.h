@@ -450,11 +450,13 @@ public:
   }
 
   // The pinned view and nothing else: the layer stack newest first, then the
-  // disk at its snapshot. Builders are never searched - see the note at the top
-  template<typename F>
-  bool find(const CKvGuard<CKey> &guard, const CKey &key, F &&callback) const {
+  // disk at its snapshot. Builders are never searched - see the note at the top.
+  // A value from a layer goes to 'callback', one from the disk to 'diskCallback':
+  // the disk may hold it in a form of its own
+  template<typename F, typename D>
+  bool find(const CKvGuard<CKey> &guard, const CKey &key, F &&callback, D &&diskCallback) const {
     const size_t hash = std::hash<CKey>()(key);
-    return lookup(guard, fastrange(hash, ShardsNum_), key, hash, callback);
+    return lookup(guard, fastrange(hash, ShardsNum_), key, hash, callback, diskCallback);
   }
 
   // One shard of the pinned revision, for the families that fold every layer
@@ -491,8 +493,8 @@ private:
     return 0;
   }
 
-  template<typename F>
-  bool lookup(const CKvGuard<CKey> &guard, size_t shardIndex, const CKey &key, size_t hash, F &&callback) const {
+  template<typename F, typename D>
+  bool lookup(const CKvGuard<CKey> &guard, size_t shardIndex, const CKey &key, size_t hash, F &&callback, D &&diskCallback) const {
     // Newest first, stopping on the first hit including a tombstone: otherwise
     // a deleted key resurrects from below
     const typename CKvView<CKey>::CShardView &shard = guard.view()->Shards[shardIndex];
@@ -508,7 +510,7 @@ private:
     rocksdb::Slice keySlice(reinterpret_cast<const char*>(&key), sizeof(CKey));
     std::string value;
     if (shard.Disk.get()->Db->Get(options, keySlice, &value).ok()) {
-      callback(value.data(), value.size());
+      diskCallback(value.data(), value.size());
       return true;
     }
 

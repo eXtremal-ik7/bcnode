@@ -1586,9 +1586,8 @@ bool BlockDatabase::writeBlock(BC::Common::BlockIndex *index, bool *needFlush)
     index->FileOffset = position.second;
   }
 
-  // Serialize index for storage. Linked outputs are the engine's own form - nested byte
-  // vectors, nothing of the coin inside - so they are written and read in Bitcoin's encoding
-  // whatever the coin is, and a coin with a serializer of its own needs no writer for them
+  // Serialize index for storage. Linked outputs are the engine's own form, written and read by
+  // their io in BTC/proto.h whatever the coin is
   uint32_t serializedSize;
   SmallStream<1024> data;
   BTC::serialize(data, serialized->linkedOutputs());

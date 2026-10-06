@@ -63,12 +63,18 @@ struct CUtxoCacheValue {
   uint8_t Data[sizeof(BC::Script::CUnspentOutputInfo)];
 };
 
-// On-disk value: serialized CUnspentOutputInfo followed by the uint32 coin
-// word (utxoMeta). query() hands the word out apart: every consumer above
-// sees pure CUnspentOutputInfo bytes
-class UTXODb : public CChainDb<dbengine::CKvBase<CUnspentOutputKey>> {
+// A value is CUnspentOutputInfo bytes followed by the uint32 coin word
+// (utxoMeta). On disk the record goes in the stored form of linked outputs
+// (BTC/proto.h), the word as it is; everything above the disk - the layers,
+// the cache, query() - sees the record whole. query() hands the word out apart
+struct CUtxoValueCodec {
+  static void pack(const void *data, size_t size, xmstream &out);
+  static bool unpack(const void *data, size_t size, xvector<uint8_t> &out);
+};
+
+class UTXODb : public CChainDb<dbengine::CKvBase<CUnspentOutputKey, CUtxoValueCodec>> {
 public:
-  UTXODb() : CChainDb<dbengine::CKvBase<CUnspentOutputKey>>("utxo") {}
+  UTXODb() : CChainDb<dbengine::CKvBase<CUnspentOutputKey, CUtxoValueCodec>>("utxo") {}
   virtual ~UTXODb() {}
   void *interface(int) final { return nullptr; }
   // Seqlock cache probe, then shard logs and RocksDB. Concurrent loaders

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <assert.h>
 #include <stdint.h>
 #include <string.h>
 #include <string>
@@ -269,9 +271,77 @@ struct CNetworkAddress {
       return size;
     }
 
+    // BTC's record (BTC/script.h) - flags byte, amount, union padded with zeros - is stored as its
+    // size, the flags byte, the amount as a VarInt and the rest without the zero tail; any other
+    // record comes back byte for byte all the same. The utxo database stores this form too
+    static constexpr size_t AmountOffset = 1;
+    static constexpr size_t TailOffset = AmountOffset + sizeof(uint64_t);
+
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
-      op.io(d.TxIn);
+      if constexpr (Op::Writing) {
+        op.io(VarSize{d.TxIn.size()});
+        for (const xvector<uint8_t> &txIn: d.TxIn)
+          writeOutput(op, txIn.data(), txIn.size());
+      } else {
+        VarSize count;
+        op.io(count);
+        // Every value takes several bytes at least: a count past the end is a broken record
+        if (count.Value > op.Src.remaining()) {
+          op.fail("linked outputs are longer than the data");
+          return;
+        }
+
+        // Null while measuring: the walk then only counts the arena
+        xvector<uint8_t> *values = op.prepare(d.TxIn, count.Value);
+        for (uint64_t i = 0; i < count.Value && !op.failed(); i++)
+          readOutput(op, values ? &values[i] : nullptr);
+      }
+    }
+
+    template<typename Op>
+    static void writeOutput(Op &op, const uint8_t *data, size_t size) {
+      assert(size >= TailOffset);
+      uint64_t amount;
+      memcpy(&amount, data + AmountOffset, sizeof(amount));
+      size_t stored = size;
+      while (stored > TailOffset && !data[stored - 1])
+        stored--;
+
+      op.io(VarSize{size});
+      op.put(data[0]);
+      op.varint(amount);
+      op.io(xvector<uint8_t>(const_cast<uint8_t*>(data) + TailOffset, stored - TailOffset));
+    }
+
+    // 'value' is null while measuring, its room comes from the arena under unpack2
+    template<typename Op>
+    static void readOutput(Op &op, xvector<uint8_t> *value) {
+      VarSize size;
+      uint8_t flags = 0;
+      uint64_t amount = 0;
+      VarSize tail;
+      op.io(size);
+      op.get(flags);
+      op.varint(amount);
+      op.io(tail);
+      const uint8_t *bytes = op.Src.seek(tail.Value);
+      op.check(bytes && TailOffset + tail.Value <= size.Value, "broken linked output");
+      if (op.failed())
+        return;
+
+      uint8_t *memory = op.arena(size.Value);
+      if (!value)
+        return;
+      if (memory)
+        value->set(memory, size.Value, size.Value, false);
+      else
+        value->resize(size.Value);
+      uint8_t *data = value->data();
+      data[0] = flags;
+      memcpy(data + AmountOffset, &amount, sizeof(amount));
+      memcpy(data + TailOffset, bytes, tail.Value);
+      memset(data + TailOffset + tail.Value, 0, size.Value - TailOffset - tail.Value);
     }
   };
 
@@ -341,10 +411,37 @@ struct CNetworkAddress {
       return size;
     }
 
+    // The coin words go as distances below the largest of the block, written once: spent coins
+    // are mostly young, so a word takes a byte or two instead of four
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
       op.io(d.Tx);
-      op.io(d.Meta);
+      if constexpr (Op::Writing) {
+        const uint32_t top = d.Meta.empty() ? 0 : *std::max_element(d.Meta.begin(), d.Meta.end());
+        op.io(VarSize{d.Meta.size()});
+        op.varint(top);
+        for (uint32_t meta: d.Meta)
+          op.varint(top - meta);
+      } else {
+        VarSize count;
+        uint32_t top = 0;
+        op.io(count);
+        op.varint(top);
+        if (count.Value > op.Src.remaining()) {
+          op.fail("coin words are longer than the data");
+          return;
+        }
+
+        // Null while measuring
+        uint32_t *meta = op.prepare(d.Meta, count.Value);
+        for (uint64_t i = 0; i < count.Value && !op.failed(); i++) {
+          uint32_t distance = 0;
+          op.varint(distance);
+          op.check(distance <= top, "broken coin word");
+          if (meta)
+            meta[i] = top - distance;
+        }
+      }
     }
 
   private:

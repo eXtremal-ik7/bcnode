@@ -8,12 +8,21 @@
 // The plain key-value fold over the store: the newest record of a key wins, a
 // lookup stops at the first layer that has it. Merge and array replace this
 // one half with their own.
+//
+// CValueCodec, when given, is the form of a value on disk: pack() on the way
+// into rocksdb, unpack() on the way out; the layers above hold values as they
+// were put. Its interface:
+//   static void pack(const void *data, size_t size, xmstream &out);
+//   static bool unpack(const void *data, size_t size, xvector<uint8_t> &out);
 
 #include "dbengine/kvstore.h"
+#include "common/xvector.h"
+#include "p2putils/xmstream.h"
+#include <type_traits>
 
 namespace dbengine {
 
-template<typename CKey>
+template<typename CKey, typename CValueCodec = void>
 class CKvBase : public CKvStore<CKey> {
 public:
   CKvBase(const std::string &name) : CKvStore<CKey>(name) {}
@@ -28,7 +37,16 @@ protected:
   template<typename F>
   bool find(const CKey &key, F &&callback) const {
     CKvGuard<CKey> guard = this->Engine_.guard();
-    return this->Engine_.find(guard, key, callback);
+    if constexpr (std::is_void_v<CValueCodec>) {
+      return this->Engine_.find(guard, key, callback, callback);
+    } else {
+      return this->Engine_.find(guard, key, callback, [this, &callback](const void *data, size_t size) {
+        static thread_local xvector<uint8_t> value;
+        if (!CValueCodec::unpack(data, size, value))
+          LOG_F(FATAL, "%s: a value on disk does not unpack", this->Name_.c_str());
+        callback(value.data(), value.size());
+      });
+    }
   }
 
   // One sealed layer, one batch, in memcmp order of keys (what the memtable
@@ -39,6 +57,7 @@ protected:
 
     rocksdb::WriteBatch batch(layer->BatchBytesBound + 64);
     this->putStamp(batch, stamp);
+    xmstream packed;
 
     size_t written = 0;
     size_t annihilated = 0;
@@ -56,7 +75,13 @@ protected:
 
         rocksdb::Slice keySlice(reinterpret_cast<const char*>(ref.Key), sizeof(CKey));
         if (!rec->tombstone()) {
-          batch.Put(keySlice, rocksdb::Slice(static_cast<const char*>(rec->payload()), rec->size()));
+          if constexpr (std::is_void_v<CValueCodec>) {
+            batch.Put(keySlice, rocksdb::Slice(static_cast<const char*>(rec->payload()), rec->size()));
+          } else {
+            packed.reset();
+            CValueCodec::pack(rec->payload(), rec->size(), packed);
+            batch.Put(keySlice, rocksdb::Slice(packed.data<const char>(), packed.sizeOf()));
+          }
           written++;
         } else if (rec->mayExistBelow()) {
           batch.Delete(keySlice);

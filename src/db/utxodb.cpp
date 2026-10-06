@@ -15,6 +15,35 @@ namespace DB {
 
 static const char *CacheDumpFileName = "cache.dat";
 
+void CUtxoValueCodec::pack(const void *data, size_t size, xmstream &out)
+{
+  const uint8_t *bytes = static_cast<const uint8_t*>(data);
+  const size_t recordSize = size - sizeof(uint32_t);
+  uint32_t meta;
+  memcpy(&meta, bytes + recordSize, sizeof(meta));
+
+  BTC::Writer op{out};
+  BC::Proto::CTxLinkedOutputs::writeOutput(op, bytes, recordSize);
+  op.put(meta);
+}
+
+bool CUtxoValueCodec::unpack(const void *data, size_t size, xvector<uint8_t> &out)
+{
+  xmstream in(const_cast<void*>(data), size);
+  Ser::CIoStatus status;
+  BTC::Reader op(in, status);
+  BC::Proto::CTxLinkedOutputs::readOutput(op, &out);
+  uint32_t meta = 0;
+  op.get(meta);
+  if (status.Failed || in.eof() || in.remaining())
+    return false;
+
+  const size_t recordSize = out.size();
+  out.resize(recordSize + sizeof(meta));
+  memcpy(out.data() + recordSize, &meta, sizeof(meta));
+  return true;
+}
+
 // The cache is mutated synchronously with every connect/disconnect
 // (including the fast log-pop paths), so it never holds a spent output: a
 // positive needs no cross-check against the shard log
@@ -98,6 +127,7 @@ void UTXODb::warmupFromDb()
   uint64_t scanned = 0;
   unsigned sinceMaintain = 0;
 
+  xvector<uint8_t> value;
   for (size_t shardIdx = 0; shardIdx < BaseCfg_.ShardsNum; shardIdx++) {
     std::unique_ptr<rocksdb::Iterator> It(OnDiskStorage_[shardIdx]->NewIterator(rocksdb::ReadOptions()));
     for (It->SeekToFirst(); It->Valid(); It->Next()) {
@@ -105,7 +135,7 @@ void UTXODb::warmupFromDb()
       rocksdb::Slice valueSlice = It->value();
       // service records (stamp, base configuration) have short keys
       if (keySlice.size() != sizeof(CUnspentOutputKey) ||
-          valueSlice.size() < sizeof(BC::Script::CUnspentOutputInfo) + sizeof(uint32_t))
+          !CUtxoValueCodec::unpack(valueSlice.data(), valueSlice.size(), value))
         continue;
 
       // field-wise copy: the key type is not trivially copyable, but the
@@ -114,8 +144,8 @@ void UTXODb::warmupFromDb()
       memcpy(key.Tx.begin(), keySlice.data(), sizeof(BC::Proto::TxHashTy));
       memcpy(&key.Index, keySlice.data() + sizeof(BC::Proto::TxHashTy), sizeof(uint32_t));
       uint32_t meta;
-      memcpy(&meta, valueSlice.data() + valueSlice.size() - sizeof(uint32_t), sizeof(uint32_t));
-      cacheAdd(key, valueSlice.data(), valueSlice.size() - sizeof(uint32_t), meta);
+      memcpy(&meta, value.data() + value.size() - sizeof(uint32_t), sizeof(uint32_t));
+      cacheAdd(key, value.data(), value.size() - sizeof(uint32_t), meta);
       scanned++;
 
       // the floor eviction keeps the newest entries as the scan streams by
