@@ -557,7 +557,8 @@ struct CNetworkAddress {
     uint64_t Nonce;
     std::string UserAgent;
     uint32_t StartHeight;
-    bool Relay;
+    // Not on the wire before 70001 (nor in XPM's version), and Core reads it as true then
+    bool Relay = true;
 
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {

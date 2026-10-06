@@ -8,11 +8,12 @@
 #include "common/smallStream.h"
 #include "db/storage.h"
 #include <asyncio/socket.h>
+#include <cstring>
 
 namespace BC {
 namespace Network {
 
-std::unordered_map<std::string, Peer::MessageTy> Peer::MessageTypeMap_ = {
+const std::unordered_map<std::string_view, Peer::MessageTy> Peer::MessageTypeMap_ = {
   {"addr", Peer::MessageTy::addr},
   {"block", Peer::MessageTy::block},
   {"getaddr", Peer::MessageTy::getaddr},
@@ -176,7 +177,9 @@ void Peer::onConnect(AsyncOpStatus status)
   msg.Nonce = ParentNode->localHostNonce();
   msg.UserAgent = BC::Configuration::UserAgent;
   msg.StartHeight = BlockIndex_.best()->Height;
-  msg.Relay = 1;
+  // From the config, not from the mempool switching on after sync: Core reads the flag once, so the
+  // peers connected during sync would never announce a transaction
+  msg.Relay = ParentNode->mempoolEnabled();
 
   SmallStream<16384> stream;
   BC::serialize(stream, msg);
@@ -195,7 +198,9 @@ void Peer::onMessage(AsyncOpStatus status)
   bool heavyOperation = false;
   bool heavyOperationStarted = false;
   unsigned numberOfMessages = static_cast<unsigned>(MessageTy::last);
-  MessageTy command = MessageTypeMap_[Command];
+  // A name of 12 characters fills the field and has no terminating NUL
+  auto known = MessageTypeMap_.find(std::string_view(Command, strnlen(Command, sizeof(Command))));
+  MessageTy command = known != MessageTypeMap_.end() ? known->second : MessageTy::unknown;
 
   // Update receive statistics
   unsigned commandId = static_cast<unsigned>(command);
@@ -300,7 +305,7 @@ void Peer::onMessage(AsyncOpStatus status)
 
     // Unknown command
     default:
-      LOG_F(INFO, "Ignore command %s from %s", Command, Name.c_str());
+      LOG_F(INFO, "Ignore command %.12s from %s", Command, Name.c_str());
       aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
       break;
   }
@@ -356,12 +361,13 @@ void Peer::onVersion(BC::Proto::CMessageVersion &version)
   StartHeight = version.StartHeight;
   ProtocolVersion = version.Version;
   Services = version.Services;
+  Relay_ = version.Relay;
   UserAgent_ = version.UserAgent;
 
   VersionReceived.store(true, std::memory_order_release);
   finishHandshake();
 
-  LOG_F(INFO, "Received version message from %s; user agent: %s, protocol: %u, start height: %u", Name.c_str(), version.UserAgent.c_str(), version.Version, StartHeight.load());
+  LOG_F(INFO, "Received version message from %s; user agent: %s, protocol: %u, start height: %u, relay: %u", Name.c_str(), version.UserAgent.c_str(), version.Version, StartHeight.load(), static_cast<unsigned>(Relay_));
   sendMessage(MessageTy::verack, nullptr, 0);
 }
 

@@ -19,6 +19,7 @@
 #include <chrono>
 #include <functional>
 #include <set>
+#include <string_view>
 
 
 struct BCNodeContext;
@@ -99,7 +100,8 @@ private:
   };
 
   static constexpr const char *messageName(MessageTy type);
-  static std::unordered_map<std::string, MessageTy> MessageTypeMap_;
+  // Read from every worker at once: lookups only, an unknown command is never inserted
+  static const std::unordered_map<std::string_view, MessageTy> MessageTypeMap_;
   static std::atomic<unsigned> ActiveThreads_;
   static tbb::concurrent_queue<InternalMessage*> MessageQueue_;
 
@@ -233,6 +235,8 @@ private:
   std::atomic<uint32_t> StartHeight = 0;
   uint32_t ProtocolVersion = 0;
   uint64_t Services = 0;
+  // The peer wants transaction announcements (version.Relay)
+  bool Relay_ = true;
   std::string UserAgent_;
 
   // Downloading area
@@ -335,15 +339,17 @@ private:
       }
   }
 
+  // The message and its vectors in one allocation, as for headers: InternalMessage frees it with
+  // operator delete, and no destructor has to run
   template<typename Msg> inline bool pushInternalMessage(const char *cmd, MessageTy type) {
-    Msg *msg = static_cast<Msg*>(operator new(sizeof(Msg)));
-    if (unserializeAndCheck(ReceiveStream, *msg)) {
+    size_t size = 0;
+    Msg *msg = BC::unpack2<Msg>(ReceiveStream, &size);
+    if (msg) {
       aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
-      MessageQueue_.push(new InternalMessage(this, type, msg, sizeof(Msg), 0));
+      MessageQueue_.push(new InternalMessage(this, type, msg, size, 0));
       return true;
     } else {
       LOG_F(INFO, "Can't unserialize message %s", cmd);
-      operator delete(msg);
       return false;
     }
   }
@@ -373,6 +379,7 @@ private:
   unsigned WorkerThreadsNum_;
   unsigned OutgoingConnectionsLimit_;
   unsigned IncomingConnectionsLimit_;
+  bool MempoolEnabled_ = false;
   tbb::concurrent_unordered_map<HostAddress, AtomicPeerPtr*, HostAddressCompare, HostAddressEqual> Peers;
 
   aioObject *bcNodeSocket = nullptr;
@@ -433,6 +440,7 @@ public:
     WorkerThreadsNum_ = workerThreadsNum;
     OutgoingConnectionsLimit_ = outgoingConnectionsLimit;
     IncomingConnectionsLimit_ = incomingConnectionsLimit;
+    MempoolEnabled_ = cfg->lookupBoolean("mempool", "enabled", false);
     SyncEvent = newUserEvent(base, 0, SyncCb, this);
     RAND_bytes(reinterpret_cast<unsigned char*>(&LocalHostNonce_), sizeof(LocalHostNonce_));
   }
@@ -450,6 +458,7 @@ public:
   bool StartBCNodeServer(HostAddress address) { return StartTcpServer(address, "BCNode", &bcNodeSocket, bcnodeAcceptCb); }
 
   uint64_t localHostNonce() { return LocalHostNonce_; }
+  bool mempoolEnabled() const { return MempoolEnabled_; }
 
   // Synchronization functions
   void Sync();
