@@ -44,6 +44,7 @@ struct CSegment {
     uint32_t Object;
     uint32_t TxIdx;
     uint32_t InIdx;
+    uint32_t Ordinal; // block-wide, where its coin word goes
   };
 
   std::vector<CObject> Objects;

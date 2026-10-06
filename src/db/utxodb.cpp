@@ -15,21 +15,16 @@ namespace DB {
 
 static const char *CacheDumpFileName = "cache.dat";
 
-// (creationHeight << 1) | isCoinbase, appended to every on-disk value
-static inline uint32_t packHeight(uint32_t height, bool isCoinbase)
-{
-  return (height << 1) | (isCoinbase ? 1 : 0);
-}
-
 // The cache is mutated synchronously with every connect/disconnect
 // (including the fast log-pop paths), so it never holds a spent output: a
 // positive needs no cross-check against the shard log
-bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result, bool cacheOnly) const
+bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result, uint32_t &meta, bool cacheOnly) const
 {
   if (Cache_.enabled()) {
-    if (Cache_.lookupConcurrent(txid.begin(), txoutIdx, [&result](const CUtxoCacheValue &value) {
+    if (Cache_.lookupConcurrent(txid.begin(), txoutIdx, [&result, &meta](const CUtxoCacheValue &value) {
           result.resize(sizeof(value.Data));
           memcpy(result.begin(), value.Data, sizeof(value.Data));
+          meta = utxoMeta(value.Height, value.Flags);
         }))
       return true;
     if (cacheOnly)
@@ -39,10 +34,11 @@ bool UTXODb::query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvecto
   CUnspentOutputKey key;
   key.Tx = txid;
   key.Index = txoutIdx;
-  return this->find(key, [&result](const void *d, size_t s) {
-    // strip the packed height suffix, consumers expect pure CUnspentOutputInfo
+  return this->find(key, [&result, &meta](const void *d, size_t s) {
+    // strip the coin word suffix, consumers expect pure CUnspentOutputInfo
     result.resize(s - sizeof(uint32_t));
     memcpy(result.begin(), d, s - sizeof(uint32_t));
+    memcpy(&meta, static_cast<const uint8_t*>(d) + s - sizeof(uint32_t), sizeof(uint32_t));
   });
 }
 
@@ -117,9 +113,9 @@ void UTXODb::warmupFromDb()
       CUnspentOutputKey key;
       memcpy(key.Tx.begin(), keySlice.data(), sizeof(BC::Proto::TxHashTy));
       memcpy(&key.Index, keySlice.data() + sizeof(BC::Proto::TxHashTy), sizeof(uint32_t));
-      uint32_t packed;
-      memcpy(&packed, valueSlice.data() + valueSlice.size() - sizeof(uint32_t), sizeof(uint32_t));
-      cacheAdd(key, valueSlice.data(), valueSlice.size() - sizeof(uint32_t), packed >> 1, packed & 1);
+      uint32_t meta;
+      memcpy(&meta, valueSlice.data() + valueSlice.size() - sizeof(uint32_t), sizeof(uint32_t));
+      cacheAdd(key, valueSlice.data(), valueSlice.size() - sizeof(uint32_t), meta);
       scanned++;
 
       // the floor eviction keeps the newest entries as the scan streams by
@@ -207,7 +203,6 @@ void UTXODb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
         }
       }
 
-      const uint32_t packed = packHeight(height, isCoinbase);
       // A coinbase below BIP34 may repeat an earlier one and land on its live coin.
       // Such a write forfeits window annihilation: the key may already exist below, and
       // a later spend annihilated inside the window would leave the older value there
@@ -221,11 +216,12 @@ void UTXODb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
         const void *info = validationData.outputData(outOrdinal, infoSize);
         if (infoSize) {
           key.Index = static_cast<uint32_t>(j);
+          const uint32_t meta = utxoMeta(height, utxoCreationFlags(tx, i, j));
           if (mayRepeat)
-            writer.putRestore(key, info, infoSize, &packed, sizeof(packed));
+            writer.putRestore(key, info, infoSize, &meta, sizeof(meta));
           else
-            writer.putNew(key, info, infoSize, &packed, sizeof(packed));
-          cacheAdd(key, info, infoSize, height, isCoinbase);
+            writer.putNew(key, info, infoSize, &meta, sizeof(meta));
+          cacheAdd(key, info, infoSize, meta);
         }
       }
     }
@@ -250,12 +246,7 @@ void UTXODb::disconnect(const BC::Common::BlockIndex *index,
   dbengine::CKvWriter<CUnspentOutputKey> writer = liveWriter();
   assert(validationData.TxIds.size() == block.Vtx.size());
   assert(linkedOutputs.Tx.size() == block.Vtx.size());
-  // The creation height of a restored output is unknown here; the height of
-  // the disconnected block is an upper bound (and its coinbase flag is
-  // unknowable, but a coinbase spend sits 100+ blocks below any reorg). It
-  // skews eviction aging and maturity metadata of reorged spends only
-  const uint32_t height = index->Height;
-  const uint32_t packed = packHeight(height, false);
+  assert(linkedOutputs.Meta.size() == validationData.InputLocalTx.size());
 
   if (Cache_.enabled())
     Cache_.maintain();
@@ -282,9 +273,11 @@ void UTXODb::disconnect(const BC::Common::BlockIndex *index,
         key.Tx = txIn.PreviousOutputHash;
         key.Index = txIn.PreviousOutputIndex;
         // The coin this input spent was created by a block below and may well
-        // be there on disk: a later spend of it must leave a real tombstone
-        writer.putRestore(key, linkedTxin.data(), linkedTxin.size(), &packed, sizeof(packed));
-        cacheAdd(key, linkedTxin.data(), linkedTxin.size(), height, false);
+        // be there on disk: a later spend of it must leave a real tombstone.
+        // It goes back with its own height and flags, marked restored
+        const uint32_t meta = linkedOutputs.Meta[inOrdinal] | EUtxoRestored;
+        writer.putRestore(key, linkedTxin.data(), linkedTxin.size(), &meta, sizeof(meta));
+        cacheAdd(key, linkedTxin.data(), linkedTxin.size(), meta);
       }
     }
 

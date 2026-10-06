@@ -25,16 +25,38 @@ struct BlockPosition {
   uint32_t Size;
 };
 
+// Maturity of the spent coin: a coinbase, and an MWEB peg-out, spent too early. meta is its coin
+// word
+static bool coinMature(uint32_t meta, uint32_t spendHeight, const BC::Common::ChainParams &chainParams)
+{
+  const uint32_t height = BC::DB::utxoMetaHeight(meta);
+  const uint32_t depth = spendHeight - height;
+  const uint8_t flags = BC::DB::utxoMetaFlags(meta);
+  if ((flags & BC::DB::EUtxoCoinbase) && depth < BC::Common::coinbaseMaturity(chainParams, height))
+    return false;
+  if ((flags & BC::DB::EUtxoPegout) && depth < BC::DB::UtxoPegoutMaturity)
+    return false;
+  return true;
+}
+
+// Linked outputs keep what the coin was created with: the restored mark is a fact about the
+// database at lookup time, and the same block must link to the same bytes on every node
+static inline uint32_t linkedMeta(uint32_t meta)
+{
+  return meta & ~static_cast<uint32_t>(BC::DB::EUtxoRestored);
+}
+
 // Every input still empty: from the database, else from an output of this very block. A worker
 // runs it on a block outside a run, where the state it needs may not exist yet - what it could
 // not answer InputsResolved reports. The connect thread runs it on exactly those, and there the
 // state is the one the block connects to
-static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::CBlock &block, const BC::DB::UTXODb &db)
+static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::CBlock &block, uint32_t height, const BC::DB::UTXODb &db)
 {
   ankerl::unordered_dense::set<CUnspentOutputKey> removed;
 
   assert(validationData.TxIds.size() == block.Vtx.size());
   linkedOutputs.Tx.resize(block.Vtx.size());
+  linkedOutputs.Meta.resize(validationData.InputLocalTx.size());
 
   bool resolved = true;
   size_t inOrdinal = 0;
@@ -46,13 +68,15 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
     for (size_t txinIdx = 0; txinIdx < tx.TxIn.size(); txinIdx++, inOrdinal++) {
       const auto &txin = tx.TxIn[txinIdx];
       auto &txinLinked = txLinked.TxIn[txinIdx];
+      uint32_t &meta = linkedOutputs.Meta[inOrdinal];
 
       // Answered by the run: from the same block, or from an earlier block of it
       if (!txinLinked.empty())
         continue;
 
-      if (db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, txinLinked)) {
+      if (db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, txinLinked, meta)) {
         // Unspent output found
+        meta = linkedMeta(meta);
       } else {
         // Try find in local block (topology precomputed in validation data)
         uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];
@@ -75,6 +99,7 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
           BC::Script::CUnspentOutputInfo *info = s.data<BC::Script::CUnspentOutputInfo>();
           info->IsLocalTx = 1;
           xvectorFromStream(std::move(s), txinLinked);
+          meta = BC::DB::utxoMeta(height, BC::DB::utxoCreationFlags(localReferencedTx, localTxIdx, txin.PreviousOutputIndex));
         } else {
           resolved = false;
         }
@@ -90,20 +115,34 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
 // The one point where the database holds the state the segment was built on. Everything the
 // preparation could not answer is looked up here in one wave; an input that finds nothing makes
 // its block invalid. The wave is the critical path, so it takes the pool before preparation
-static void resolveSegmentResidual(CSegment &segment, const BC::DB::UTXODb &db, CParallelRunner &runner)
+static void resolveSegmentResidual(CSegment &segment, const BC::DB::UTXODb &db, const BC::Common::ChainParams &chainParams, CParallelRunner &runner)
 {
   const std::vector<CSegment::CInput> &inputs = segment.Inputs;
 
-  runner.run(inputs.size(), [&inputs, &segment, &db](size_t begin, size_t end) {
+  runner.run(inputs.size(), [&inputs, &segment, &db, &chainParams](size_t begin, size_t end) {
     for (size_t i = begin; i < end; i++) {
       const CSegment::CInput &input = inputs[i];
-      BC::Common::CIndexCacheObject *object = segment.Objects[input.Object].Object.get();
+      const CSegment::CObject &entry = segment.Objects[input.Object];
+      BC::Common::CIndexCacheObject *object = entry.Object.get();
       const auto &txin = object->block()->Vtx[input.TxIdx].TxIn[input.InIdx];
       auto &slot = object->linkedOutputs().Tx[input.TxIdx].TxIn[input.InIdx];
+      uint32_t &meta = object->linkedOutputs().Meta[input.Ordinal];
       // Emptied first: an empty slot is the only thing that means "the coin is not there", and a
       // block prepared twice still carries what an earlier wave found
       slot.resize(0);
-      db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, slot);
+      if (!db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, slot, meta))
+        continue;
+      meta = linkedMeta(meta);
+      // An immature coin is not there for this block either
+      if (!coinMature(meta, entry.Index->Height, chainParams)) {
+        LOG_F(ERROR,
+              "Block %s (%u) spends immature coin %s:%u",
+              entry.Index->Header.GetHash().getHexLE().c_str(),
+              entry.Index->Height,
+              txin.PreviousOutputHash.getHexLE().c_str(),
+              txin.PreviousOutputIndex);
+        slot.resize(0);
+      }
     }
   }, /*priority=*/true);
 
@@ -213,11 +252,21 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
   // the block connects to. An input still empty means the coin does not exist or is taken
   if (!validationData.InputsResolved &&
       (validationData.InputsInvalid ||
-       !resolveBlockInputs(linkedOutputs, validationData, block, storage.utxodb()))) {
+       !resolveBlockInputs(linkedOutputs, validationData, block, index->Height, storage.utxodb()))) {
     LOG_F(ERROR,
           "Block %s validation failed (non-existent utxo)",
           block.Header.GetHash().getHexLE().c_str());
     return false;
+  }
+
+  for (uint32_t meta: linkedOutputs.Meta) {
+    if (!coinMature(meta, index->Height, chainParams)) {
+      LOG_F(ERROR,
+            "Block %s (%u) spends an immature coin",
+            index->Header.GetHash().getHexLE().c_str(),
+            index->Height);
+      return false;
+    }
   }
 
   std::string error;
@@ -457,7 +506,7 @@ void markOrdinal(xvector<uint64_t> &bits, size_t ordinal, size_t count)
 // the segment, and anything older goes on the residual list. Nothing is looked up - that state
 // does not exist yet. A pair inside the segment is marked on both sides and skipped by the
 // databases, which holds only because the segment connects as one operation
-static void resolveSegmentInputs(CSegment &segment)
+static void resolveSegmentInputs(CSegment &segment, const BC::Common::ChainParams &chainParams)
 {
   const size_t count = segment.Objects.size();
 
@@ -556,11 +605,13 @@ static void resolveSegmentInputs(CSegment &segment)
     }
 
     linkedOutputs.Tx.resize(block.Vtx.size());
+    linkedOutputs.Meta.resize(validationData.InputLocalTx.size());
 
     // An input left unresolved keeps its block out of the chain; the truncation happens after
     // the linking, so nothing else has to stop here
     bool completable = true;
     size_t inOrdinal = 0;
+    const uint32_t height = segment.Objects[pos].Index->Height;
 
     for (size_t txIdx = 1; txIdx < block.Vtx.size(); txIdx++) {
       BC::Proto::CTransaction &tx = block.Vtx[txIdx];
@@ -570,15 +621,20 @@ static void resolveSegmentInputs(CSegment &segment)
       for (size_t j = 0; j < tx.TxIn.size(); j++, inOrdinal++) {
         const auto &txin = tx.TxIn[j];
         auto &txinLinked = txLinked.TxIn[j];
+        uint32_t &meta = linkedOutputs.Meta[inOrdinal];
 
         // Spend of an output of this very block; the topology pass checked it
         uint32_t localTxIdx = validationData.InputLocalTx[inOrdinal];
         if (localTxIdx != BC::Proto::CBlockValidationData::NoLocalTx) {
+          const BC::Proto::CTransaction &localTx = block.Vtx[localTxIdx];
           xmstream s;
-          BC::Script::parseTransactionOutput(block.Vtx[localTxIdx], txin.PreviousOutputIndex, s);
+          BC::Script::parseTransactionOutput(localTx, txin.PreviousOutputIndex, s);
           BC::Script::CUnspentOutputInfo *info = s.data<BC::Script::CUnspentOutputInfo>();
           info->IsLocalTx = 1;
           xvectorFromStream(std::move(s), txinLinked);
+          meta = BC::DB::utxoMeta(height, BC::DB::utxoCreationFlags(localTx, localTxIdx, txin.PreviousOutputIndex));
+          if (!coinMature(meta, height, chainParams))
+            completable = false;
           continue;
         }
 
@@ -608,6 +664,12 @@ static void resolveSegmentInputs(CSegment &segment)
 
           txinLinked.resize(infoSize);
           memcpy(txinLinked.begin(), info, infoSize);
+          meta = BC::DB::utxoMeta(segment.Objects[slot->Block].Index->Height,
+                                  BC::DB::utxoCreationFlags(creatorTx, slot->TxIdx, txin.PreviousOutputIndex));
+          if (!coinMature(meta, height, chainParams)) {
+            completable = false;
+            continue;
+          }
           markOrdinal(creatorData.OutputSpentInBatch, ordinal, creatorData.OutputSpentLocally.size() * 64);
           markOrdinal(validationData.InputSpendsInBatch, inOrdinal, validationData.InputLocalTx.size());
           continue;
@@ -617,7 +679,8 @@ static void resolveSegmentInputs(CSegment &segment)
         uint32_t inputIdx = static_cast<uint32_t>(segment.Inputs.size());
         segment.Inputs.push_back(CSegment::CInput{static_cast<uint32_t>(pos),
                                                   static_cast<uint32_t>(txIdx),
-                                                  static_cast<uint32_t>(j)});
+                                                  static_cast<uint32_t>(j),
+                                                  static_cast<uint32_t>(inOrdinal)});
         if (!spendInsert(outpointHash(txin.PreviousOutputHash, txin.PreviousOutputIndex), inputIdx)) {
           segment.Inputs.pop_back();
           completable = false;
@@ -828,7 +891,7 @@ bool prepareSegment(BC::Common::ChainParams &chainParams,
     }
   }
 
-  resolveSegmentInputs(segment);
+  resolveSegmentInputs(segment, chainParams);
 
   // Everything the blocks of this segment will hold until they connect is built now
   for (const CSegment::CObject &entry: segment.Objects) {
@@ -852,11 +915,12 @@ bool prepareSegment(BC::Common::ChainParams &chainParams,
     const BC::DB::UTXODb &db = storage.utxodb();
     runner.run(segment.Inputs.size(), [&segment, &db](size_t begin, size_t end) {
       xvector<uint8_t> value;
+      uint32_t meta;
       for (size_t i = begin; i < end; i++) {
         const CSegment::CInput &input = segment.Inputs[i];
         BC::Common::CIndexCacheObject *object = segment.Objects[input.Object].Object.get();
         const auto &txin = object->block()->Vtx[input.TxIdx].TxIn[input.InIdx];
-        db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, value, /*cacheOnly=*/true);
+        db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, value, meta, /*cacheOnly=*/true);
       }
     });
   }
@@ -886,7 +950,7 @@ bool connectSegment(BlockInMemoryIndex &blockIndex,
   }
 
   // Only now does the database hold the state the segment was built on
-  resolveSegmentResidual(segment, storage.utxodb(), runner);
+  resolveSegmentResidual(segment, storage.utxodb(), chainParams, runner);
 
   for (size_t i = 0; i < segment.Objects.size(); i++) {
     if (!segment.Objects[i].Completable) {

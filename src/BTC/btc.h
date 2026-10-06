@@ -86,6 +86,8 @@ namespace Common {
 
   bool setupChainParams(ChainParams *params, const char *network);
   static inline bool hasWitness() { return true; }
+  // Blocks a coinbase output waits before it may be spent (Core's COINBASE_MATURITY)
+  static inline uint32_t coinbaseMaturity(const ChainParams&, uint32_t) { return 100; }
 
   UInt<256> GetBlockProof(const BTC::Proto::CBlockHeader &header, const ChainParams &chainParams);
 

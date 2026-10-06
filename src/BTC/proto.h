@@ -277,10 +277,13 @@ struct CNetworkAddress {
 
   struct CBlockLinkedOutputs {
     xvector<CTxLinkedOutputs> Tx;
+    // The utxo coin word of every spent output (creation height and flags, db/utxodb.h) by input
+    // ordinal, as in the validation data: a disconnect puts the coin back exactly
+    xvector<uint32_t> Meta;
 
     // One allocation per input, so the accounting has to walk it
     size_t memorySize() const {
-      size_t size = Tx.memoryBytes();
+      size_t size = Tx.memoryBytes() + Meta.memoryBytes();
       for (const CTxLinkedOutputs &tx: Tx)
         size += tx.memorySize();
       return size;
@@ -289,6 +292,7 @@ struct CNetworkAddress {
     template<typename Op, typename Self>
     static void io(Op &op, Self &d) {
       op.io(d.Tx);
+      op.io(d.Meta);
     }
   };
 

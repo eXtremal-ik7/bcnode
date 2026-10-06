@@ -19,21 +19,53 @@ using CUnspentOutputKey = COutpointKey;
 namespace BC {
 namespace DB {
 
+// Coin metadata beside every output: maturity, BIP68 and the age rule of
+// readers that lag behind the database
+enum EUtxoFlag : uint8_t {
+  EUtxoCoinbase = 1,
+  // An MWEB peg-out: a HogEx output past the first (the HogAddr)
+  EUtxoPegout = 2,
+  // Put back by a disconnect, so it may be spent on the branch a lagging reader stands on
+  EUtxoRestored = 4
+};
+
+// MWEB peg-out maturity; the flag exists only on chains with an extension block
+static constexpr uint32_t UtxoPegoutMaturity = 6;
+
+// The coin word: (creationHeight << 3) | EUtxoFlag. The on-disk suffix and the
+// linked outputs carry it as is
+static constexpr unsigned UtxoFlagBits = 3;
+static inline uint32_t utxoMeta(uint32_t height, unsigned flags) { return (height << UtxoFlagBits) | flags; }
+static inline uint32_t utxoMetaHeight(uint32_t meta) { return meta >> UtxoFlagBits; }
+static inline uint8_t utxoMetaFlags(uint32_t meta) { return static_cast<uint8_t>(meta & ((1u << UtxoFlagBits) - 1)); }
+
+// Flags an output of tx (txIdx in its block) is created with
+template<typename CTransactionTy>
+static inline unsigned utxoCreationFlags(const CTransactionTy &tx, size_t txIdx, size_t outIdx)
+{
+  unsigned flags = txIdx == 0 ? EUtxoCoinbase : 0;
+  if constexpr (requires { tx.HogEx; }) {
+    // The HogAddr is spent by the next HogEx and is no peg-out
+    if (tx.HogEx && outIdx > 0)
+      flags |= EUtxoPegout;
+  }
+  return flags;
+}
+
 // Read-cache entry: serialized CUnspentOutputInfo bytes stored inline. Every
 // fixed-layout output type (incl. the bare multisig identity) is exactly
 // sizeof(CUnspentOutputInfo); longer values (uncompressed P2PK, non-standard
 // scripts) are not cached at all - a miss is always legal, a positive must
 // be exact
 struct CUtxoCacheValue {
-  uint32_t Height;    // creation height, drives the eviction floor
-  uint8_t IsCoinbase; // maturity metadata, mirrors the on-disk suffix bit; rides in former padding
+  uint32_t Height; // creation height, drives the eviction floor
+  uint8_t Flags;   // EUtxoFlag, mirrors the on-disk suffix; rides in former padding
   uint8_t Data[sizeof(BC::Script::CUnspentOutputInfo)];
 };
 
-// On-disk value: serialized CUnspentOutputInfo followed by a uint32 suffix
-// packing (creationHeight << 1) | isCoinbase, the Core-style coin metadata
-// (coinbase maturity, BIP68, warmup scan by height). query() strips the
-// suffix: every consumer above sees pure CUnspentOutputInfo bytes
+// On-disk value: serialized CUnspentOutputInfo followed by the uint32 coin
+// word (utxoMeta). query() hands the word out apart: every consumer above
+// sees pure CUnspentOutputInfo bytes
 class UTXODb : public CChainDb<dbengine::CKvBase<CUnspentOutputKey>> {
 public:
   UTXODb() : CChainDb<dbengine::CKvBase<CUnspentOutputKey>>("utxo") {}
@@ -43,8 +75,9 @@ public:
   // running ahead of connect pass cacheOnly: the miss (usually an output of
   // a still-unconnected block) is legal and resolved by the serial
   // contextual pass; a full search from workers measured 2-3% of reindex
-  // wall in negative RocksDB gets. Cache disabled: falls back to the db
-  bool query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result, bool cacheOnly = false) const;
+  // wall in negative RocksDB gets. Cache disabled: falls back to the db.
+  // meta receives the coin word
+  bool query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result, uint32_t &meta, bool cacheOnly = false) const;
 
   // Cache dump location and the block index resolving the stamp height;
   // must be called before initialize()
@@ -80,12 +113,13 @@ private:
 
   // Only exact-width values are admitted, so both copies (into the claimed
   // slot here and out of it in query) run at constant size
-  void cacheAdd(const CUnspentOutputKey &key, const void *data, size_t size, uint32_t height, bool isCoinbase) {
+  void cacheAdd(const CUnspentOutputKey &key, const void *data, size_t size, uint32_t meta) {
     if (!Cache_.enabled() || size != sizeof(CUtxoCacheValue::Data))
       return;
-    Cache_.insertWith(key.Tx.begin(), key.Index, height, [data, height, isCoinbase](CUtxoCacheValue &value) {
+    const uint32_t height = utxoMetaHeight(meta);
+    Cache_.insertWith(key.Tx.begin(), key.Index, height, [data, height, meta](CUtxoCacheValue &value) {
       value.Height = height;
-      value.IsCoinbase = isCoinbase;
+      value.Flags = utxoMetaFlags(meta);
       memcpy(value.Data, data, sizeof(value.Data));
     });
   }

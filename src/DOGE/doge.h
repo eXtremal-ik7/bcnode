@@ -67,6 +67,13 @@ namespace Common {
 
   bool setupChainParams(ChainParams *params, const char *network);
   static inline bool hasWitness() { return true; }
+  // Blocks a coinbase output waits before it may be spent. Digishield (145000) raised it from 30
+  // to 240, and the creation height picks the rule; regtest keeps 60 throughout
+  static inline uint32_t coinbaseMaturity(const ChainParams &chainParams, uint32_t height) {
+    if (chainParams.networkId == NetworkIdRegtest)
+      return 60;
+    return height < 145000 ? 30 : 240;
+  }
 
   unsigned getBlockGeneration(const ChainParams &chainParams, BlockIndex *index);
 
