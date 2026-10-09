@@ -430,8 +430,9 @@ int main(int argc, char **argv)
   if (!context.Pipeline.start(context.BlockIndex, context.ChainParams, context.Storage, pipelineParams))
     return 1;
 
-  // Initialize databases
-  if (!archiveEnabled) {
+  // Initialize databases. The archive also holds the coin's own databases, which go whether it
+  // is enabled or not
+  if (!archiveEnabled && !BC::DB::Archive::hasCoinDatabases()) {
     // Archive disabled, processing UTXO database
     BC::Common::BlockIndex *utxoFirstBlock = nullptr;
     std::vector<BC::Common::BlockIndex*> forDisconnect;
@@ -445,9 +446,10 @@ int main(int argc, char **argv)
                                  pipelineParams, "UTXO database"))
       return 1;
   } else {
-    // Initialize full archive
+    // Initialize full archive, or the coin's own databases alone
     if (!context.Archive.init(context.BlockIndex, context.ChainParams, context.Storage,
-                              context.Pipeline, pipelineParams, context.DataDir, context.UtxoDir, cfg))
+                              context.Pipeline, pipelineParams, context.DataDir, context.UtxoDir,
+                              archiveEnabled, cfg))
       return 1;
   }
 

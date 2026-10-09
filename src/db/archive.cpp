@@ -142,6 +142,25 @@ IInterface* setupHandler(config4cpp::Configuration *cfg,
   return result;
 }
 
+// The coin's databases, if its X has any: static void coinDatabases(std::vector<std::unique_ptr<BaseInterface>>&)
+template<typename T>
+concept HasCoinDatabases = requires(std::vector<std::unique_ptr<BaseInterface>> &databases) {
+  T::coinDatabases(databases);
+};
+
+bool Archive::hasCoinDatabases()
+{
+  return HasCoinDatabases<BC::X>;
+}
+
+// A template, so that the call is dropped for a coin without them
+template<typename T = BC::X>
+static void addCoinDatabases(std::vector<std::unique_ptr<BaseInterface>> &databases)
+{
+  if constexpr (HasCoinDatabases<T>)
+    T::coinDatabases(databases);
+}
+
 bool Archive::init(BlockInMemoryIndex &blockIndex,
                    BC::Common::ChainParams &chainParams,
                    BC::DB::Storage &storage,
@@ -149,11 +168,14 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
                    const CBlockPipeline::CParams &params,
                    const std::filesystem::path &dataDir,
                    const std::filesystem::path &utxoPath,
+                   bool archiveEnabled,
                    config4cpp::Configuration *cfg)
 {
   std::unordered_map<std::string, uint32_t> dbIndexMap;
   config4cpp::StringVector enabledDatabases;
-  cfg->lookupList("archive", "databases", enabledDatabases, config4cpp::StringVector());
+  // With the archive disabled only the coin's own databases are here
+  if (archiveEnabled)
+    cfg->lookupList("archive", "databases", enabledDatabases, config4cpp::StringVector());
   CompactAfterSync_ = cfg->lookupBoolean("archive", "compactAfterSync", false);
 
   for (int i = 0; i < enabledDatabases.length(); i++) {
@@ -178,15 +200,20 @@ bool Archive::init(BlockInMemoryIndex &blockIndex,
     }
   }
 
+  // After the configured ones, which keep their indexes for the query routing
+  addCoinDatabases(AllDb_);
+
   // Sized before anything can connect; the workers themselves start below
   ConnectQueues_.resize(AllDb_.size());
   ConnectFromHeight_.assign(AllDb_.size(), 0);
 
   // Route queries
-  TransactionDb_ = setupHandler<ITransactionDb>(cfg, "tx", EIQueryTransaction, dbIndexMap, AllDb_);
-  AddrHistoryDb_ = setupHandler<IAddrHistoryDb>(cfg, "addrhistory", EIQueryAddrHistory, dbIndexMap, AllDb_);
-  AddrDb_ = setupHandler<IAddrDb>(cfg, "addr", EIQueryAddr, dbIndexMap, AllDb_);
-  SpentDb_ = setupHandler<ISpentDb>(cfg, "spent", EIQuerySpent, dbIndexMap, AllDb_);
+  if (archiveEnabled) {
+    TransactionDb_ = setupHandler<ITransactionDb>(cfg, "tx", EIQueryTransaction, dbIndexMap, AllDb_);
+    AddrHistoryDb_ = setupHandler<IAddrHistoryDb>(cfg, "addrhistory", EIQueryAddrHistory, dbIndexMap, AllDb_);
+    AddrDb_ = setupHandler<IAddrDb>(cfg, "addr", EIQueryAddr, dbIndexMap, AllDb_);
+    SpentDb_ = setupHandler<ISpentDb>(cfg, "spent", EIQuerySpent, dbIndexMap, AllDb_);
+  }
 
   BC::Common::BlockIndex *utxoFirstBlock = nullptr;
   std::vector<BC::Common::BlockIndex*> utxoDisconnect;
@@ -245,16 +272,24 @@ bool Archive::purge(config4cpp::Configuration *cfg, std::filesystem::path &dataD
   config4cpp::StringVector enabledDatabases;
   cfg->lookupList("archive", "databases", enabledDatabases, config4cpp::StringVector());
 
-  for (int i = 0; i < enabledDatabases.length(); i++) {
-    std::string scope = "archive.";
-    scope.append(enabledDatabases[i]);
+  std::vector<std::string> names;
+  for (int i = 0; i < enabledDatabases.length(); i++)
+    names.emplace_back(enabledDatabases[i]);
+  // The coin's own go too: they are built from the blocks like the utxo set
+  std::vector<std::unique_ptr<BaseInterface>> coinDatabases;
+  addCoinDatabases(coinDatabases);
+  for (const auto &db: coinDatabases)
+    names.push_back(db->name());
+
+  for (const std::string &name: names) {
+    std::string scope = "archive." + name;
     const char *p = cfg->lookupString(scope.c_str(), "path", nullptr);
 
-    std::filesystem::path dbPath = p ? p : dataDir / enabledDatabases[i];
+    std::filesystem::path dbPath = p ? p : dataDir / name;
     std::error_code ec;
     std::filesystem::remove_all(dbPath, ec);
     if (ec) {
-      LOG_F(ERROR, "Failed to remove database %s", enabledDatabases[i]);
+      LOG_F(ERROR, "Failed to remove database %s", name.c_str());
       return false;
     }
   }

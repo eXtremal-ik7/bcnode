@@ -43,9 +43,24 @@ public:
             const CBlockPipeline::CParams &params,
             const std::filesystem::path &dataDir,
             const std::filesystem::path &utxoPath,
+            bool archiveEnabled,
             config4cpp::Configuration *cfg);
 
   bool purge(config4cpp::Configuration *cfg, std::filesystem::path &dataDir);
+
+  // A coin whose chain state does not end with the utxo set keeps the rest in databases of its
+  // own (X::coinDatabases). They are part of the chain, not of the archive's menu: no config
+  // turns them off, so the archive is initialized for them even when it is disabled
+  static bool hasCoinDatabases();
+
+  // A database by its name, the coin's own included: how the coin reaches what it added
+  BaseInterface *database(const std::string &name) const {
+    for (const auto &db: AllDb_) {
+      if (db->name() == name)
+        return db.get();
+    }
+    return nullptr;
+  }
 
   // The databases are independent over one read-only batch (each writes only
   // its own engine), so the batch fans out to a thread per database. Post and
