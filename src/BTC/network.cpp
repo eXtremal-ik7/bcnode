@@ -22,9 +22,11 @@ const std::unordered_map<std::string_view, Peer::MessageTy> Peer::MessageTypeMap
   {"getheaders", Peer::MessageTy::getheaders},
   {"headers", Peer::MessageTy::headers},
   {"inv", Peer::MessageTy::inv},
+  {"notfound", Peer::MessageTy::notfound},
   {"ping", Peer::MessageTy::ping},
   {"pong", Peer::MessageTy::pong},
   {"reject", Peer::MessageTy::reject},
+  {"tx", Peer::MessageTy::tx},
   {"verack", Peer::MessageTy::verack},
   {"version", Peer::MessageTy::version}
 };
@@ -41,9 +43,11 @@ constexpr const char *Peer::messageName(MessageTy type)
     "getheaders",
     "headers",
     "inv",
+    "notfound",
     "ping",
     "pong",
     "reject",
+    "tx",
     "verack",
     "version"
   };
@@ -221,6 +225,30 @@ void Peer::onMessage(AsyncOpStatus status)
     case MessageTy::inv :
       result = callHandler<BC::Proto::CMessageInv>("inv", &Peer::onInv);
       break;
+    case MessageTy::notfound :
+      result = callHandler<BC::Proto::CMessageInv>("notfound", &Peer::onNotFound);
+      break;
+    case MessageTy::tx : {
+      // No mempool to take it, or longer than its policy passes: dropped unparsed
+      if (!ParentNode->mempoolEnabled() || ReceiveStream.sizeOf() > BC::Common::maxStandardTxSize()) {
+        if (ParentNode->mempoolEnabled())
+          ParentNode->txRelay().dropUnparsed();
+        aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
+        break;
+      }
+      // One allocation, as for headers: the mempool keeps it as it is
+      size_t unpackedSize = 0;
+      BC::Proto::CTransaction *tx = BC::unpack2<BC::Proto::CTransaction>(ReceiveStream, &unpackedSize);
+      bool accepted = tx && !ReceiveStream.remaining();
+      aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
+      if (accepted) {
+        onTx(tx, unpackedSize);
+      } else {
+        LOG_F(INFO, "Peer %s: can't unserialize tx message", Name.c_str());
+        operator delete(tx);
+      }
+      break;
+    }
     case MessageTy::ping :
       result = callHandler<BC::Proto::CMessagePing>("ping", &Peer::onPing);
       break;
@@ -532,6 +560,7 @@ void Peer::onPong(BC::Proto::CMessagePong &pong)
 void Peer::onInv(BC::Proto::CMessageInv &inv)
 {
   BC::Proto::CMessageGetData getBlocks;
+  xvector<BC::Proto::TxHashTy> txids;
   for (const auto &element: inv.Inventory) {
     switch (element.Type) {
       case BC::Proto::CInventoryVector::ERROR :
@@ -539,6 +568,7 @@ void Peer::onInv(BC::Proto::CMessageInv &inv)
         break;
       case BC::Proto::CInventoryVector::MSG_TX :
       case BC::Proto::CInventoryVector::MSG_WITNESS_TX :
+        txids.emplace_back(element.Hash);
         break;
       case BC::Proto::CInventoryVector::MSG_BLOCK :
       case BC::Proto::CInventoryVector::MSG_WITNESS_BLOCK : {
@@ -562,6 +592,43 @@ void Peer::onInv(BC::Proto::CMessageInv &inv)
 
   if (!getBlocks.Inventory.empty())
     getData(getBlocks);
+  // Dropped by the relay until the mempool switches on
+  if (!txids.empty() && ParentNode->mempoolEnabled())
+    ParentNode->txRelay().receiveInv(this, std::move(txids));
+}
+
+void Peer::onNotFound(BC::Proto::CMessageInv &notfound)
+{
+  xvector<BC::Proto::TxHashTy> txids;
+  for (const auto &element: notfound.Inventory) {
+    if (element.Type == BC::Proto::CInventoryVector::MSG_TX || element.Type == BC::Proto::CInventoryVector::MSG_WITNESS_TX)
+      txids.emplace_back(element.Hash);
+  }
+  if (!txids.empty() && ParentNode->mempoolEnabled())
+    ParentNode->txRelay().receiveNotFound(this, std::move(txids));
+}
+
+void Peer::onTx(BC::Proto::CTransaction *tx, size_t size)
+{
+  ParentNode->txRelay().receiveTx(this, tx, size);
+}
+
+// Always with witness where the coin has it: a transaction without its witness has another
+// wtxid and cannot be checked (§7.2 of the plan)
+void Peer::requestTransactions(const xvector<BC::Proto::TxHashTy> &txids)
+{
+  // Core's MAX_GETDATA_SZ
+  constexpr size_t MaxGetDataSize = 1000;
+  for (size_t offset = 0; offset < txids.size(); offset += MaxGetDataSize) {
+    const size_t count = std::min(MaxGetDataSize, txids.size() - offset);
+    BC::Proto::CMessageGetData getdata;
+    getdata.Inventory.resize(count);
+    for (size_t i = 0; i < count; i++) {
+      getdata.Inventory[i].Type = BC::Common::hasWitness() ? BC::Proto::CInventoryVector::MSG_WITNESS_TX : BC::Proto::CInventoryVector::MSG_TX;
+      getdata.Inventory[i].Hash = txids[offset + i];
+    }
+    getData(getdata);
+  }
 }
 
 void Peer::onBlockData(void *data, size_t size, size_t memorySize, std::chrono::time_point<std::chrono::steady_clock> receivedTime)
@@ -875,6 +942,7 @@ void Node::RemovePeer(Peer *peer)
       disconnectPeerFromBlockSource(peer, blockSourcePtr);
 
     peer->deleteEvents();
+    TxRelay_.peerGone(peer);
     btcSocketDelete(peer->Socket);
     auto ptr = Peers[peer->Address];
     if (ptr)
@@ -928,6 +996,9 @@ void Node::Start()
     });
   });
 
+  if (MempoolEnabled_ && !Mempool_.start(*BlockIndex_, *ChainParams_, *Storage_, Config_, &TxRelay_))
+    LOG_F(ERROR, "Mempool is not started");
+
   Sync();
 }
 
@@ -951,6 +1022,7 @@ void Node::Sync()
   BC::Common::BlockIndex *best = BlockIndex_->best();
   auto now = std::chrono::steady_clock::now();
   bool hasConnectedPeers = false;
+  uint32_t peersHeight = 0;
   std::vector<PeerPtr> candidatesForSync;
 
   connectSeedAddresses(now);
@@ -966,7 +1038,7 @@ void Node::Sync()
     }
   }
 
-  enumeratePeers([this, best, &hasConnectedPeers, &candidatesForSync](Peer *peer) {
+  enumeratePeers([this, best, &hasConnectedPeers, &peersHeight, &candidatesForSync](Peer *peer) {
     if (!peer->isAlive()) {
       RemovePeer(peer);
       return;
@@ -984,6 +1056,7 @@ void Node::Sync()
 
     if (peer->IsConnected.load(std::memory_order_acquire)) {
       hasConnectedPeers = true;
+      peersHeight = std::max(peersHeight, peer->StartHeight.load(std::memory_order_relaxed));
       if (!peer->BlockSource_.get() && peer->StartHeight > best->Height)
         candidatesForSync.push_back(peer);
     }
@@ -1016,6 +1089,15 @@ void Node::Sync()
     if (!hasConnectedPeers)
       interval = 500*1000;
   }
+
+  // The mempool switches on once and for good when the node has caught up: nothing to download,
+  // no peer ahead by more than a block, a tip at most an hour old (§7.6 of the plan)
+  if (MempoolEnabled_ &&
+      hasConnectedPeers &&
+      !BlockSources_.hasActiveBlockSource() &&
+      peersHeight <= best->Height + 1 &&
+      static_cast<int64_t>(best->Header.Time) + 3600 >= static_cast<int64_t>(time(nullptr)))
+    Mempool_.activate();
 
   userEventStartTimer(SyncEvent, interval, 1);
 }
@@ -1283,9 +1365,8 @@ void Node::buildBlockLocator(xvector<BC::Proto::BlockHashTy> &hashes, BC::Common
     uint32_t step = 1;
     hashes.emplace_back(start->Header.GetHash());
     for (uint32_t i = start->Height-1; i > step; i -= step) {
-      auto It = BlockIndex_->blockHeightIndex().find(i);
-      if (It != BlockIndex_->blockHeightIndex().end())
-        hashes.emplace_back(It->second->Header.GetHash());
+      if (BC::Common::BlockIndex *index = BlockIndex_->indexByHeight(i))
+        hashes.emplace_back(index->Header.GetHash());
       else
         break;
 

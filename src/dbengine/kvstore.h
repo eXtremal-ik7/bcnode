@@ -261,7 +261,7 @@ public:
     typename CKvEngine<CKey>::CConfig engineCfg;
     engineCfg.Name = Name_;
     engineCfg.EraBytes = static_cast<size_t>(cfg->lookupInt(Name_.c_str(), "eraSizeMb", 256)) << 20;
-    return Engine_.initialize(engineCfg, shards, this);
+    return Engine_.initialize(engineCfg, shards, this, Stamp_);
   }
 
   // Frozen eras waiting for the flusher: the commit cannot refuse, so the
@@ -317,10 +317,11 @@ protected:
   CKvWriter<CKey> liveWriter() { return Engine_.liveWriter(); }
 
   // Tail of every mutation: the position moves to where the operation left the
-  // database, and the unit is published as one revision
-  void commit(CKvWriter<CKey> &writer, const BaseBlob<256> &stamp) {
+  // database, and the unit is published as one revision; 'seq' rides along
+  // for an owner that numbers its operations
+  void commit(CKvWriter<CKey> &writer, const BaseBlob<256> &stamp, uint64_t seq = 0) {
     Stamp_ = stamp;
-    Engine_.commitLive(writer, stamp);
+    Engine_.commitLive(writer, stamp, seq);
   }
 
   // Every batch carries the stamp: without WAL a crash rolls data and position

@@ -250,7 +250,7 @@ int main(int argc, char **argv)
 
     BC::Proto::BlockHashTy hash = context.ChainParams.GenesisBlock.Header.GetHash();
     context.BlockIndex.blockIndex().insert(std::pair(hash, genesisIndex));
-    context.BlockIndex.blockHeightIndex().insert(std::pair(0, genesisIndex));
+    context.BlockIndex.setIndexByHeight(0, genesisIndex);
     context.BlockIndex.setGenesis(genesisIndex, context.ChainParams.GenesisBlock);
     context.BlockIndex.setBest(genesisIndex);
     LOG_F(INFO, "Adding genesis block %s", hash.getHexLE().c_str());

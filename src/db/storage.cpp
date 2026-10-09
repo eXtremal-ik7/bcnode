@@ -62,6 +62,8 @@ void Storage::connect(CBlockBatch batch, BlockInMemoryIndex &blockIndex, bool wa
     return;
 
   UTXODb_.connect(batch, blockIndex, *BlockDb_);
+  if (UtxoEvent_)
+    userEventActivate(UtxoEvent_);
 
   // The archive databases get the same unit, the mark on the last block telling the
   // storage thread where it ends
@@ -80,6 +82,8 @@ void Storage::disconnect(BC::Common::BlockIndex *index,
                          bool wakeUp)
 {
   UTXODb_.disconnect(index, block, linkedOutputs, validationData, blockIndex, *BlockDb_);
+  if (UtxoEvent_)
+    userEventActivate(UtxoEvent_);
 
   Queue_.emplace(Disconnect, index);
 

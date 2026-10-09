@@ -40,8 +40,21 @@ public:
     OP_EQUALVERIFY = 0x88,
     OP_HASH160 = 0xA9,
     OP_CHECKSIG = 0xAC,
-    OP_CHECKMULTISIG = 0xAE
+    OP_CHECKSIGVERIFY = 0xAD,
+    OP_CHECKMULTISIG = 0xAE,
+    OP_CHECKMULTISIGVERIFY = 0xAF
   };
+
+  // A run of script bytes: a push's data, a witness program
+  struct CSpan {
+    const uint8_t *Data = nullptr;
+    size_t Size = 0;
+  };
+
+  // One opcode; a push hands out its data. False on a truncated script
+  static bool getOp(const uint8_t *&p, const uint8_t *end, uint8_t &opcode, CSpan *data = nullptr);
+  // Core's GetSigOpCount: accurate counts a multisig by its key number, otherwise as 20
+  static unsigned sigOpCount(const uint8_t *p, const uint8_t *end, bool accurate);
 
 #pragma pack(push, 1)
   struct CUnspentOutputInfo {

@@ -29,9 +29,21 @@ class UTXODb;
 class Configuration {
 public:
   static constexpr size_t MaxBlockSize = BTC::Configuration::MaxBlockSize;
+  static constexpr unsigned MaxBlockSigOps = BTC::Configuration::MaxBlockSigOps;
   static constexpr uint32_t BlocksFileLimit = BTC::Configuration::BlocksFileLimit;
   static constexpr size_t DefaultBlockCacheSize = 256*1048576;
   static constexpr uint64_t RationalPartSize = 100000000ULL;
+  // Consensus: Litecoin Core's MAX_MONEY
+  static constexpr int64_t MaxMoney = 84000000LL * 100000000LL;
+  // Mempool policy, Litecoin Core 0.21's defaults: units per 1000 bytes
+  static constexpr int64_t MinRelayTxFee = 1000;
+  static constexpr int64_t DustRelayTxFee = 30000;
+  static constexpr bool FeeRoundsUp = false;
+  static constexpr int32_t MaxStandardTxVersion = 2;
+  static constexpr uint32_t MinStandardTxNonWitnessSize = 82;
+  static constexpr size_t MaxStandardScriptSigSize = 1650;
+  static constexpr size_t MaxOpReturnRelay = 83;
+  static constexpr bool HasWitness = true;
 
   static constexpr const char *ProjectName = "Litecoin";
   static constexpr const char *TickerName = "LTC";
@@ -99,6 +111,28 @@ namespace Common {
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
                             std::string &error);
+
+  // A transaction alone: Core's CheckTransaction
+  bool checkTransactionStandalone(const Proto::CTransaction &tx, const ChainParams &chainParams, std::string &error);
+  // With the outputs it spends, for the block it would enter: CheckTxInputs, IsFinalTx and
+  // SequenceLocks. Sets the fee once the input values pass
+  bool checkTransactionContextual(const Proto::CTransaction &tx,
+                                  const BTC::CPrevout *prevouts,
+                                  const BTC::CTxContext &context,
+                                  const ChainParams &chainParams,
+                                  int64_t &fee,
+                                  std::string &error);
+  // Mempool policy on the transaction alone and with the outputs it spends: what this coin's node
+  // asks beyond consensus (BTC/policy.h)
+  bool checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost &cost, std::string &error);
+  bool checkPolicyContextual(const Proto::CTransaction &tx,
+                             const BTC::CPrevout *prevouts,
+                             const BTC::CTxContext &context,
+                             const BTC::CTxCost &cost,
+                             int64_t fee,
+                             std::string &error);
+  // The longest transaction checkPolicyStandalone can pass: the network drops longer ones unparsed
+  size_t maxStandardTxSize();
 };
 
 class X {

@@ -4,7 +4,9 @@
 #include "common/blockDataBase.h"
 #include "common/blockSource.h"
 #include "common/hostAddress.h"
+#include "common/mempool.h"
 #include "common/serializedDataCache.h"
+#include "txRelay.h"
 #include "common/thread.h"
 #include "../loguru.hpp"
 
@@ -60,6 +62,12 @@ public:
 
   void start();
 
+  // For the transaction relay, which keeps peers past their disconnect notice (§7.5 of the plan)
+  bool deleted() const { return Deleted_.load(std::memory_order_relaxed) != 0; }
+  void requestTransactions(const xvector<BC::Proto::TxHashTy> &txids);
+  // Memory held by this peer's messages waiting for the mempool writer
+  std::atomic<size_t> RelayQueuedBytes = 0;
+
 public:
   uintptr_t ref_fetch_add(uintptr_t tag) { return objectIncrementReference(btcSocketHandle(Socket), tag); }
   uintptr_t ref_fetch_sub(uintptr_t tag) { return objectDecrementReference(btcSocketHandle(Socket), tag); }
@@ -75,9 +83,11 @@ private:
     getheaders,
     headers,
     inv,
+    notfound,
     ping,
     pong,
     reject,
+    tx,
     verack,
     version,
     last
@@ -142,6 +152,9 @@ private:
   void onPing(BC::Proto::CMessagePing &ping);
   void onPong(BC::Proto::CMessagePong &pong);
   void onInv(BC::Proto::CMessageInv &inv);
+  void onNotFound(BC::Proto::CMessageInv &notfound);
+  // Takes ownership of the unpack2 allocation
+  void onTx(BC::Proto::CTransaction *tx, size_t size);
   // Takes ownership of the serialized block data
   void onBlockData(void *data, size_t size, size_t memorySize, std::chrono::time_point<std::chrono::steady_clock> receivedTime);
   void onReject(BC::Proto::CMessageReject &reject);
@@ -406,6 +419,12 @@ private:
   std::vector<SeedAddress> Seeds_;
   aioUserEvent *SyncEvent = nullptr;
 
+  // Reads the block index and the utxo database: the node goes before the storage on shutdown,
+  // and the writer stops with it
+  BC::Mempool::CMempool Mempool_;
+  // Runs on the writer thread: ~Node stops the writer before it goes
+  CTxRelay TxRelay_{Mempool_};
+
   static void SyncCb(aioUserEvent*, void *arg) { static_cast<Node*>(arg)->Sync(); }
   static void bcnodeAcceptCb(AsyncOpStatus status, aioObject *object, HostAddress address, socketTy socketFd, void *arg) {
     if (status == aosSuccess)
@@ -418,6 +437,8 @@ private:
   void OnBCNodeConnection(HostAddress address, aioObject *object);
 
 public:
+  ~Node() { Mempool_.stop(); }
+
   // cfg is the parsed bcnode.conf, the same one the databases get: a coin whose network layer
   // has settings of its own reads them here, and the engine stays out of naming them
   void Init(BlockInMemoryIndex &blockIndex,
@@ -459,6 +480,8 @@ public:
 
   uint64_t localHostNonce() { return LocalHostNonce_; }
   bool mempoolEnabled() const { return MempoolEnabled_; }
+  BC::Mempool::CMempool &mempool() { return Mempool_; }
+  CTxRelay &txRelay() { return TxRelay_; }
 
   // Synchronization functions
   void Sync();

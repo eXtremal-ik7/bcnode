@@ -13,6 +13,8 @@
 #include "db/archive.h"
 #include "BC/network.h"
 #include <asyncio/socket.h>
+#include <algorithm>
+#include <optional>
 #include <stdio.h>
 #include <type_traits>
 #include "../loguru.hpp"
@@ -50,7 +52,8 @@ std::unordered_map<std::string, HttpApiConnection::FunctionTy> HttpApiConnection
   {"api/v1/txs/by_block_height", fnTxsByBlockHeight},
   {"api/v1/txs/by_txid", fnTxsByTxid},
   {"api/v1/txs/latest", fnTxsLatest},
-  {"api/v1/txs/raw", fnTxsRaw}
+  {"api/v1/txs/raw", fnTxsRaw},
+  {"api/v1/txs/send", fnTxsSend}
 };
 
 // HttpApiConnection
@@ -132,6 +135,7 @@ int BC::Network::HttpApiConnection::onParse(HttpRequestComponent *component)
         case fnTxsByTxid : onTxsByTxid(document); break;
         case fnTxsLatest : onTxsLatest(document); break;
         case fnTxsRaw : onTxsRaw(document); break;
+        case fnTxsSend : onTxsSend(document); break;
         default: reply404(); return 1;
       }
 
@@ -591,12 +595,120 @@ void BC::Network::HttpApiConnection::onBlocksTxs(rapidjson::Document &request)
 
 void BC::Network::HttpApiConnection::onMempoolSummary(rapidjson::Document&)
 {
-  replyNotImplemented();
+  BC::Mempool::CMempool &mempool = Node_->mempool();
+  BC::Mempool::CViewRef view = mempool.view();
+
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+
+  {
+    JSON::Object object(stream);
+    object.addBoolean("enabled", mempool.started());
+    object.addBoolean("active", view.get() != nullptr);
+    if (view.get()) {
+      // Everything below is one publication: the base and the totals belong together
+      object.addString("base_hash", view.get()->BaseHash.getHexLE());
+      object.addInt("base_height", view.get()->BaseHeight);
+      object.addInt("tx_count", view.get()->TxCount);
+      object.addInt("size_bytes", view.get()->Bytes);
+      object.addString("fees", FormatMoney(view.get()->Fees, BC::Configuration::RationalPartSize));
+      // Accepted without a script check (§5.5 of the plan): not relayed, not served, not mined
+      object.addInt("unverified", view.get()->Unverified);
+      object.addInt("published", view.get()->PublishedTime);
+    }
+
+    auto value = [](const std::atomic<uint64_t> &counter) { return counter.load(std::memory_order_relaxed); };
+    const BC::Mempool::CMempool::CStats &stats = mempool.stats();
+    object.addField("writer");
+    {
+      JSON::Object writer(stream);
+      writer.addInt("wakeups", value(stats.Wakeups));
+      writer.addInt("messages", value(stats.Messages));
+      writer.addInt("jumps", value(stats.Jumps));
+      writer.addInt("resets", value(stats.Resets));
+      writer.addInt("accepted", value(stats.Accepted));
+      writer.addInt("rejected", value(stats.Rejected));
+      writer.addInt("missing_inputs", value(stats.MissingInputs));
+      writer.addInt("waiting", value(stats.Waiting));
+      writer.addInt("confirmed", value(stats.Confirmed));
+      writer.addInt("conflicted", value(stats.Conflicted));
+      writer.addInt("expired", value(stats.Expired));
+    }
+
+    const BC::Network::CTxRelay::CStats &relayStats = Node_->txRelay().stats();
+    object.addField("relay");
+    {
+      JSON::Object relay(stream);
+      relay.addInt("messages", value(relayStats.Messages));
+      relay.addInt("requested", value(relayStats.Requested));
+      relay.addInt("duplicates", value(relayStats.Duplicates));
+      relay.addInt("orphans", value(relayStats.Orphans));
+      relay.addInt("dropped", value(relayStats.Dropped));
+    }
+  }
+
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
-void BC::Network::HttpApiConnection::onMempoolTxs(rapidjson::Document&)
+// Newest first. The cursor is the insertion number of the last transaction of the previous page:
+// a page from a later snapshot neither repeats nor skips what both snapshots hold
+void BC::Network::HttpApiConnection::onMempoolTxs(rapidjson::Document &request)
 {
-  replyNotImplemented();
+  bool isValid = true;
+  std::string errorField;
+  std::optional<uint64_t> cursor;
+  uint64_t limit = 20;
+  jsonParseUInt64(request, "cursor", cursor, &isValid, errorField);
+  jsonParseUInt64(request, "limit", &limit, 20, &isValid, errorField);
+  if (!isValid || limit == 0 || limit > 100) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", !isValid ? errorField : "limit", "");
+    return;
+  }
+
+  BC::Mempool::CViewRef view = Node_->mempool().view();
+  if (!view.get()) {
+    replyWithError("MEMPOOL_NOT_ACTIVE", "", "", "");
+    return;
+  }
+
+  const BC::Mempool::CView &snapshot = *view.get();
+  size_t index = cursor ? snapshot.upperBound(*cursor - std::min<uint64_t>(*cursor, 1)) : snapshot.RecordEnd;
+
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+
+  {
+    JSON::Object object(stream);
+    object.addString("base_hash", snapshot.BaseHash.getHexLE());
+    object.addInt("base_height", snapshot.BaseHeight);
+    object.addInt("tx_count", snapshot.TxCount);
+    uint64_t last = 0;
+    object.addField("txs");
+    {
+      JSON::Array txs(stream);
+      uint64_t count = 0;
+      while (index > 0 && count < limit) {
+        const BC::Mempool::CRecord &record = snapshot.Generation->record(--index);
+        if (!snapshot.visible(record))
+          continue;
+        txs.addField();
+        serializeMempoolTx(stream, record);
+        last = record.Body->Sequence;
+        count++;
+      }
+    }
+    // More may follow only below the last one shown
+    if (last && index > 0)
+      object.addInt("next_cursor", last);
+    else
+      object.addNull("next_cursor");
+  }
+
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
 }
 
 void BC::Network::HttpApiConnection::onSearch(rapidjson::Document&)
@@ -726,8 +838,14 @@ void BC::Network::HttpApiConnection::onSystemSummary(rapidjson::Document&)
     object.addNull("hashrate_unit");
     object.addNull("price_btc");
     object.addNull("price_usd");
-    object.addNull("mempool_tx_count");
-    object.addNull("mempool_size_bytes");
+    BC::Mempool::CViewRef mempoolView = Node_->mempool().view();
+    if (mempoolView.get()) {
+      object.addInt("mempool_tx_count", mempoolView.get()->TxCount);
+      object.addInt("mempool_size_bytes", mempoolView.get()->Bytes);
+    } else {
+      object.addNull("mempool_tx_count");
+      object.addNull("mempool_size_bytes");
+    }
     object.addNull("circulating_supply");
     object.addNull("addresses_total");
     object.addNull("txs_total");
@@ -758,8 +876,10 @@ void BC::Network::HttpApiConnection::onTxsByTxid(rapidjson::Document &request)
     return;
   }
 
+  // The chain first, then the mempool: a transaction leaves the snapshot when its block comes
   if (!Storage_->TransactionDb_) {
-    replyWithError("DATABASE_NOT_ENABLED", "", "", "");
+    if (!replyMempoolTx(txid))
+      replyWithError("DATABASE_NOT_ENABLED", "", "", "");
     return;
   }
 
@@ -769,7 +889,8 @@ void BC::Network::HttpApiConnection::onTxsByTxid(rapidjson::Document &request)
     return;
   }
   if (!queryResult.Found) {
-    replyWithError("TRANSACTION_NOT_FOUND", "", "" ,"");
+    if (!replyMempoolTx(txid))
+      replyWithError("TRANSACTION_NOT_FOUND", "", "" ,"");
     return;
   }
   if (queryResult.DataCorrupted) {
@@ -810,9 +931,110 @@ void BC::Network::HttpApiConnection::onTxsLatest(rapidjson::Document&)
   replyNotImplemented();
 }
 
-void BC::Network::HttpApiConnection::onTxsRaw(rapidjson::Document&)
+// Mempool transactions only for now: the chain has no raw path without txdb
+void BC::Network::HttpApiConnection::onTxsRaw(rapidjson::Document &request)
 {
-  replyNotImplemented();
+  bool isValid = true;
+  std::string errorField;
+  BC::Proto::TxHashTy txid;
+  jsonParseBaseBlob(request, "txid", txid, &isValid, errorField);
+  if (!isValid) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", errorField, "");
+    return;
+  }
+
+  BC::Mempool::CViewRef view = Node_->mempool().view();
+  const BC::Mempool::CRecord *record = view.get() ? view.get()->find(txid) : nullptr;
+  if (!record) {
+    replyWithError("TRANSACTION_NOT_FOUND", "", "", "");
+    return;
+  }
+
+  xmstream raw;
+  BC::serialize(raw, *record->Body->Tx);
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+  {
+    JSON::Object object(stream);
+    object.addString("txid", txid.getHexLE());
+    object.addString("hex", bin2hexLowerCase(raw.data(), raw.sizeOf()));
+  }
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
+}
+
+// The stand's tool for negative tests: the reply is the writer's verdict, with Core's reason
+void BC::Network::HttpApiConnection::onTxsSend(rapidjson::Document &request)
+{
+  bool isValid = true;
+  std::string errorField;
+  std::string hex;
+  jsonParseString(request, "hex", hex, &isValid, errorField);
+  if (!isValid || hex.empty() || hex.size() % 2 || !std::all_of(hex.begin(), hex.end(), [](char c) { return isxdigit(static_cast<unsigned char>(c)); })) {
+    replyWithError("REQUEST_FORMAT_ERROR", "", "hex", "");
+    return;
+  }
+
+  if (!Node_->mempool().view().get()) {
+    replyWithError("MEMPOOL_NOT_ACTIVE", "", "", "");
+    return;
+  }
+
+  std::vector<uint8_t> data(hex.size() / 2);
+  hex2bin(hex.data(), hex.size(), data.data());
+  xmstream input(data.data(), data.size());
+  size_t unpackedSize = 0;
+  BC::Proto::CTransaction *tx = BC::unpack2<BC::Proto::CTransaction>(input, &unpackedSize);
+  if (!tx || input.remaining()) {
+    operator delete(tx);
+    replyWithError("TX_DECODE_FAILED", "", "hex", "");
+    return;
+  }
+
+  // The verdict comes on the writer thread; the reference keeps the connection until then. The
+  // socket's destructor frees the connection, so the pointer only holds it
+  struct CNoDelete { void operator()(HttpApiConnection*) {} };
+  intrusive_ptr<HttpApiConnection, CNoDelete> self(this);
+  auto reply = [self](BC::Mempool::CVerdict &verdict) {
+    xmstream stream;
+    self.get()->reply200(stream);
+    size_t offset = self.get()->startChunk(stream);
+    {
+      JSON::Object object(stream);
+      object.addString("txid", verdict.TxId.getHexLE());
+      // Missing inputs too, as Core's sendrawtransaction: no orphan pool for the API
+      object.addString("result", verdict.Result == BC::Mempool::CVerdict::EAccepted ? "accepted" : "rejected");
+      if (!verdict.Reason.empty())
+        object.addString("reason", verdict.Reason);
+      else
+        object.addNull("reason");
+    }
+    self.get()->finishChunk(stream, offset);
+    aioWrite(self.get()->Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, self.get());
+  };
+  if (!Node_->mempool().submit(tx, unpackedSize, std::move(reply)))
+    replyWithError("MEMPOOL_BUSY", "", "", "");
+}
+
+bool BC::Network::HttpApiConnection::replyMempoolTx(const BC::Proto::TxHashTy &txid)
+{
+  BC::Mempool::CViewRef view = Node_->mempool().view();
+  const BC::Mempool::CRecord *record = view.get() ? view.get()->find(txid) : nullptr;
+  if (!record)
+    return false;
+
+  xmstream stream;
+  reply200(stream);
+  size_t offset = startChunk(stream);
+  {
+    JSON::Object reply(stream);
+    reply.addField("tx");
+    serializeMempoolTx(stream, *record);
+  }
+  finishChunk(stream, offset);
+  aioWrite(Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, this);
+  return true;
 }
 
 void BC::Network::HttpApiConnection::onRead(AsyncOpStatus status, size_t bytesRead)
@@ -1112,6 +1334,62 @@ void BC::Network::HttpApiConnection::serializeTx(xmstream &stream,
           outputObject.addNull("spent_at_height");
         }
       }
+    }
+  }
+}
+
+// What a mempool body knows: the inputs without the values and addresses of what they spend
+void BC::Network::HttpApiConnection::serializeMempoolTx(xmstream &stream, const BC::Mempool::CRecord &record)
+{
+  const BC::Mempool::CTxBody &body = *record.Body;
+  const BC::Proto::CTransaction &tx = *body.Tx;
+  int64_t valueOut = 0;
+  for (const auto &txOut: tx.TxOut)
+    valueOut += txOut.Value;
+
+  JSON::Object txObject(stream);
+  txObject.addString("txid", body.TxId.getHexLE());
+  txObject.addString("hash", body.WTxId.getHexLE());
+  txObject.addNull("block_hash");
+  txObject.addNull("block_height");
+  txObject.addInt("timestamp", body.Time);
+  txObject.addInt("size_bytes", body.Size);
+  txObject.addInt("vsize", body.VSize);
+  txObject.addInt("version", tx.Version);
+  txObject.addInt("locktime", tx.LockTime);
+  txObject.addInt("confirmations", 0);
+  txObject.addString("value_in", FormatMoney(valueOut + body.Fee, BC::Configuration::RationalPartSize));
+  txObject.addString("value_out", FormatMoney(valueOut, BC::Configuration::RationalPartSize));
+  txObject.addString("fee", FormatMoney(body.Fee, BC::Configuration::RationalPartSize));
+  txObject.addInt("mempool_sequence", body.Sequence);
+  txObject.addBoolean("verified", record.Flags & BC::Mempool::ERecordVerified);
+
+  txObject.addField("inputs");
+  {
+    JSON::Array inputsArray(stream);
+    for (const auto &txin: tx.TxIn) {
+      inputsArray.addField();
+      JSON::Object inputObject(stream);
+      inputObject.addString("txid", txin.PreviousOutputHash.getHexLE());
+      inputObject.addInt("vout_index", txin.PreviousOutputIndex);
+    }
+  }
+
+  txObject.addField("outputs");
+  {
+    JSON::Array outputsArray(stream);
+    for (size_t i = 0; i < tx.TxOut.size(); i++) {
+      const BC::Proto::CTxOut &txOut = tx.TxOut[i];
+      BC::Script::CAddress address;
+      outputsArray.addField();
+      JSON::Object outputObject(stream);
+      outputObject.addInt("index", i);
+      if (BC::Script::extractAddress(txOut, address))
+        outputObject.addString("address", BC::Script::addressToString(address, ChainParams_.PublicKeyPrefix, ChainParams_.ScriptPrefix, ChainParams_.Bech32Prefix));
+      else
+        outputObject.addNull("address");
+      outputObject.addString("value", FormatMoney(txOut.Value, BC::Configuration::RationalPartSize));
+      outputObject.addString("script_pub_key", bin2hexLowerCase(txOut.PkScript.begin(), txOut.PkScript.size()));
     }
   }
 }

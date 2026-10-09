@@ -215,7 +215,7 @@ static void markConnected(BC::Common::BlockIndex *index, BlockInMemoryIndex &blo
 {
   index->Prev->Next = index;
   index->Flags.fetch_or(BFOnChain, std::memory_order_relaxed);
-  blockIndex.blockHeightIndex()[index->Height] = index;
+  blockIndex.setIndexByHeight(index->Height, index);
 }
 
 // Everything a connect changes; checks belong to the caller, so a segment can make them for all
@@ -294,7 +294,7 @@ static void DisconnectBlock(BlockInMemoryIndex &blockIndex,
     LOG_F(INFO, "Disconnect block %s (%u)", index->Header.GetHash().getHexLE().c_str(), index->Height);
   index->Prev->Next = nullptr;
   index->Flags.fetch_and(~BFOnChain, std::memory_order_relaxed);
-  blockIndex.blockHeightIndex()[index->Height] = nullptr;
+  blockIndex.setIndexByHeight(index->Height, nullptr);
   storage.disconnect(index, block, linkedOutputs, validationData, blockIndex);
   // The segment this block came in is broken from here: the disconnect put the hidden outputs
   // back, and every later connect of it must be plain. Only utxodb reads the marks, and it took
@@ -1349,7 +1349,7 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
       return false;
     }
 
-    blockIndex.blockHeightIndex()[index->Height] = index;
+    blockIndex.setIndexByHeight(index->Height, index);
     index->Prev->Next = index;
     // Loaded indexes hold the whole tree; on chain are those the restore walk passes
     index->Flags.fetch_or(BFOnChain, std::memory_order_relaxed);
@@ -1357,7 +1357,7 @@ bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
   }
 
   index->Flags.fetch_or(BFOnChain, std::memory_order_relaxed);
-  blockIndex.blockHeightIndex()[index->Height] = index;
+  blockIndex.setIndexByHeight(index->Height, index);
   if (index != blockIndex.genesis()) {
     LOG_F(ERROR, "Index for [%u]%s is broken (breaks at [%u]%s",
           bestIndex->Height,

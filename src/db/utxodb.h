@@ -84,6 +84,7 @@ public:
   // wall in negative RocksDB gets. Cache disabled: falls back to the db.
   // meta receives the coin word
   bool query(const BC::Proto::BlockHashTy &txid, unsigned txoutIdx, xvector<uint8_t> &result, uint32_t &meta, bool cacheOnly = false) const;
+  bool cacheEnabled() const { return Cache_.enabled(); }
 
   // Cache dump location and the block index resolving the stamp height;
   // must be called before initialize()
@@ -108,7 +109,36 @@ public:
                   BlockInMemoryIndex &blockIndex,
                   BlockDatabase &blockDb) final;
 
+  // The change sequence: blocks connected and disconnected so far, stored once at the start of
+  // each operation, before its first change. Whoever saw any change of operation k - in the
+  // cache or in a revision - and loads the sequence after that gets k at least: a reader that
+  // lags behind (the mempool) learns how far the database may have moved under its probes
+  uint64_t changeSeq() const {
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return ChangeSeq_.load(std::memory_order_relaxed);
+  }
+
+  // The published revision: the block it stands at and its number in the change sequence, from
+  // one view, so the two always belong together
+  struct CRevision {
+    BaseBlob<256> Stamp;
+    uint64_t Seq;
+  };
+
+  CRevision revision() const {
+    dbengine::CKvGuard<CUnspentOutputKey> guard = Engine_.guard();
+    return {guard.view()->Stamp, guard.view()->Seq};
+  }
+
 private:
+  // An operation of 'blocks' blocks begins: the store goes before any change it makes
+  uint64_t beginChange(uint64_t blocks) {
+    const uint64_t seq = ChangeSeq_.load(std::memory_order_relaxed) + blocks;
+    ChangeSeq_.store(seq, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    return seq;
+  }
+
   uint32_t version() final { return 1; }
   bool initializeImpl(config4cpp::Configuration *cfg) override;
 
@@ -137,6 +167,8 @@ private:
 
 private:
   dbengine::CSwmrCache<CUtxoCacheValue> Cache_;
+  // One writer, the thread connecting and disconnecting blocks
+  std::atomic<uint64_t> ChangeSeq_{0};
   std::filesystem::path CacheDir_;
   BlockInMemoryIndex *CacheBlockIndex_ = nullptr;
   unsigned CacheDumpThreads_ = 1;

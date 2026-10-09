@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "xpm.h"
+#include "BTC/policy.h"
 #include "common/serializeUtils.h"
 
 namespace XPM {
@@ -376,7 +377,7 @@ bool checkConsensus(const Proto::CBlockHeader &header, XPM::Common::CheckConsens
 
 bool checkBlockStandalone(const XPM::Proto::CBlock &block,
                           XPM::Proto::CBlockValidationData &validation,
-                          const XPM::Common::ChainParams&,
+                          const XPM::Common::ChainParams &chainParams,
                           std::string &error)
 {
   bool isValid = true;
@@ -387,7 +388,11 @@ bool checkBlockStandalone(const XPM::Proto::CBlock &block,
 
   validation.HasWitnessData = false;
 
-  // TODO: Transaction validation
+  // Transaction validation
+  isValid &= BTC::validateBlockCoinbase(block, error);
+  for (const auto &tx: block.Vtx)
+    isValid &= checkTransactionStandalone(tx, chainParams, error);
+  isValid &= BTC::validateBlockSigOps(block, XPM::Configuration::MaxBlockSigOps, error);
   return isValid;
 }
 
@@ -402,6 +407,73 @@ bool checkBlockContextual(const BlockIndex &index,
 
   bool isValid = true;
   isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
+  return isValid;
+}
+
+bool checkTransactionStandalone(const Proto::CTransaction &tx, const ChainParams&, std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateTxNotEmpty(tx, error);
+  isValid &= BTC::validateTxSize(BTC::Io<Proto::CTransaction>::getSerializedSize(tx, false), XPM::Configuration::MaxBlockSize, error);
+  isValid &= BTC::validateTxOutputValues(tx, XPM::Configuration::MaxMoney, error);
+  isValid &= BTC::validateTxOutputMinimum(tx, XPM::Configuration::MinTxOutAmount, error);
+  isValid &= BTC::validateTxPrevoutNull(tx, error);
+  isValid &= BTC::validateTxDuplicateInputs(tx, error);
+  return isValid;
+}
+
+// CSV never activated: locktime counts against the block's own time, BIP68 and BIP113 are policy
+
+bool checkTransactionContextual(const Proto::CTransaction &tx,
+                                const BTC::CPrevout *prevouts,
+                                const BTC::CTxContext &context,
+                                const ChainParams &chainParams,
+                                int64_t &fee,
+                                std::string &error)
+{
+  auto maturity = [&chainParams](uint32_t height) { return coinbaseMaturity(chainParams, height); };
+  bool isValid = true;
+  isValid &= BTC::validateTxInputValues(tx, prevouts, XPM::Configuration::MaxMoney, fee, error);
+  isValid &= BTC::validateTxCoinbaseMaturity(tx, prevouts, context.Height, maturity, error);
+  isValid &= BTC::validateTxFinal(tx, context.Height, context.BlockTime, error);
+  return isValid;
+}
+
+bool checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost &cost, std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateStandardVersion(tx, XPM::Configuration::MaxStandardTxVersion, error);
+  isValid &= BTC::validateStandardWeight(cost, error);
+  isValid &= BTC::validateStandardScriptSigs(tx, XPM::Configuration::MaxStandardScriptSigSize, error);
+  isValid &= BTC::validateStandardOutputs(tx, XPM::Configuration::MaxOpReturnRelay, XPM::Configuration::HasWitness, error);
+  isValid &= BTC::validateSingleDataOutput(tx, error);
+  isValid &= BTC::validateNoDust(tx, XPM::Configuration::DustRelayTxFee, XPM::Configuration::FeeRoundsUp, error);
+  isValid &= BTC::validateNonWitnessSize(cost, XPM::Configuration::MinStandardTxNonWitnessSize, error);
+  return isValid;
+}
+
+// A witness byte weighs one: no transaction is longer than its weight
+size_t maxStandardTxSize()
+{
+  return BTC::Policy::MaxStandardTxWeight;
+}
+
+// Core's STANDARD_LOCKTIME_VERIFY_FLAGS: BIP68 and BIP113 of the mempool only
+
+bool checkPolicyContextual(const Proto::CTransaction &tx,
+                           const BTC::CPrevout *prevouts,
+                           const BTC::CTxContext &context,
+                           const BTC::CTxCost &cost,
+                           int64_t fee,
+                           std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateTxFinal(tx, context.Height, context.MedianTimePast, error);
+  isValid &= BTC::validateTxSequenceLocks(tx, prevouts, context, error);
+  isValid &= BTC::validateStandardInputs(tx, prevouts, error);
+  isValid &= BTC::validateStandardWitness(tx, prevouts, error);
+  isValid &= BTC::validateStandardSigOps(cost, error);
+  isValid &= BTC::validateMinRelayFee(fee, cost, XPM::Configuration::MinRelayTxFee, XPM::Configuration::FeeRoundsUp, error);
   return isValid;
 }
 

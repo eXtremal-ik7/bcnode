@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "zec.h"
+#include "BTC/policy.h"
 #include "BTC/script.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
@@ -215,7 +216,7 @@ UInt<256> ZEC::Common::GetBlockProof(const Proto::CBlockHeader &header)
 
 bool ZEC::Common::checkBlockStandalone(const Proto::CBlock &block,
                                       Proto::CBlockValidationData&,
-                                      const ChainParams&,
+                                      const ChainParams &chainParams,
                                       std::string &error)
 {
   bool isValid = true;
@@ -226,7 +227,11 @@ bool ZEC::Common::checkBlockStandalone(const Proto::CBlock &block,
 
   // ZEC has no witness data, HasWitnessData stays false as initialized
 
-  // TODO: Transaction validation
+  // Transaction validation
+  isValid &= BTC::validateBlockCoinbase(block, error);
+  for (const auto &tx: block.Vtx)
+    isValid &= checkTransactionStandalone(tx, chainParams, error);
+  isValid &= BTC::validateBlockSigOps(block, ZEC::Configuration::MaxBlockSigOps, error);
   return isValid;
 }
 
@@ -241,4 +246,72 @@ bool ZEC::Common::checkBlockContextual(const BlockIndex &index,
   // stays, so that the block reload path has the same context filler to reproduce
   fillChainContext(index, chainParams, validation);
   return true;
+}
+
+// Bitcoin's rules, aware of the shielded parts. Zcash's own (versions, the shielded values and
+// nullifiers) are not here yet
+
+bool ZEC::Common::checkTransactionStandalone(const Proto::CTransaction &tx, const ChainParams&, std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateTxNotEmptyShielded(tx, error);
+  isValid &= BTC::validateTxSize(BTC::Io<Proto::CTransaction>::getSerializedSize(tx), ZEC::Configuration::MaxBlockSize, error);
+  isValid &= BTC::validateTxOutputValues(tx, ZEC::Configuration::MaxMoney, error);
+  isValid &= BTC::validateTxPrevoutNull(tx, error);
+  isValid &= BTC::validateTxDuplicateInputs(tx, error);
+  return isValid;
+}
+
+// Bitcoin's rules without BIP68: locktime counts against the block's own time. Zcash's own
+// (version group, expiry height, branch id, 100 kB before Sapling) are not here yet
+
+bool ZEC::Common::checkTransactionContextual(const Proto::CTransaction &tx,
+                                             const BTC::CPrevout *prevouts,
+                                             const BTC::CTxContext &context,
+                                             const ChainParams &chainParams,
+                                             int64_t &fee,
+                                             std::string &error)
+{
+  auto maturity = [&chainParams](uint32_t height) { return coinbaseMaturity(chainParams, height); };
+  bool isValid = true;
+  isValid &= BTC::validateTxInputValues(tx, prevouts, ZEC::Configuration::MaxMoney, fee, error);
+  isValid &= BTC::validateTxCoinbaseMaturity(tx, prevouts, context.Height, maturity, error);
+  isValid &= BTC::validateTxFinal(tx, context.Height, context.BlockTime, error);
+  return isValid;
+}
+
+// Bitcoin's rules Zcash's IsStandardTx keeps. Its own (the version by network upgrade, expiring
+// soon, its fee) are not here yet
+
+bool ZEC::Common::checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost&, std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateStandardScriptSigs(tx, ZEC::Configuration::MaxStandardScriptSigSize, error);
+  isValid &= BTC::validateStandardOutputs(tx, ZEC::Configuration::MaxOpReturnRelay, ZEC::Configuration::HasWitness, error);
+  isValid &= BTC::validateSingleDataOutput(tx, error);
+  isValid &= BTC::validateNoDust(tx, ZEC::Configuration::DustRelayTxFee, ZEC::Configuration::FeeRoundsUp, error);
+  return isValid;
+}
+
+// zcashd has no size policy: the consensus limit after Sapling
+size_t ZEC::Common::maxStandardTxSize()
+{
+  return ZEC::Configuration::MaxBlockSize;
+}
+
+// Zcash's STANDARD_LOCKTIME_VERIFY_FLAGS: BIP113 of the mempool only
+
+bool ZEC::Common::checkPolicyContextual(const Proto::CTransaction &tx,
+                                        const BTC::CPrevout *prevouts,
+                                        const BTC::CTxContext &context,
+                                        const BTC::CTxCost &cost,
+                                        int64_t fee,
+                                        std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateTxFinal(tx, context.Height, context.MedianTimePast, error);
+  isValid &= BTC::validateStandardInputs(tx, prevouts, error);
+  isValid &= BTC::validateStandardSigOps(cost, error);
+  isValid &= BTC::validateMinRelayFee(fee, cost, ZEC::Configuration::MinRelayTxFee, ZEC::Configuration::FeeRoundsUp, error);
+  return isValid;
 }

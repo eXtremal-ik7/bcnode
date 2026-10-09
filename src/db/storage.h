@@ -63,6 +63,10 @@ public:
 
   void wakeUp();
 
+  // Activated on the caller's thread after every utxo connect and disconnect, once the new
+  // revision is published: the mempool follows it. Set and cleared while the chain stands still
+  void setUtxoEvent(aioUserEvent *event) { UtxoEvent_ = event; }
+
   BlockDatabase &blockDb() { return *BlockDb_; }
   Archive &archive() { return *Archive_; }
   UTXODb &utxodb() { return UTXODb_; }
@@ -89,6 +93,7 @@ private:
   asyncBase *Base_ = nullptr;
   aioUserEvent *NewTaskEvent_ = nullptr;
   aioUserEvent *TimerEvent_ = nullptr;
+  aioUserEvent *UtxoEvent_ = nullptr;
   std::thread Thread_;
   std::function<void()> ErrorHandler_;
   tbb::concurrent_queue<Task> Queue_;

@@ -197,6 +197,7 @@ void UTXODb::saveCache()
 // run is invisible outside it, so neither the log nor the cache ever sees it
 void UTXODb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
 {
+  const uint64_t seq = beginChange(batch.size());
   dbengine::CKvWriter<CUnspentOutputKey> writer = liveWriter();
   for (const CBlockRef &ref: batch) {
     const BC::Proto::CBlock &block = *ref.Block;
@@ -258,7 +259,7 @@ void UTXODb::connect(CBlockBatch batch, BlockInMemoryIndex&, BlockDatabase&)
     assert(inOrdinal == validationData.InputLocalTx.size());
     assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
   }
-  commit(writer, batch.back().Index->Header.GetHash());
+  commit(writer, batch.back().Index->Header.GetHash(), seq);
 }
 
 // The disconnect walk. It does not honour the run pair marks: a same-block
@@ -273,6 +274,7 @@ void UTXODb::disconnect(const BC::Common::BlockIndex *index,
                             BlockInMemoryIndex&,
                             BlockDatabase&)
 {
+  const uint64_t seq = beginChange(1);
   dbengine::CKvWriter<CUnspentOutputKey> writer = liveWriter();
   assert(validationData.TxIds.size() == block.Vtx.size());
   assert(linkedOutputs.Tx.size() == block.Vtx.size());
@@ -326,7 +328,7 @@ void UTXODb::disconnect(const BC::Common::BlockIndex *index,
   }
   assert(inOrdinal == validationData.InputLocalTx.size());
   assert((outOrdinal + 63) / 64 == validationData.OutputSpentLocally.size());
-  commit(writer, index->Header.HashPrevBlock);
+  commit(writer, index->Header.HashPrevBlock, seq);
 }
 
 }

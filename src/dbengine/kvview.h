@@ -106,6 +106,12 @@ struct alignas(512) CKvView {
 
   // Inline: a lookup reaches its shard straight from the pinned view
   std::array<CShardView, MaxShards> Shards;
+
+  // Where the unit that published this revision left the database, and that unit's number in
+  // the owner's count of operations (zero for an owner that keeps none): one object, so a reader
+  // never pairs a position with the number of another
+  BaseBlob<256> Stamp;
+  uint64_t Seq = 0;
 };
 
 // Reader pin: one atomic on the published slot, held while the caller looks at
@@ -259,7 +265,9 @@ public:
 
   ~CKvEngine() { shutdown(); }
 
-  bool initialize(const CConfig &cfg, const std::vector<rocksdb::DB*> &shards, IKvSegmentWriter<CKey> *segmentWriter) {
+  // 'stamp' is where the disk stands at open: the first revision publishes it
+  bool initialize(const CConfig &cfg, const std::vector<rocksdb::DB*> &shards, IKvSegmentWriter<CKey> *segmentWriter,
+                  const BaseBlob<256> &stamp = BaseBlob<256>()) {
     SegmentWriter_ = segmentWriter;
     if (shards.size() > MaxShards) {
       LOG_F(ERROR, "%s: %zu shards configured, %zu is the maximum", cfg.Name.c_str(), shards.size(), MaxShards);
@@ -287,6 +295,7 @@ public:
 
     // The first view: nothing in memory, everything on the disk
     CKvView<CKey> *view = newView();
+    view->Stamp = stamp;
     for (size_t i = 0; i < ShardsNum_; i++) {
       Disk_[i].reset(new CDiskState(shards[i], 0));
       view->Shards[i].Disk = intrusive_ptr<const CDiskState>(Disk_[i]);
@@ -363,17 +372,17 @@ public:
 
   // The unit's publication: tearOff per shard the unit touched, the new
   // watermark rides the revision swap; an era at its byte threshold freezes
-  // right here. NOT thread-safe: one external mutator serializes every
-  // commitLive() - readers and the flusher may run concurrently
-  void commitLive(CKvWriter<CKey> &writer, const BaseBlob<256> &stamp) {
+  // right here. A unit that wrote nothing is published too: the position and
+  // the sequence still move. NOT thread-safe: one external mutator serializes
+  // every commitLive() - readers and the flusher may run concurrently
+  void commitLive(CKvWriter<CKey> &writer, const BaseBlob<256> &stamp, uint64_t seq = 0) {
     assert(writer.shardsNum() == ShardsNum_);
     assert(!stopped());
     writer.Committed_ = true;
 
-    if (writer.empty())
-      return;
-
     CKvView<CKey> *next = cloneView();
+    next->Stamp = stamp;
+    next->Seq = seq;
     for (size_t i = 0; i < ShardsNum_; i++) {
       if (!writer.wrote(i))
         continue;
@@ -524,6 +533,8 @@ private:
   CKvView<CKey> *cloneView() {
     const CKvView<CKey> *prev = Current_.get();
     CKvView<CKey> *next = newView();
+    next->Stamp = prev->Stamp;
+    next->Seq = prev->Seq;
     for (size_t i = 0; i < ShardsNum_; i++) {
       typename CKvView<CKey>::CShardView &dst = next->Shards[i];
       const typename CKvView<CKey>::CShardView &src = prev->Shards[i];

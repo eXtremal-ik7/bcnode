@@ -256,6 +256,9 @@ endmacro()
 prepare_bc_env(BTC)
 
 set(BTC_SOURCES
+  common/mempool.cpp
+  BTC/policy.cpp
+  BTC/txRelay.cpp
   BTC/proto.cpp
   BTC/network.cpp
   BTC/http.cpp
@@ -271,6 +274,8 @@ add_executable(bcnode-btc
 
 add_executable(bcterminal-btc
   bcterminal.cpp
+  BTC/policy.cpp
+  BTC/script.cpp
   BTC/btc.cpp
   BTC/proto.cpp
   BTC/merkleTree.cpp
@@ -278,6 +283,8 @@ add_executable(bcterminal-btc
 
 add_executable(bctest-btc
   bctest.cpp
+  BTC/policy.cpp
+  BTC/script.cpp
   BTC/btc.cpp
   BTC/proto.cpp
   BTC/merkleTree.cpp
@@ -308,6 +315,8 @@ add_executable(bcnode-ltc
 
 add_executable(bcterminal-ltc
   bcterminal.cpp
+  BTC/policy.cpp
+  BTC/script.cpp
   BTC/proto.cpp
   LTC/ltc.cpp
   LTC/proto.cpp
@@ -334,6 +343,8 @@ add_executable(bcnode-xpm
 
 add_executable(bcterminal-xpm
   bcterminal.cpp
+  BTC/policy.cpp
+  BTC/script.cpp
   BTC/proto.cpp
   XPM/xpm.cpp
   XPM/proto.cpp
@@ -363,6 +374,8 @@ if (BCNODE_DOGE)
 
   add_executable(bcterminal-doge
     bcterminal.cpp
+    BTC/policy.cpp
+    BTC/script.cpp
     LTC/ltc.cpp
     LTC/proto.cpp
     DOGE/doge.cpp
@@ -393,6 +406,8 @@ if (BCNODE_ZEC)
 
   add_executable(bcterminal-zec
     bcterminal.cpp
+    BTC/policy.cpp
+    BTC/script.cpp
     ZEC/zec.cpp
     ZEC/proto.cpp
     BTC/proto.cpp

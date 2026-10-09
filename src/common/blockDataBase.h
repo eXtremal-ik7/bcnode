@@ -8,6 +8,7 @@
 #include "BC/bc.h"
 #include "common/blockPipeline.h"
 #include "common/linearDataStorage.h"
+#include "dbengine/swmrarray.h"
 #include <tbb/concurrent_unordered_map.h>
 #include <filesystem>
 #include <functional>
@@ -109,13 +110,12 @@ public:
     return It != BlockIndex_.end() ? It->second : nullptr;
   }
 
-  BC::Common::BlockIndex *indexByHeight(uint32_t height) {
-    auto It = BlockHeightIndex_.find(height);
-    return It != BlockHeightIndex_.end() ? It->second : nullptr;
-  }
+  // The best chain by height; any thread
+  BC::Common::BlockIndex *indexByHeight(uint32_t height) { return BlockHeightIndex_.get(height); }
+  // One writer at a time: the index loader at startup, then the pipeline's serial stage
+  void setIndexByHeight(uint32_t height, BC::Common::BlockIndex *index) { BlockHeightIndex_.set(height, index); }
 
   auto &blockIndex() { return BlockIndex_; }
-  auto &blockHeightIndex() { return BlockHeightIndex_; }
 
   void notifyReady(BC::Common::BlockIndex *index) {
     CBlockPipeline *pipeline = ReadyPipeline_.load(std::memory_order_acquire);
@@ -130,7 +130,7 @@ public:
 private:
   std::atomic<CBlockPipeline*> ReadyPipeline_ = nullptr;
   tbb::concurrent_unordered_map<BC::Proto::BlockHashTy, BC::Common::BlockIndex*, std::hash<BC::Proto::BlockHashTy>> BlockIndex_;
-  tbb::concurrent_unordered_map<uint32_t, BC::Common::BlockIndex*, std::hash<uint32_t>> BlockHeightIndex_;
+  CSwmrArray<BC::Common::BlockIndex*> BlockHeightIndex_;
   std::atomic<BC::Common::BlockIndex*> BestIndex_ = nullptr;
   BC::Common::BlockIndex *GenesisIndex_ = nullptr;
   BC::Proto::CBlock GenesisBlock_;

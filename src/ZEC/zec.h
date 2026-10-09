@@ -30,9 +30,21 @@ namespace ZEC {
 class Configuration {
 public:
   static constexpr size_t MaxBlockSize = 2000000;
+  // Consensus: Zcash's MAX_BLOCK_SIGOPS
+  static constexpr unsigned MaxBlockSigOps = 20000;
   static constexpr uint32_t BlocksFileLimit = BTC::Configuration::BlocksFileLimit;
   static constexpr size_t DefaultBlockCacheSize = 256*1048576;
   static constexpr uint64_t RationalPartSize = 100000000ULL;
+  // Consensus: Zcash's MAX_MONEY, the same as Bitcoin's
+  static constexpr int64_t MaxMoney = BTC::Configuration::MaxMoney;
+  // Mempool policy. The fees are Bitcoin Core 28's, not checked against this coin's own node
+  static constexpr int64_t MinRelayTxFee = 1000;
+  static constexpr int64_t DustRelayTxFee = 3000;
+  static constexpr bool FeeRoundsUp = false;
+  static constexpr size_t MaxStandardScriptSigSize = 1650;
+  static constexpr size_t MaxOpReturnRelay = 83;
+  // No segwit: witness outputs are not standard
+  static constexpr bool HasWitness = false;
 
   static constexpr const char *ProjectName = "ZCash";
   static constexpr const char *TickerName = "ZEC";
@@ -81,6 +93,28 @@ namespace Common {
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
                             std::string &error);
+
+  // A transaction alone: Core's CheckTransaction
+  bool checkTransactionStandalone(const Proto::CTransaction &tx, const ChainParams &chainParams, std::string &error);
+  // With the outputs it spends, for the block it would enter: CheckTxInputs and IsFinalTx. Sets
+  // the fee once the input values pass
+  bool checkTransactionContextual(const Proto::CTransaction &tx,
+                                  const BTC::CPrevout *prevouts,
+                                  const BTC::CTxContext &context,
+                                  const ChainParams &chainParams,
+                                  int64_t &fee,
+                                  std::string &error);
+  // Mempool policy on the transaction alone and with the outputs it spends: what this coin's node
+  // asks beyond consensus (BTC/policy.h)
+  bool checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost &cost, std::string &error);
+  bool checkPolicyContextual(const Proto::CTransaction &tx,
+                             const BTC::CPrevout *prevouts,
+                             const BTC::CTxContext &context,
+                             const BTC::CTxCost &cost,
+                             int64_t fee,
+                             std::string &error);
+  // The longest transaction checkPolicyStandalone can pass: the network drops longer ones unparsed
+  size_t maxStandardTxSize();
 
   bool checkPow(const Proto::CBlockHeader &header, uint32_t nBits, CheckConsensusCtx &, const UInt<256> &powLimit);
   UInt<256> GetBlockProof(const Proto::CBlockHeader &header);

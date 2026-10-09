@@ -17,6 +17,10 @@ namespace DB {
 class Archive;
 }
 
+namespace Mempool {
+struct CRecord;
+}
+
 namespace Network {
 
 class Node;
@@ -49,7 +53,8 @@ private:
     fnTxsByBlockHeight,
     fnTxsByTxid,
     fnTxsLatest,
-    fnTxsRaw
+    fnTxsRaw,
+    fnTxsSend
   };
 
   static std::unordered_map<std::string, HttpApiConnection::FunctionTy> FunctionNameMap_;
@@ -116,6 +121,7 @@ public:
   void onTxsByTxid(rapidjson::Document &request);
   void onTxsLatest(rapidjson::Document &request);
   void onTxsRaw(rapidjson::Document &request);
+  void onTxsSend(rapidjson::Document &request);
 
   // Helpers
   void reply404();
@@ -130,6 +136,9 @@ public:
 
   void serializeBlock(xmstream &stream, const BC::Common::BlockIndex *index, const BC::Common::CIndexCacheObject *object, const BC::Proto::BlockHashTy &hash);
   void serializeTx(xmstream &stream, const BC::Proto::CTransaction &tx, const BC::Proto::CTxLinkedOutputs &txOutputs, const BC::Common::BlockIndex *index, bool isCoinbase, uint64_t confirmations, const BC::Proto::BalanceType *balanceAfter = nullptr);
+  void serializeMempoolTx(xmstream &stream, const BC::Mempool::CRecord &record);
+  // A transaction from the mempool snapshot; false when it is not there
+  bool replyMempoolTx(const BC::Proto::TxHashTy &txid);
 
   void reply200(xmstream &stream);
   size_t startChunk(xmstream &stream);

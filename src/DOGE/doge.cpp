@@ -5,6 +5,7 @@
 
 #include "doge.h"
 #include "validation.h"
+#include "BTC/policy.h"
 #include "crypto/scrypt.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
@@ -182,7 +183,11 @@ bool DOGE::Common::checkBlockStandalone(const Proto::CBlock &block,
 
   validation.HasWitnessData = hasWitnessData;
 
-  // TODO: Transaction validation
+  // Transaction validation
+  isValid &= BTC::validateBlockCoinbase(block, error);
+  for (const auto &tx: block.Vtx)
+    isValid &= checkTransactionStandalone(tx, chainParams, error);
+  isValid &= BTC::validateBlockSigOps(block, DOGE::Configuration::MaxBlockSigOps, error);
   return isValid;
 }
 
@@ -198,6 +203,72 @@ bool DOGE::Common::checkBlockContextual(const BlockIndex &index,
   bool isValid = true;
   isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
   isValid &= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);
+  return isValid;
+}
+
+bool DOGE::Common::checkTransactionStandalone(const Proto::CTransaction &tx, const ChainParams&, std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateTxNotEmpty(tx, error);
+  isValid &= BTC::validateTxSize(BTC::Io<Proto::CTransaction>::getSerializedSize(tx, false), DOGE::Configuration::MaxBlockSize, error);
+  isValid &= BTC::validateTxOutputValues(tx, DOGE::Configuration::MaxMoney, error);
+  isValid &= BTC::validateTxPrevoutNull(tx, error);
+  isValid &= BTC::validateTxDuplicateInputs(tx, error);
+  return isValid;
+}
+
+// CSV never activated: locktime counts against the block's own time, BIP68 and BIP113 are policy
+
+bool DOGE::Common::checkTransactionContextual(const Proto::CTransaction &tx,
+                                              const BTC::CPrevout *prevouts,
+                                              const BTC::CTxContext &context,
+                                              const ChainParams &chainParams,
+                                              int64_t &fee,
+                                              std::string &error)
+{
+  auto maturity = [&chainParams](uint32_t height) { return coinbaseMaturity(chainParams, height); };
+  bool isValid = true;
+  isValid &= BTC::validateTxInputValues(tx, prevouts, DOGE::Configuration::MaxMoney, fee, error);
+  isValid &= BTC::validateTxCoinbaseMaturity(tx, prevouts, context.Height, maturity, error);
+  isValid &= BTC::validateTxUnexpectedWitness(tx, context.Height, chainParams.SegwitHeight, error);
+  isValid &= BTC::validateTxFinal(tx, context.Height, context.BlockTime, error);
+  return isValid;
+}
+
+bool DOGE::Common::checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost &cost, std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateStandardVersion(tx, DOGE::Configuration::MaxStandardTxVersion, error);
+  isValid &= BTC::validateStandardWeight(cost, error);
+  isValid &= BTC::validateStandardScriptSigs(tx, DOGE::Configuration::MaxStandardScriptSigSize, error);
+  isValid &= BTC::validateStandardOutputs(tx, DOGE::Configuration::MaxOpReturnRelay, DOGE::Configuration::HasWitness, error);
+  isValid &= BTC::validateSingleDataOutput(tx, error);
+  isValid &= BTC::validateNoDust(tx, DOGE::Configuration::DustRelayTxFee, DOGE::Configuration::FeeRoundsUp, error);
+  return isValid;
+}
+
+// No witness: every byte weighs four
+size_t DOGE::Common::maxStandardTxSize()
+{
+  return BTC::Policy::MaxStandardTxWeight / BTC::Policy::WitnessScaleFactor;
+}
+
+// Core's STANDARD_LOCKTIME_VERIFY_FLAGS: BIP68 and BIP113 of the mempool only
+
+bool DOGE::Common::checkPolicyContextual(const Proto::CTransaction &tx,
+                                         const BTC::CPrevout *prevouts,
+                                         const BTC::CTxContext &context,
+                                         const BTC::CTxCost &cost,
+                                         int64_t fee,
+                                         std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateTxFinal(tx, context.Height, context.MedianTimePast, error);
+  isValid &= BTC::validateTxSequenceLocks(tx, prevouts, context, error);
+  isValid &= BTC::validateStandardInputs(tx, prevouts, error);
+  isValid &= BTC::validateStandardWitness(tx, prevouts, error);
+  isValid &= BTC::validateStandardSigOps(cost, error);
+  isValid &= BTC::validateMinRelayFee(fee, cost, DOGE::Configuration::MinRelayTxFee, DOGE::Configuration::FeeRoundsUp, error);
   return isValid;
 }
 

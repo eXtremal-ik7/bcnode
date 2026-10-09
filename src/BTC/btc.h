@@ -19,9 +19,28 @@ class UTXODb;
 class Configuration {
 public:
   static constexpr size_t MaxBlockSize = 1000000;
+  // Consensus: MAX_BLOCK_SIGOPS_COST / WITNESS_SCALE_FACTOR, in legacy sigops
+  static constexpr unsigned MaxBlockSigOps = 20000;
   static constexpr uint32_t BlocksFileLimit = 128*1048576;
   static constexpr size_t DefaultBlockCacheSize = 512*1048576;
   static constexpr uint64_t RationalPartSize = 100000000ULL;
+  // Consensus: Core's MAX_MONEY
+  static constexpr int64_t MaxMoney = 21000000LL * 100000000LL;
+  // Mempool policy, Bitcoin Core 31's defaults; fees per 1000 bytes
+  static constexpr int64_t MinRelayTxFee = 100;
+  static constexpr int64_t DustRelayTxFee = 3000;
+  // Bitcoin Core rounds a fee up
+  static constexpr bool FeeRoundsUp = true;
+  static constexpr int32_t MaxStandardTxVersion = 3;
+  static constexpr uint32_t MinStandardTxNonWitnessSize = 65;
+  static constexpr size_t MaxStandardScriptSigSize = 1650;
+  // Every data output together: the standard weight in vbytes (-datacarriersize)
+  static constexpr size_t MaxDataCarrierBytes = 100000;
+  // BIP54's limit of legacy sigops, a policy until it activates
+  static constexpr unsigned MaxTxLegacySigOps = 2500;
+  // Clusters are bounded instead of ancestors and descendants
+  static constexpr size_t MempoolClusterLimit = 64;
+  static constexpr uint64_t MempoolClusterSizeLimit = 101000;
 
   static constexpr bool HasWitness = true;
   static constexpr uint32_t ProtocolVersion = 70015;
@@ -119,6 +138,28 @@ namespace Common {
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
                             std::string &error);
+
+  // A transaction alone: Core's CheckTransaction
+  bool checkTransactionStandalone(const Proto::CTransaction &tx, const ChainParams &chainParams, std::string &error);
+  // With the outputs it spends, for the block it would enter: CheckTxInputs, IsFinalTx and
+  // SequenceLocks. Sets the fee once the input values pass
+  bool checkTransactionContextual(const Proto::CTransaction &tx,
+                                  const CPrevout *prevouts,
+                                  const CTxContext &context,
+                                  const ChainParams &chainParams,
+                                  int64_t &fee,
+                                  std::string &error);
+  // Mempool policy on the transaction alone and with the outputs it spends: what this coin's node
+  // asks beyond consensus (BTC/policy.h)
+  bool checkPolicyStandalone(const Proto::CTransaction &tx, const CTxCost &cost, std::string &error);
+  bool checkPolicyContextual(const Proto::CTransaction &tx,
+                             const CPrevout *prevouts,
+                             const CTxContext &context,
+                             const CTxCost &cost,
+                             int64_t fee,
+                             std::string &error);
+  // The longest transaction checkPolicyStandalone can pass: the network drops longer ones unparsed
+  size_t maxStandardTxSize();
 }
 
 class X {

@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "ltc.h"
+#include "BTC/policy.h"
 #include "crypto/scrypt.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
@@ -246,7 +247,7 @@ UInt<256> GetBlockProof(const Proto::CBlockHeader &header)
 
 bool checkBlockStandalone(const LTC::Proto::CBlock &block,
                           LTC::Proto::CBlockValidationData &validation,
-                          const LTC::Common::ChainParams&,
+                          const LTC::Common::ChainParams &chainParams,
                           std::string &error)
 {
   bool isValid = true;
@@ -261,7 +262,11 @@ bool checkBlockStandalone(const LTC::Proto::CBlock &block,
 
   validation.HasWitnessData = hasWitnessData;
 
-  // TODO: Transaction validation
+  // Transaction validation
+  isValid &= BTC::validateBlockCoinbase(block, error);
+  for (const auto &tx: block.Vtx)
+    isValid &= checkTransactionStandalone(tx, chainParams, error);
+  isValid &= BTC::validateBlockSigOps(block, LTC::Configuration::MaxBlockSigOps, error);
   return isValid;
 }
 
@@ -277,6 +282,72 @@ bool checkBlockContextual(const BlockIndex &index,
   bool isValid = true;
   isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
   isValid &= BTC::validateUnexpectedWitness(index.Height, validation.HasWitnessData, chainParams.SegwitHeight, error);
+  return isValid;
+}
+
+bool checkTransactionStandalone(const Proto::CTransaction &tx, const ChainParams&, std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateTxNotEmptyMweb(tx, error);
+  isValid &= BTC::validateTxSize(BTC::Io<Proto::CTransaction>::getSerializedSize(tx, LTC::Proto::CSerializeCtx(false, false)),
+                                 LTC::Configuration::MaxBlockSize,
+                                 error);
+  isValid &= BTC::validateTxOutputValues(tx, LTC::Configuration::MaxMoney, error);
+  isValid &= BTC::validateTxPrevoutNull(tx, error);
+  isValid &= BTC::validateTxDuplicateInputs(tx, error);
+  return isValid;
+}
+
+bool checkTransactionContextual(const Proto::CTransaction &tx,
+                                const BTC::CPrevout *prevouts,
+                                const BTC::CTxContext &context,
+                                const ChainParams &chainParams,
+                                int64_t &fee,
+                                std::string &error)
+{
+  auto maturity = [&chainParams](uint32_t height) { return coinbaseMaturity(chainParams, height); };
+  bool isValid = true;
+  isValid &= BTC::validateTxInputValues(tx, prevouts, LTC::Configuration::MaxMoney, fee, error);
+  isValid &= BTC::validateTxCoinbaseMaturity(tx, prevouts, context.Height, maturity, error);
+  isValid &= BTC::validateTxPegoutMaturity(tx, prevouts, context.Height, LTC::MWeb::PegoutMaturity, error);
+  isValid &= BTC::validateTxUnexpectedWitness(tx, context.Height, chainParams.SegwitHeight, error);
+  isValid &= BTC::validateTxFinal(tx, context.Height, context.MedianTimePast, error);
+  isValid &= BTC::validateTxSequenceLocks(tx, prevouts, context, error);
+  return isValid;
+}
+
+bool checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost &cost, std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateStandardVersion(tx, LTC::Configuration::MaxStandardTxVersion, error);
+  isValid &= BTC::validateStandardWeight(cost, error);
+  isValid &= BTC::validateStandardScriptSigs(tx, LTC::Configuration::MaxStandardScriptSigSize, error);
+  isValid &= BTC::validateStandardOutputs(tx, LTC::Configuration::MaxOpReturnRelay, LTC::Configuration::HasWitness, error);
+  isValid &= BTC::validateSingleDataOutput(tx, error);
+  isValid &= BTC::validateNoDust(tx, LTC::Configuration::DustRelayTxFee, LTC::Configuration::FeeRoundsUp, error);
+  isValid &= BTC::validateNonWitnessSize(cost, LTC::Configuration::MinStandardTxNonWitnessSize, error);
+  isValid &= BTC::validateMwebPegins(tx, error);
+  return isValid;
+}
+
+// A witness byte weighs one: no transaction is longer than its weight
+size_t maxStandardTxSize()
+{
+  return BTC::Policy::MaxStandardTxWeight;
+}
+
+bool checkPolicyContextual(const Proto::CTransaction &tx,
+                           const BTC::CPrevout *prevouts,
+                           const BTC::CTxContext&,
+                           const BTC::CTxCost &cost,
+                           int64_t fee,
+                           std::string &error)
+{
+  bool isValid = true;
+  isValid &= BTC::validateStandardInputs(tx, prevouts, error);
+  isValid &= BTC::validateStandardWitness(tx, prevouts, error);
+  isValid &= BTC::validateStandardSigOps(cost, error);
+  isValid &= BTC::validateMinRelayFee(fee, cost, LTC::Configuration::MinRelayTxFee, LTC::Configuration::FeeRoundsUp, error);
   return isValid;
 }
 

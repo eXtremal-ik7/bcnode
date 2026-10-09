@@ -4,11 +4,15 @@
 #include "script.h"
 #include "merkleTree.h"
 #include "common/serializeUtils.h"
+#include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace BTC {
 
@@ -274,6 +278,319 @@ static inline bool validateUnexpectedWitness(uint32_t height, bool hasWitnessDat
   if (!result)
     error = "unexpected-witness-data";
   return result;
+}
+
+// Transactions: Core's CheckTransaction, CheckTxInputs, IsFinalTx and SequenceLocks, one rule to a
+// function. Finding the outputs a transaction spends is the caller's business. Scripts and the
+// coins' own parts (MWEB, the shielded pools) are not checked yet: taken as valid
+
+// A spent output as the rules see it
+struct CPrevout {
+  int64_t Value = 0;
+  // Script::CUnspentOutputInfo::EType: policy needs no more of the script than its form
+  uint8_t Type = 0;
+  // The height of the block that created it
+  uint32_t Height = 0;
+  bool Coinbase = false;
+  // MWEB: a peg-out, a HogEx output past the first
+  bool Pegout = false;
+};
+
+// The block a transaction is checked for
+struct CTxContext {
+  uint32_t Height = 0;
+  // Its own time: locktime counts against it where BIP113 is not consensus. For the mempool, now
+  int64_t BlockTime = 0;
+  int64_t MedianTimePast = 0;
+  // Of a block below on the same chain: BIP68 time locks count from it
+  std::function<int64_t(uint32_t)> MedianTimePastAt;
+};
+
+// What the mempool policy measures (policy.h)
+struct CTxCost;
+
+// Core's IsCoinBase: one input, the null prevout
+template<typename TxTy>
+bool isCoinbase(const TxTy &tx)
+{
+  return tx.TxIn.size() == 1 && tx.TxIn[0].PreviousOutputHash.isNull() && tx.TxIn[0].PreviousOutputIndex == 0xFFFFFFFF;
+}
+
+// The coinbase first, and only there
+template<typename BlockTy>
+bool validateBlockCoinbase(const BlockTy &block, std::string &error)
+{
+  if (block.Vtx.empty() || !isCoinbase(block.Vtx[0])) {
+    error = "bad-cb-missing";
+    return false;
+  }
+  for (size_t i = 1; i < block.Vtx.size(); i++) {
+    if (isCoinbase(block.Vtx[i])) {
+      error = "bad-cb-multiple";
+      return false;
+    }
+  }
+  return true;
+}
+
+// The legacy sigops of every script: Core's CheckBlock limit, before the inputs are known
+template<typename BlockTy>
+bool validateBlockSigOps(const BlockTy &block, unsigned limit, std::string &error)
+{
+  unsigned sigOps = 0;
+  for (const auto &tx: block.Vtx) {
+    for (const auto &in: tx.TxIn)
+      sigOps += Script::sigOpCount(in.ScriptSig.data(), in.ScriptSig.data() + in.ScriptSig.size(), false);
+    for (const auto &out: tx.TxOut)
+      sigOps += Script::sigOpCount(out.PkScript.data(), out.PkScript.data() + out.PkScript.size(), false);
+  }
+  if (sigOps > limit) {
+    error = "bad-blk-sigops";
+    return false;
+  }
+  return true;
+}
+
+template<typename TxTy>
+bool validateTxNotEmpty(const TxTy &tx, std::string &error)
+{
+  if (tx.TxIn.empty()) {
+    error = "bad-txns-vin-empty";
+    return false;
+  }
+  if (tx.TxOut.empty()) {
+    error = "bad-txns-vout-empty";
+    return false;
+  }
+  return true;
+}
+
+// Litecoin's: an MWEB-only transaction has both in its MWEB part
+template<typename TxTy>
+bool validateTxNotEmptyMweb(const TxTy &tx, std::string &error)
+{
+  if (tx.hasMweb() && tx.TxIn.empty() && tx.TxOut.empty())
+    return true;
+  return validateTxNotEmpty(tx, error);
+}
+
+// Zcash's: the shielded parts stand in for either side
+template<typename TxTy>
+bool validateTxNotEmptyShielded(const TxTy &tx, std::string &error)
+{
+  if (tx.TxIn.empty() && tx.JoinSplits.empty() && tx.ShieldedSpends.empty()) {
+    error = "bad-txns-vin-empty";
+    return false;
+  }
+  if (tx.TxOut.empty() && tx.JoinSplits.empty() && tx.ShieldedOutputs.empty()) {
+    error = "bad-txns-vout-empty";
+    return false;
+  }
+  return true;
+}
+
+// The transaction fits a block. The size is the coin's: without the witness (and MWEB for
+// Litecoin) as Core counts it, the whole transaction for Zcash
+static inline bool validateTxSize(size_t size, size_t limit, std::string &error)
+{
+  if (size > limit) {
+    error = "bad-txns-oversize";
+    return false;
+  }
+  return true;
+}
+
+template<typename TxTy>
+bool validateTxOutputValues(const TxTy &tx, int64_t maxMoney, std::string &error)
+{
+  int64_t total = 0;
+  for (const auto &out: tx.TxOut) {
+    if (out.Value < 0) {
+      error = "bad-txns-vout-negative";
+      return false;
+    }
+    if (out.Value > maxMoney) {
+      error = "bad-txns-vout-toolarge";
+      return false;
+    }
+    total += out.Value;
+    if (total > maxMoney) {
+      error = "bad-txns-txouttotal-toolarge";
+      return false;
+    }
+  }
+  return true;
+}
+
+// Primecoin's: no output below the minimum
+template<typename TxTy>
+bool validateTxOutputMinimum(const TxTy &tx, int64_t minimum, std::string &error)
+{
+  for (const auto &out: tx.TxOut) {
+    if (out.Value < minimum) {
+      error = "bad-txns-vout-belowminimum";
+      return false;
+    }
+  }
+  return true;
+}
+
+// A coinbase carries a scriptSig of 2 to 100 bytes; any other transaction spends no null prevout
+template<typename TxTy>
+bool validateTxPrevoutNull(const TxTy &tx, std::string &error)
+{
+  auto isNull = [](const auto &in) { return in.PreviousOutputHash.isNull() && in.PreviousOutputIndex == 0xFFFFFFFF; };
+  if (isCoinbase(tx)) {
+    const size_t size = tx.TxIn[0].ScriptSig.size();
+    if (size < 2 || size > 100) {
+      error = "bad-cb-length";
+      return false;
+    }
+    return true;
+  }
+
+  for (const auto &in: tx.TxIn) {
+    if (isNull(in)) {
+      error = "bad-txns-prevout-null";
+      return false;
+    }
+  }
+  return true;
+}
+
+template<typename TxTy>
+bool validateTxDuplicateInputs(const TxTy &tx, std::string &error)
+{
+  std::vector<std::pair<Proto::TxHashTy, uint32_t>> outpoints;
+  outpoints.reserve(tx.TxIn.size());
+  for (const auto &in: tx.TxIn)
+    outpoints.emplace_back(in.PreviousOutputHash, in.PreviousOutputIndex);
+  std::sort(outpoints.begin(), outpoints.end(), [](const auto &l, const auto &r) {
+    int c = memcmp(l.first.begin(), r.first.begin(), l.first.size());
+    return c < 0 || (c == 0 && l.second < r.second);
+  });
+
+  if (std::adjacent_find(outpoints.begin(), outpoints.end()) != outpoints.end()) {
+    error = "bad-txns-inputs-duplicate";
+    return false;
+  }
+  return true;
+}
+
+// The outputs passed validateTxOutputValues. Sets the fee once the values pass
+template<typename TxTy>
+bool validateTxInputValues(const TxTy &tx, const CPrevout *prevouts, int64_t maxMoney, int64_t &fee, std::string &error)
+{
+  int64_t valueIn = 0;
+  for (size_t i = 0; i < tx.TxIn.size(); i++) {
+    if (prevouts[i].Value < 0 || prevouts[i].Value > maxMoney) {
+      error = "bad-txns-inputvalues-outofrange";
+      return false;
+    }
+    valueIn += prevouts[i].Value;
+    if (valueIn > maxMoney) {
+      error = "bad-txns-inputvalues-outofrange";
+      return false;
+    }
+  }
+
+  int64_t valueOut = 0;
+  for (const auto &out: tx.TxOut)
+    valueOut += out.Value;
+  if (valueIn < valueOut) {
+    error = "bad-txns-in-belowout";
+    return false;
+  }
+
+  fee = valueIn - valueOut;
+  return true;
+}
+
+// maturity(height): the blocks a coinbase output created at that height waits
+template<typename TxTy, typename MaturityTy>
+bool validateTxCoinbaseMaturity(const TxTy &tx, const CPrevout *prevouts, uint32_t height, MaturityTy maturity, std::string &error)
+{
+  for (size_t i = 0; i < tx.TxIn.size(); i++) {
+    if (prevouts[i].Coinbase && height - prevouts[i].Height < maturity(prevouts[i].Height)) {
+      error = "bad-txns-premature-spend-of-coinbase";
+      return false;
+    }
+  }
+  return true;
+}
+
+template<typename TxTy>
+bool validateTxPegoutMaturity(const TxTy &tx, const CPrevout *prevouts, uint32_t height, uint32_t maturity, std::string &error)
+{
+  for (size_t i = 0; i < tx.TxIn.size(); i++) {
+    if (prevouts[i].Pegout && height - prevouts[i].Height < maturity) {
+      error = "bad-txns-premature-spend-of-pegout";
+      return false;
+    }
+  }
+  return true;
+}
+
+// validateUnexpectedWitness for one transaction: no witness before segwit
+template<typename TxTy>
+bool validateTxUnexpectedWitness(const TxTy &tx, uint32_t height, uint32_t segwitHeight, std::string &error)
+{
+  const bool hasWitness = std::any_of(tx.TxIn.begin(), tx.TxIn.end(), [](const auto &in) { return !in.WitnessStack.empty(); });
+  return validateUnexpectedWitness(height, hasWitness, segwitHeight, error);
+}
+
+// Locktime against the height and, past the threshold, a time: the block's own, or its median time
+// past where BIP113 holds
+template<typename TxTy>
+bool validateTxFinal(const TxTy &tx, uint32_t height, int64_t time, std::string &error)
+{
+  constexpr int64_t LocktimeThreshold = 500000000;
+  const int64_t lockTime = tx.LockTime;
+  if (lockTime == 0 || lockTime < (lockTime < LocktimeThreshold ? static_cast<int64_t>(height) : time))
+    return true;
+
+  for (const auto &in: tx.TxIn) {
+    if (in.Sequence != 0xFFFFFFFF) {
+      error = "bad-txns-nonfinal";
+      return false;
+    }
+  }
+  return true;
+}
+
+// BIP68 relative locks, counted from the blocks that created the spent outputs
+template<typename TxTy>
+bool validateTxSequenceLocks(const TxTy &tx, const CPrevout *prevouts, const CTxContext &context, std::string &error)
+{
+  constexpr uint32_t DisableFlag = 1u << 31;
+  constexpr uint32_t TypeFlag = 1u << 22;
+  constexpr uint32_t Mask = 0x0000FFFF;
+  constexpr int Granularity = 9;
+
+  // Version as unsigned, as Core compares it
+  if (static_cast<uint32_t>(tx.Version) < 2)
+    return true;
+
+  int64_t minHeight = -1;
+  int64_t minTime = -1;
+  for (size_t i = 0; i < tx.TxIn.size(); i++) {
+    const uint32_t sequence = tx.TxIn[i].Sequence;
+    if (sequence & DisableFlag)
+      continue;
+    const int64_t coinHeight = prevouts[i].Height;
+    if (sequence & TypeFlag) {
+      int64_t coinTime = context.MedianTimePastAt(static_cast<uint32_t>(std::max<int64_t>(coinHeight - 1, 0)));
+      minTime = std::max(minTime, coinTime + (static_cast<int64_t>(sequence & Mask) << Granularity) - 1);
+    } else {
+      minHeight = std::max(minHeight, coinHeight + static_cast<int64_t>(sequence & Mask) - 1);
+    }
+  }
+
+  if (minHeight >= static_cast<int64_t>(context.Height) || minTime >= context.MedianTimePast) {
+    error = "bad-txns-nonfinal";
+    return false;
+  }
+  return true;
 }
 }
 

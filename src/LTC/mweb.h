@@ -22,6 +22,9 @@
 namespace LTC {
 namespace MWeb {
 
+// Blocks a peg-out waits before it may be spent (PEGOUT_MATURITY)
+constexpr uint32_t PegoutMaturity = 6;
+
 using HashTy = BaseBlob<256>;
 using BlindingFactorTy = BaseBlob<256>;
 using CommitmentTy = BaseBlob<264>;

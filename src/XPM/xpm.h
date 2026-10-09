@@ -35,9 +35,25 @@ namespace XPM {
 class Configuration {
 public:
   static constexpr size_t MaxBlockSize = BTC::Common::MaxBlockSize;
+  // Consensus: Primecoin's MAX_BLOCK_SIGOPS_COST / WITNESS_SCALE_FACTOR, as Bitcoin's
+  static constexpr unsigned MaxBlockSigOps = 20000;
   static constexpr uint32_t BlocksFileLimit = BTC::Common::BlocksFileLimit;
   static constexpr size_t DefaultBlockCacheSize = 256*1048576;
   static constexpr uint64_t RationalPartSize = 100000000ULL;
+  // Consensus: Primecoin's MAX_MONEY (Bitcoin's) and MIN_TXOUT_AMOUNT
+  static constexpr int64_t MaxMoney = 21000000LL * 100000000LL;
+  static constexpr int64_t MinTxOutAmount = 1000000;
+  // Mempool policy. The fees are Bitcoin Core 28's, not checked against this coin's own node
+  static constexpr int64_t MinRelayTxFee = 1000;
+  static constexpr int64_t DustRelayTxFee = 3000;
+  static constexpr bool FeeRoundsUp = false;
+  static constexpr int32_t MaxStandardTxVersion = 1;
+  static constexpr uint32_t MinStandardTxNonWitnessSize = 82;
+  // Primecoin's own limit
+  static constexpr size_t MaxStandardScriptSigSize = 500;
+  static constexpr size_t MaxOpReturnRelay = 83;
+  // Segwit never activated: witness outputs are not standard
+  static constexpr bool HasWitness = false;
 
   static constexpr const char *ProjectName = "Primecoin";
   static constexpr const char *TickerName = "XPM";
@@ -130,6 +146,28 @@ namespace Common {
                             const Proto::CBlockLinkedOutputs &linkedOutputs,
                             const ChainParams &chainParams,
                             std::string &error);
+
+  // A transaction alone: Core's CheckTransaction
+  bool checkTransactionStandalone(const Proto::CTransaction &tx, const ChainParams &chainParams, std::string &error);
+  // With the outputs it spends, for the block it would enter: CheckTxInputs and IsFinalTx. Sets
+  // the fee once the input values pass
+  bool checkTransactionContextual(const Proto::CTransaction &tx,
+                                  const BTC::CPrevout *prevouts,
+                                  const BTC::CTxContext &context,
+                                  const ChainParams &chainParams,
+                                  int64_t &fee,
+                                  std::string &error);
+  // Mempool policy on the transaction alone and with the outputs it spends: what this coin's node
+  // asks beyond consensus (BTC/policy.h)
+  bool checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost &cost, std::string &error);
+  bool checkPolicyContextual(const Proto::CTransaction &tx,
+                             const BTC::CPrevout *prevouts,
+                             const BTC::CTxContext &context,
+                             const BTC::CTxCost &cost,
+                             int64_t fee,
+                             std::string &error);
+  // The longest transaction checkPolicyStandalone can pass: the network drops longer ones unparsed
+  size_t maxStandardTxSize();
 };
 
 class X {

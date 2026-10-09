@@ -37,6 +37,56 @@ bool isBareMultisig(const uint8_t *script, size_t size)
 
 namespace BTC {
 
+bool Script::getOp(const uint8_t *&p, const uint8_t *end, uint8_t &opcode, CSpan *data)
+{
+  if (p >= end)
+    return false;
+  opcode = *p++;
+  if (opcode > OP_PUSHDATA4)
+    return true;
+
+  size_t size = opcode;
+  if (opcode == OP_PUSHDATA1) {
+    if (end - p < 1)
+      return false;
+    size = p[0];
+    p += 1;
+  } else if (opcode == OP_PUSHDATA2) {
+    if (end - p < 2)
+      return false;
+    size = p[0] | (static_cast<size_t>(p[1]) << 8);
+    p += 2;
+  } else if (opcode == OP_PUSHDATA4) {
+    if (end - p < 4)
+      return false;
+    size = p[0] | (static_cast<size_t>(p[1]) << 8) | (static_cast<size_t>(p[2]) << 16) | (static_cast<size_t>(p[3]) << 24);
+    p += 4;
+  }
+
+  if (static_cast<size_t>(end - p) < size)
+    return false;
+  if (data)
+    *data = {p, size};
+  p += size;
+  return true;
+}
+
+unsigned Script::sigOpCount(const uint8_t *p, const uint8_t *end, bool accurate)
+{
+  unsigned count = 0;
+  uint8_t last = 0xFF;
+  uint8_t opcode;
+  while (p < end && getOp(p, end, opcode)) {
+    if (opcode == OP_CHECKSIG || opcode == OP_CHECKSIGVERIFY) {
+      count++;
+    } else if (opcode == OP_CHECKMULTISIG || opcode == OP_CHECKMULTISIGVERIFY) {
+      count += accurate && last >= OP_1 && last <= OP_16 ? last - OP_1 + 1 : 20;
+    }
+    last = opcode;
+  }
+  return count;
+}
+
 bool Script::extractAddress(const BC::Proto::CTxOut &txOut, CAddress &address)
 {
   const uint8_t *scriptData = txOut.PkScript.data();
