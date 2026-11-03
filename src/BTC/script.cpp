@@ -33,6 +33,16 @@ bool isBareMultisig(const uint8_t *script, size_t size)
   return offset == size - 2 && keysNum == static_cast<size_t>(n - BTC::Script::OP_1 + 1);
 }
 
+// The size of a script isBareMultisig accepted: the key pushes run up to OP_n, which is neither 33
+// nor 65
+size_t bareMultisigSize(const uint8_t *script)
+{
+  size_t offset = 1;
+  while (script[offset] == 33 || script[offset] == 65)
+    offset += 1 + script[offset];
+  return offset + 2;
+}
+
 }
 
 namespace BTC {
@@ -173,9 +183,12 @@ bool Script::extractAddress(const CUnspentOutputInfo &info, CAddress &address)
     case CUnspentOutputInfo::EWitnessTaproot :
       address.set(CUnspentOutputInfo::EWitnessTaproot, info.WitnessProgram, 32);
       return true;
-    case CUnspentOutputInfo::EMultisig :
-      address.set(CUnspentOutputInfo::EMultisig, info.ScriptHash.begin(), info.ScriptHash.size());
+    case CUnspentOutputInfo::EMultisig : {
+      // The same synthetic identity the receiving side takes from the output
+      auto hash = sha256FollowRipemd160(info.CustomData, bareMultisigSize(info.CustomData));
+      address.set(CUnspentOutputInfo::EMultisig, hash.begin(), hash.size());
       return true;
+    }
     default :
       return false;
   }
@@ -343,12 +356,9 @@ void Script::parseTransactionOutput(const BC::Proto::CTxOut &out, xmstream &unsp
     // OP_1 OP_PUSH32(XOnlyPubKey)
     info->Type = CUnspentOutputInfo::EWitnessTaproot;
     memcpy(info->WitnessProgram, script+2, 32);
-  } else if (isBareMultisig(script, out.PkScript.size())) {
-    // The spend path needs only the synthetic identity, not the keys
-    info->Type = CUnspentOutputInfo::EMultisig;
-    info->ScriptHash = sha256FollowRipemd160(script, out.PkScript.size());
   } else {
-    info->Type = CUnspentOutputInfo::ENonStandard;
+    // The script as it is: a spend is checked against it, a hash would lose bare multisig keys
+    info->Type = isBareMultisig(script, out.PkScript.size()) ? CUnspentOutputInfo::EMultisig : CUnspentOutputInfo::ENonStandard;
     unspentOutputInfo.seekSet(base + CUnspentOutputInfo::customDataOffset());
     unspentOutputInfo.write(script, out.PkScript.size());
   }

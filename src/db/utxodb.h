@@ -53,10 +53,9 @@ static inline unsigned utxoCreationFlags(const CTransactionTy &tx, size_t txIdx,
 }
 
 // Read-cache entry: serialized CUnspentOutputInfo bytes stored inline. Every
-// fixed-layout output type (incl. the bare multisig identity) is exactly
-// sizeof(CUnspentOutputInfo); longer values (uncompressed P2PK, non-standard
-// scripts) are not cached at all - a miss is always legal, a positive must
-// be exact
+// fixed-layout output type is exactly sizeof(CUnspentOutputInfo); longer
+// values (uncompressed P2PK, bare multisig, non-standard scripts) are not
+// cached at all - a miss is always legal, a positive must be exact
 struct CUtxoCacheValue {
   uint32_t Height; // creation height, drives the eviction floor
   uint8_t Flags;   // EUtxoFlag, mirrors the on-disk suffix; rides in former padding

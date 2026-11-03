@@ -272,8 +272,8 @@ bool validateStandardInputs(const TxTy &tx, const CPrevout *prevouts, std::strin
 }
 
 // Core 30's CheckSigopsBIP54: the legacy sigops of the scriptSigs and of what they spend, P2SH
-// redeem scripts counted accurately. A bare multisig coin keeps no key count: it counts the most its
-// type allows
+// redeem scripts counted accurately. CPrevout carries no key count of a bare multisig coin: it counts
+// the most its type allows
 template<typename TxTy>
 bool validateLegacySigOps(const TxTy &tx, const CPrevout *prevouts, unsigned limit, std::string &error)
 {
