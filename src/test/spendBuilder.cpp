@@ -4,6 +4,8 @@
 #include <secp256k1.h>
 #include <secp256k1_extrakeys.h>
 #include <secp256k1_schnorrsig.h>
+#include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <iterator>
 
@@ -15,16 +17,6 @@ using BTC::EScriptError;
 using BTC::ESigMode;
 using BTC::EVerdict;
 using TxOut = BTC::Proto::CTxOut;
-
-// Core's STANDARD_SCRIPT_VERIFY_FLAGS
-constexpr uint32_t StandardFlags =
-  BTC::EScriptP2SH | BTC::EScriptStrictEnc | BTC::EScriptDerSig | BTC::EScriptLowS | BTC::EScriptNullDummy |
-  BTC::EScriptMinimalData | BTC::EScriptDiscourageUpgradableNops | BTC::EScriptCleanStack |
-  BTC::EScriptCheckLockTimeVerify | BTC::EScriptCheckSequenceVerify | BTC::EScriptWitness |
-  BTC::EScriptDiscourageUpgradableWitnessProgram | BTC::EScriptMinimalIf | BTC::EScriptNullFail |
-  BTC::EScriptWitnessPubKeyType | BTC::EScriptConstScriptCode | BTC::EScriptTaproot |
-  BTC::EScriptDiscourageUpgradableTaprootVersion | BTC::EScriptDiscourageOpSuccess |
-  BTC::EScriptDiscourageUpgradablePubKeyType;
 
 // Core's MANDATORY_SCRIPT_VERIFY_FLAGS
 constexpr uint32_t ConsensusFlags =
@@ -95,18 +87,59 @@ void assign(xvector<uint8_t> &target, const Bytes &data)
     memcpy(target.data(), data.data(), data.size());
 }
 
+// OP_PUSHDATA1, 2 or 4 by the bytes of its length
+Bytes pushData(const Bytes &data, unsigned lengthBytes)
+{
+  Bytes result{static_cast<uint8_t>(lengthBytes == 1 ? 0x4c : lengthBytes == 2 ? 0x4d : 0x4e)};
+  for (unsigned i = 0; i < lengthBytes; i++)
+    result.push_back(static_cast<uint8_t>(data.size() >> (8 * i)));
+  append(result, data);
+  return result;
+}
+
 // The minimal push: direct up to 75 bytes, OP_0 for nothing
 Bytes push(const Bytes &data)
 {
-  Bytes result;
-  if (data.size() <= 75) {
-    result.push_back(static_cast<uint8_t>(data.size()));
-  } else if (data.size() <= 255) {
-    result = {0x4c, static_cast<uint8_t>(data.size())};
-  } else {
-    result = {0x4d, static_cast<uint8_t>(data.size()), static_cast<uint8_t>(data.size() >> 8)};
-  }
+  if (data.size() > 75)
+    return pushData(data, data.size() <= 0xff ? 1 : data.size() <= 0xffff ? 2 : 4);
+  Bytes result{static_cast<uint8_t>(data.size())};
   append(result, data);
+  return result;
+}
+
+// Core's CScript::push_int64 and CScriptNum::serialize: the magnitude little endian, the sign in
+// the top bit of the last byte, a byte more when the magnitude takes that bit
+Bytes number(int64_t value)
+{
+  if (value == 0)
+    return {0x00};
+  if (value == -1 || (value >= 1 && value <= 16))
+    return {static_cast<uint8_t>(0x50 + value)};
+  Bytes data;
+  const bool negative = value < 0;
+  for (uint64_t rest = negative ? 0 - static_cast<uint64_t>(value) : static_cast<uint64_t>(value); rest; rest >>= 8)
+    data.push_back(static_cast<uint8_t>(rest));
+  if (data.back() & 0x80)
+    data.push_back(negative ? 0x80 : 0x00);
+  else if (negative)
+    data.back() |= 0x80;
+  return push(data);
+}
+
+// The bytes of a script, its pushes filled by data
+template<typename Data>
+Bytes assemble(const CScriptSig &script, Data data)
+{
+  Bytes result;
+  for (const auto &item: script.Items) {
+    std::visit(COverloaded{
+      [&](const CElement &element) { append(result, push(data(element))); },
+      [&](const CPushData &pushed) { append(result, pushData(data(pushed.Data), pushed.LengthBytes)); },
+      [&](const COp &op) { result.push_back(op.Code); },
+      [&](const CRaw &raw) { append(result, raw.Data); },
+      [&](const CNum &num) { append(result, number(num.Value)); }
+    }, item);
+  }
   return result;
 }
 
@@ -271,11 +304,17 @@ void putLe64(Bytes &target, uint64_t value)
     target.push_back(static_cast<uint8_t>(value >> (8 * i)));
 }
 
-// CompactSize of one byte: no script here is longer
+// CompactSize of one byte or three: no script here is longer
 void putSized(Bytes &target, const Bytes &data)
 {
-  EXPECT_LT(data.size(), 0xfdu);
-  target.push_back(static_cast<uint8_t>(data.size()));
+  EXPECT_LE(data.size(), 0xffffu);
+  if (data.size() < 0xfd) {
+    target.push_back(static_cast<uint8_t>(data.size()));
+  } else {
+    target.push_back(0xfd);
+    target.push_back(static_cast<uint8_t>(data.size()));
+    target.push_back(static_cast<uint8_t>(data.size() >> 8));
+  }
   append(target, data);
 }
 
@@ -315,6 +354,33 @@ BaseBlob<256> blobOf(const Bytes &hash)
   return result;
 }
 
+// Core's serializer of the first SignatureHash writes the script code with no OP_CODESEPARATOR in it;
+// what a push cut short leaves is written as it is
+Bytes withoutCodeSeparators(const Bytes &code)
+{
+  Bytes result;
+  size_t p = 0;
+  while (p < code.size()) {
+    const uint8_t op = code[p];
+    const size_t left = code.size() - p;
+    size_t size = 1;
+    if (op >= 0x01 && op <= 0x4b)
+      size += op;
+    else if (op == 0x4c)
+      size = left < 2 ? left : 2 + code[p + 1];
+    else if (op == 0x4d)
+      size = left < 3 ? left : 3 + (code[p + 1] | code[p + 2] << 8);
+    else if (op == 0x4e)
+      size = left < 5 ? left : 5 + (code[p + 1] | code[p + 2] << 8 | code[p + 3] << 16 | static_cast<size_t>(code[p + 4]) << 24);
+    if (size > left)
+      size = left;
+    if (op != 0xab)
+      result.insert(result.end(), code.begin() + p, code.begin() + p + size);
+    p += size;
+  }
+  return result;
+}
+
 // Core's first SignatureHash: the script code for the script sig of the input and no other script,
 // the inputs and outputs the hash type leaves, serialized as for a txid, the type after it
 BaseBlob<256> legacyDigest(const Tx &tx, size_t input, const Bytes &scriptCode, uint8_t hashType)
@@ -336,7 +402,7 @@ BaseBlob<256> legacyDigest(const Tx &tx, size_t input, const Bytes &scriptCode, 
     in.PreviousOutputIndex = tx.TxIn[i].PreviousOutputIndex;
     in.Sequence = tx.TxIn[i].Sequence;
     if (i == input)
-      assign(in.ScriptSig, scriptCode);
+      assign(in.ScriptSig, withoutCodeSeparators(scriptCode));
     else if (type == SIGHASH_NONE || type == SIGHASH_SINGLE)
       in.Sequence = 0;
     copy.TxIn.emplace_back(std::move(in));
@@ -440,16 +506,25 @@ BaseBlob<256> bip341Digest(const Tx &tx, const std::vector<TxOut> &spent, size_t
   return blobOf(sha256Of(Concat(Concat(tag, tag), message)));
 }
 
-BaseBlob<256> ecdsaDigest(const CBuilt &b, const COutput &output, uint8_t hashType)
+BaseBlob<256> ecdsaDigest(const CBuilt &b, COutput::EDigest digest, const Bytes &scriptCode, uint8_t hashType)
 {
-  switch (output.Digest) {
+  switch (digest) {
     case COutput::EDigest::Legacy :
-      return legacyDigest(b.Transaction, b.Input, output.ScriptCode, hashType);
+      return legacyDigest(b.Transaction, b.Input, scriptCode, hashType);
     case COutput::EDigest::Bip143 :
-      return bip143Digest(b.Transaction, b.Input, output.ScriptCode, b.Spent[b.Input].Value, hashType);
+      return bip143Digest(b.Transaction, b.Input, scriptCode, b.Spent[b.Input].Value, hashType);
     default :
       return BaseBlob<256>();
   }
+}
+
+// The output's script code, or the signature's own: legacy where the output names no digest
+BaseBlob<256> ecdsaDigest(const CBuilt &b, const COutput &output, const CSig &sig)
+{
+  if (!sig.ScriptCode)
+    return ecdsaDigest(b, output.Digest, output.ScriptCode, sig.HashType);
+  const bool segwit = output.Digest == COutput::EDigest::Bip143;
+  return ecdsaDigest(b, segwit ? COutput::EDigest::Bip143 : COutput::EDigest::Legacy, *sig.ScriptCode, sig.HashType);
 }
 
 BaseBlob<256> schnorrDigest(const CBuilt &b, const COutput &output, uint8_t hashType)
@@ -477,7 +552,7 @@ Bytes ecdsa(CBuilt &b, const COutput &output, const CSig &sig)
   if (!key)
     return {};
   noteSignature(b, "Sig", sig.HashType);
-  const BaseBlob<256> digest = ecdsaDigest(b, output, sig.HashType);
+  const BaseBlob<256> digest = ecdsaDigest(b, output, sig);
   uint8_t secret[32];
   secretKey(*key, secret);
   uint8_t compact[64];
@@ -498,6 +573,8 @@ Bytes ecdsa(CBuilt &b, const COutput &output, const CSig &sig)
     compact[31] ^= 1;
   Bytes result = der(sig, compact);
   result.push_back(sig.WrittenType.value_or(sig.HashType));
+  if (sig.TypeTwice)
+    result.push_back(sig.WrittenType.value_or(sig.HashType));
   return result;
 }
 
@@ -531,12 +608,28 @@ Bytes element(CBuilt &b, const COutput &output, const CElement &item)
     [](const Bytes &data) { return data; },
     [](const CKey &key) { return key.pubKey(); },
     [&](const CSig &sig) { return ecdsa(b, output, sig); },
-    [&](const CSchnorr &sig) { return schnorr(b, output, sig); }
+    [&](const CSchnorr &sig) { return schnorr(b, output, sig); },
+    [&](const CRedeemScript&) { return output.Redeem; },
+    [&](const CWitnessScript&) { return output.WitnessScript; }
   }, item);
 }
 
+// What a script holds apart from a spend: data and keys
+Bytes plain(const CElement &item)
+{
+  return std::visit(COverloaded{
+    [](const Bytes &data) { return data; },
+    [](const CKey &key) { return key.pubKey(); },
+    [](const auto&) {
+      ADD_FAILURE() << "a signature or the output's own script in a script built apart from a spend";
+      return Bytes();
+    }
+  }, item);
+}
+
+// The transaction of a shape with no script of the input checked: all its ECDSA digests take.
 // False and a failure if the shape names no input to check
-bool make(const CTx &shape, const COutput &output, const CScriptSig &scriptSig, const CWitness &witness, CBuilt &b)
+bool skeleton(const CTx &shape, CBuilt &b)
 {
   if (shape.Checked >= shape.Inputs) {
     ADD_FAILURE() << "the input checked is out of the transaction";
@@ -545,32 +638,31 @@ bool make(const CTx &shape, const COutput &output, const CScriptSig &scriptSig, 
 
   b.Input = shape.Checked;
   Tx &tx = b.Transaction;
-  tx.Version = 2;
-  tx.LockTime = 0;
+  tx.Version = shape.Version;
+  tx.LockTime = shape.LockTime;
   for (size_t i = 0; i < shape.Inputs; i++) {
     tx.TxIn.emplace_back(txIn(i));
-    b.Spent.push_back(i == shape.Checked ? txOut(100000, output.Script) : otherSpent(i));
+    tx.TxIn.back().Sequence = i == shape.Checked ? shape.Sequence : shape.OtherSequence.value_or(shape.Sequence);
+    b.Spent.push_back(i == shape.Checked ? txOut(100000, {}) : otherSpent(i));
   }
-  for (size_t i = 0; i < shape.Outputs; i++)
+  for (size_t i = 0; i < shape.Outputs; i++) {
     tx.TxOut.emplace_back(paid(i));
+    if (!shape.OutputScript.empty())
+      assign(tx.TxOut.back().PkScript, shape.OutputScript);
+  }
+  return true;
+}
+
+bool make(const CTx &shape, const COutput &output, const CScriptSig &scriptSig, const CWitness &witness, CBuilt &b)
+{
+  if (!skeleton(shape, b))
+    return false;
+  Tx &tx = b.Transaction;
+  assign(b.Spent[b.Input].PkScript, output.Script);
 
   // The digests take neither the script sig nor the witness of the input
-  Bytes script;
-  for (const auto &item: scriptSig.Items) {
-    std::visit(COverloaded{
-      [&](const CElement &data) { append(script, push(element(b, output, data))); },
-      [&](const CPushData1 &pushData) {
-        Bytes data = element(b, output, pushData.Data);
-        script.push_back(0x4c);
-        script.push_back(static_cast<uint8_t>(data.size()));
-        append(script, data);
-      },
-      [&](const COp &op) { script.push_back(op.Code); },
-      [&](const CRaw &raw) { append(script, raw.Data); }
-    }, item);
-  }
   BTC::Proto::CTxIn &in = tx.TxIn[b.Input];
-  assign(in.ScriptSig, script);
+  assign(in.ScriptSig, assemble(scriptSig, [&](const CElement &data) { return element(b, output, data); }));
   in.WitnessStack.resize(witness.Elements.size());
   for (size_t i = 0; i < witness.Elements.size(); i++)
     assign(in.WitnessStack[i], element(b, output, witness.Elements[i]));
@@ -637,6 +729,222 @@ void build(const CTx &shape, const COutput &output, const CScriptSig &scriptSig,
   }
   if (made)
     checkSpend(b, verdicts, where);
+}
+
+constexpr unsigned FlagCount = 21;
+
+// Core's IsValidFlagCombination, TrimFlags and FillFlags: CLEANSTACK goes with WITNESS, WITNESS with P2SH
+bool flagsGoTogether(uint32_t flags)
+{
+  if ((flags & BTC::EScriptCleanStack) && (~flags & (BTC::EScriptP2SH | BTC::EScriptWitness)))
+    return false;
+  return !(flags & BTC::EScriptWitness) || (flags & BTC::EScriptP2SH);
+}
+
+uint32_t trimFlags(uint32_t flags)
+{
+  if (!(flags & BTC::EScriptP2SH))
+    flags &= ~static_cast<uint32_t>(BTC::EScriptWitness);
+  if (!(flags & BTC::EScriptWitness))
+    flags &= ~static_cast<uint32_t>(BTC::EScriptCleanStack);
+  return flags;
+}
+
+uint32_t fillFlags(uint32_t flags)
+{
+  if (flags & BTC::EScriptCleanStack)
+    flags |= BTC::EScriptWitness;
+  if (flags & BTC::EScriptWitness)
+    flags |= BTC::EScriptP2SH;
+  return flags;
+}
+
+// Core's ExcludeIndividualFlags: the sets with one flag less, trimmed
+std::vector<uint32_t> withoutEachFlag(uint32_t flags)
+{
+  std::vector<uint32_t> result;
+  for (unsigned i = 0; i < FlagCount; i++) {
+    const uint32_t fewer = trimFlags(flags & ~(1u << i));
+    if (fewer != flags && std::find(result.begin(), result.end(), fewer) == result.end())
+      result.push_back(fewer);
+  }
+  return result;
+}
+
+// Core draws flag sets at random; here they are the same at every run, by the line and the flags
+struct CFlagDraw {
+  uint64_t State;
+
+  CFlagDraw(std::source_location where, uint32_t flags) : State(static_cast<uint64_t>(where.line()) << 32 | flags) {}
+  // SplitMix64
+  uint32_t next(unsigned bits) {
+    uint64_t z = State += 0x9e3779b97f4a7c15ull;
+    z = (z ^ z >> 30) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ z >> 27) * 0x94d049bb133111ebull;
+    return static_cast<uint32_t>((z ^ z >> 31) & ((1ull << bits) - 1));
+  }
+};
+
+// A spend under the interpreter, and under the whole check where the fast path takes it
+struct CChecked {
+  const CBuilt &Built;
+  CRecords Records;
+  BTC::CTxChecker<Tx> Checker;
+
+  explicit CChecked(const CBuilt &b) : Built(b), Records(b.Spent), Checker(b.Transaction, Records.Pointers, TxOrdinal) {}
+
+  // The interpreter runs the script the record gives back
+  bool recordKeepsScript() {
+    const size_t input = Built.Input;
+    xvector<uint8_t> restored;
+    const bool kept = BTC::Script::restoreScript(*Records.Pointers[input], restored);
+    EXPECT_TRUE(kept) << "an output no utxo keeps";
+    if (!kept)
+      return false;
+    EXPECT_EQ(bytesOf(restored), bytesOf(Built.Spent[input].PkScript)) << "the script of the record";
+    return bytesOf(restored) == bytesOf(Built.Spent[input].PkScript);
+  }
+
+  // The error; false if another
+  bool error(uint32_t flags, EScriptError expected) {
+    const EScriptError error = BTC::interpretInput(Checker, Built.Input, flags);
+    EXPECT_EQ(CVerdict(error), CVerdict(expected)) << "the interpreter, flags 0x" << std::hex << flags;
+    const BTC::CInputVerdict whole = BTC::verifyInput(Checker, Built.Input, flags, ESigMode::Now, nullptr);
+    if (!whole.Interpreted) {
+      EXPECT_EQ(CVerdict(whole.Result == EVerdict::Valid ? EScriptError::Ok : whole.Error), CVerdict(expected))
+        << "the fast path, flags 0x" << std::hex << flags;
+    }
+    return error == expected;
+  }
+
+  // Valid or not, whatever the error
+  void validity(uint32_t flags, bool valid, const char *what) {
+    EXPECT_TRUE(flagsGoTogether(flags)) << what << ": flags that do not go together, 0x" << std::hex << flags;
+    if (!flagsGoTogether(flags))
+      return;
+    EXPECT_EQ(BTC::interpretInput(Checker, Built.Input, flags) == EScriptError::Ok, valid)
+      << "the interpreter, " << what << ", 0x" << std::hex << flags;
+    const BTC::CInputVerdict whole = BTC::verifyInput(Checker, Built.Input, flags, ESigMode::Now, nullptr);
+    if (!whole.Interpreted) {
+      EXPECT_EQ(whole.Result == EVerdict::Valid, valid) << "the fast path, " << what << ", 0x" << std::hex << flags;
+    }
+  }
+};
+
+// Core's DoTest with one flag set and its verdict
+void checkScript(const CBuilt &b, uint32_t flags, EScriptError expected, std::source_location where)
+{
+  testing::ScopedTrace trace(where.file_name(), static_cast<int>(where.line()), b.Note);
+  // CLEANSTACK goes with P2SH and WITNESS
+  if (flags & BTC::EScriptCleanStack)
+    flags |= BTC::EScriptP2SH | BTC::EScriptWitness;
+
+  CChecked checked(b);
+  if (!checked.recordKeepsScript() || !checked.error(flags, expected))
+    return;
+
+  // A valid spend stays valid with flags taken away, an invalid one invalid with flags added. Core
+  // draws 16 sets of the 16 flags it picks from; ahead of those, each flag alone and all at once
+  const bool valid = expected == EScriptError::Ok;
+  CFlagDraw draw(where, flags);
+  for (unsigned i = 0; i < 33; i++) {
+    const uint32_t change = i < 16 ? 1u << i : i == 16 ? 0xffffu : draw.next(16);
+    const uint32_t combined = valid ? flags & ~change : flags | change;
+    // The sets Core weeds out
+    if (combined == flags || !flagsGoTogether(combined))
+      continue;
+    checked.validity(combined, valid, valid ? "flags taken away" : "flags added");
+  }
+}
+
+// Core's tx_valid for the input
+void checkTxValid(const CBuilt &b, uint32_t excluded, std::source_location where)
+{
+  testing::ScopedTrace trace(where.file_name(), static_cast<int>(where.line()), b.Note);
+  const uint32_t flags = AllFlags & ~excluded;
+  EXPECT_EQ(flags, fillFlags(flags)) << "the flags left do not go together";
+
+  CChecked checked(b);
+  if (!checked.recordKeepsScript() || !checked.error(flags, EScriptError::Ok))
+    return;
+
+  // Taking flags away does not fail a valid spend: each alone, and a drawn set
+  CFlagDraw draw(where, flags);
+  for (unsigned i = 0; i < FlagCount; i++) {
+    checked.validity(trimFlags(AllFlags & ~(excluded | 1u << i)), true, "a flag taken away");
+    checked.validity(trimFlags(AllFlags & ~(excluded | draw.next(FlagCount))), true, "flags taken away");
+  }
+  // The excluded flags are all needed: each of them back fails the spend
+  for (uint32_t fewer: withoutEachFlag(excluded))
+    checked.validity(AllFlags & ~fewer, false, "an excluded flag back");
+}
+
+// Core's tx_invalid for the input
+void checkTxInvalid(const CBuilt &b, uint32_t flags, EScriptError expected, std::source_location where)
+{
+  testing::ScopedTrace trace(where.file_name(), static_cast<int>(where.line()), b.Note);
+  EXPECT_EQ(flags, fillFlags(flags)) << "the flags do not go together";
+
+  CChecked checked(b);
+  if (!checked.recordKeepsScript() || !checked.error(flags, expected))
+    return;
+
+  // Adding flags does not pass an invalid spend: each alone, and a drawn set
+  CFlagDraw draw(where, flags);
+  for (unsigned i = 0; i < FlagCount; i++) {
+    checked.validity(fillFlags(flags | 1u << i), false, "a flag added");
+    checked.validity(fillFlags(flags | draw.next(FlagCount)), false, "flags added");
+  }
+  // The flags are all needed: with any of them away the spend is valid
+  for (uint32_t fewer: withoutEachFlag(flags))
+    checked.validity(fewer, true, "a flag taken away");
+}
+
+// Core's ValidateCheckInputsForAllFlags for the input: 10000 drawn sets there
+void checkValidUnless(const CBuilt &b, uint32_t failing, std::source_location where)
+{
+  testing::ScopedTrace trace(where.file_name(), static_cast<int>(where.line()), b.Note);
+  CChecked checked(b);
+  if (!checked.recordKeepsScript())
+    return;
+
+  CFlagDraw draw(where, failing);
+  for (unsigned i = 0; i < 256; i++) {
+    const uint32_t flags = fillFlags(draw.next(FlagCount));
+    checked.validity(flags, !(flags & failing), "a drawn set");
+  }
+}
+
+// Arithmetic modulo the group order with what libsecp256k1 gives: a secret key is such a number
+using CScalar = std::array<uint8_t, 32>;
+
+CScalar scalarMul(CScalar a, const CScalar &b)
+{
+  EXPECT_TRUE(secp256k1_ec_seckey_tweak_mul(context(), a.data(), b.data()));
+  return a;
+}
+
+// a^(n-2)
+CScalar scalarInverse(const CScalar &a)
+{
+  static const uint8_t Exponent[32] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+                                       0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x3f};
+  CScalar result{};
+  result[31] = 1;
+  CScalar power = a;
+  for (unsigned bit = 0; bit < 256; bit++) {
+    if (Exponent[31 - bit / 8] >> (bit % 8) & 1)
+      result = scalarMul(result, power);
+    power = scalarMul(power, power);
+  }
+  return result;
+}
+
+CScalar scalarOf(const Bytes &data)
+{
+  CScalar result;
+  memcpy(result.data(), data.data(), 32);
+  return result;
 }
 
 }
@@ -724,9 +1032,34 @@ COutput P2WPKH(const CKey &key)
 COutput P2SH(const COutput &redeem)
 {
   COutput output = redeem;
+  output.Redeem = redeem.Script;
   output.Script = {0xa9, 0x14};
   append(output.Script, hash160(redeem.Script));
   output.Script.push_back(0x87);
+  return output;
+}
+
+COutput Bare(const CScriptSig &script)
+{
+  COutput output;
+  output.Script = Code(script);
+  output.Digest = COutput::EDigest::Legacy;
+  output.ScriptCode = output.Script;
+  return output;
+}
+
+COutput P2SH(const CScriptSig &redeem)
+{
+  return P2SH(Bare(redeem));
+}
+
+COutput P2WSH(const CScriptSig &witnessScript)
+{
+  COutput output;
+  output.WitnessScript = Code(witnessScript);
+  output.Script = Concat({0x00}, push(sha256Of(output.WitnessScript)));
+  output.Digest = COutput::EDigest::Bip143;
+  output.ScriptCode = output.WitnessScript;
   return output;
 }
 
@@ -769,6 +1102,224 @@ COutput Output(const Bytes &script)
 Bytes Hash160(const CKey &key)
 {
   return hash160(key.pubKey());
+}
+
+CScriptSig Repeat(size_t count, const CScriptSig &script)
+{
+  CScriptSig result;
+  for (size_t i = 0; i < count; i++)
+    result.Items.insert(result.Items.end(), script.Items.begin(), script.Items.end());
+  return result;
+}
+
+Bytes Code(const CScriptSig &script)
+{
+  return assemble(script, plain);
+}
+
+namespace {
+
+struct COpName {
+  std::string_view Name;
+  uint8_t Code;
+};
+
+constexpr COpName OpNames[] = {
+#define SPEND_TEST_OPNAME(name, code) {#name, code},
+  SPEND_TEST_OPCODES(SPEND_TEST_OPNAME)
+#undef SPEND_TEST_OPNAME
+};
+
+// A script written as text, the notation spendBuilder.h gives
+class CScriptText {
+public:
+  explicit CScriptText(std::string_view text) : Text_(text) {}
+
+  bool parse(CScriptSig &script) { return sequence(script, 0); }
+  const char *error() const { return Error_; }
+  size_t position() const { return Pos_; }
+
+private:
+  std::string_view Text_;
+  size_t Pos_ = 0;
+  const char *Error_ = "";
+
+  bool fail(const char *what) {
+    Error_ = what;
+    return false;
+  }
+
+  char peek() const { return Pos_ < Text_.size() ? Text_[Pos_] : 0; }
+  static bool isSpace(char c) { return c == ' ' || c == '\t' || c == '\n'; }
+  static bool isDigit(char c) { return c >= '0' && c <= '9'; }
+  static bool isHexDigit(char c) { return isDigit(c) || ((c | 0x20) >= 'a' && (c | 0x20) <= 'f'); }
+
+  void skipSpaces() {
+    while (isSpace(peek()))
+      Pos_++;
+  }
+
+  // "*201" after what it repeats; once if there is none
+  bool times(size_t &count) {
+    count = 1;
+    if (peek() != '*')
+      return true;
+    const char *begin = Text_.data() + Pos_ + 1;
+    const auto [end, ec] = std::from_chars(begin, Text_.data() + Text_.size(), count);
+    if (ec != std::errc() || count == 0 || count > 1000000)
+      return fail("a count expected after *");
+    Pos_ = static_cast<size_t>(end - Text_.data());
+    return true;
+  }
+
+  bool hex(std::string_view digits, Bytes &bytes) {
+    if (digits.empty() || digits.size() % 2 || !std::all_of(digits.begin(), digits.end(), isHexDigit))
+      return fail("hex digits in pairs expected");
+    append(bytes, operator""_hex(digits.data(), digits.size()));
+    return true;
+  }
+
+  // <...>: runs of hex digits, each as many times as its count says
+  bool data(Bytes &bytes) {
+    Pos_++;
+    for (;;) {
+      skipSpaces();
+      if (peek() == '>')
+        break;
+      if (Pos_ == Text_.size())
+        return fail("no closing >");
+      const size_t begin = Pos_;
+      while (isHexDigit(peek()))
+        Pos_++;
+      Bytes run;
+      size_t count;
+      if (!hex(Text_.substr(begin, Pos_ - begin), run) || !times(count))
+        return false;
+      for (size_t i = 0; i < count; i++)
+        append(bytes, run);
+    }
+    Pos_++;
+    return true;
+  }
+
+  bool word(CScriptSig &script) {
+    const size_t begin = Pos_;
+    while (Pos_ < Text_.size() && std::string_view(" \t\n()<>*'").find(Text_[Pos_]) == std::string_view::npos)
+      Pos_++;
+    std::string_view word = Text_.substr(begin, Pos_ - begin);
+    if (word.empty())
+      return fail("a word expected");
+
+    if (word.starts_with("0x")) {
+      Bytes raw;
+      if (!hex(word.substr(2), raw))
+        return false;
+      script.Items.emplace_back(CRaw{std::move(raw)});
+      return true;
+    }
+
+    // 2DROP and its kin start with a digit too
+    const size_t digits = word[0] == '-' ? 1 : 0;
+    if (word.size() > digits && std::all_of(word.begin() + digits, word.end(), isDigit)) {
+      int64_t value;
+      if (std::from_chars(word.data(), word.data() + word.size(), value).ec != std::errc())
+        return fail("the number does not fit");
+      script.Items.emplace_back(CNum{value});
+      return true;
+    }
+
+    if (word.starts_with("OP_"))
+      word.remove_prefix(3);
+    const auto name = std::find_if(std::begin(OpNames), std::end(OpNames), [&](const COpName &op) { return op.Name == word; });
+    if (name == std::end(OpNames))
+      return fail("no such opcode");
+    if (peek() != '<') {
+      script.Items.emplace_back(COp{name->Code});
+      return true;
+    }
+
+    if (name->Code < OP_PUSHDATA1.Code || name->Code > OP_PUSHDATA4.Code)
+      return fail("data after an opcode that pushes none");
+    Bytes pushed;
+    if (!data(pushed))
+      return false;
+    script.Items.emplace_back(CPushData{std::move(pushed), static_cast<uint8_t>(1u << (name->Code - OP_PUSHDATA1.Code))});
+    return true;
+  }
+
+  bool unit(CScriptSig &script) {
+    if (peek() == '(') {
+      Pos_++;
+      return sequence(script, ')');
+    }
+    if (peek() == '<') {
+      Bytes pushed;
+      if (!data(pushed))
+        return false;
+      script.Items.emplace_back(CElement(std::move(pushed)));
+      return true;
+    }
+    if (peek() == '\'') {
+      const size_t end = Text_.find('\'', Pos_ + 1);
+      if (end == std::string_view::npos)
+        return fail("no closing quote");
+      script.Items.emplace_back(CElement(Bytes(Text_.begin() + Pos_ + 1, Text_.begin() + end)));
+      Pos_ = end + 1;
+      return true;
+    }
+    return word(script);
+  }
+
+  // Units up to `closing`, to the end of the text if it is 0
+  bool sequence(CScriptSig &script, char closing) {
+    for (;;) {
+      skipSpaces();
+      if (Pos_ == Text_.size() || (closing && peek() == closing))
+        break;
+      CScriptSig repeated;
+      size_t count;
+      if (!unit(repeated) || !times(count))
+        return false;
+      // A space missed between two words is a slip of the hand
+      if (Pos_ < Text_.size() && !isSpace(peek()) && peek() != ')')
+        return fail("a space expected");
+      for (size_t i = 0; i < count; i++)
+        script.Items.insert(script.Items.end(), repeated.Items.begin(), repeated.Items.end());
+    }
+    if (!closing)
+      return true;
+    if (peek() != closing)
+      return fail("no closing )");
+    Pos_++;
+    return true;
+  }
+};
+
+}
+
+CScriptSig Script(std::string_view text, std::source_location where)
+{
+  CScriptText parser(text);
+  CScriptSig script;
+  if (parser.parse(script))
+    return script;
+  ADD_FAILURE_AT(where.file_name(), static_cast<int>(where.line()))
+    << "script text, " << parser.error() << " at " << parser.position() << ": " << text;
+  return {};
+}
+
+CScriptSig ScriptSig(std::string_view text, std::source_location where)
+{
+  return Script(text, where);
+}
+
+Bytes operator""_hex(const char *text, size_t size)
+{
+  auto digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10); };
+  Bytes result;
+  for (size_t i = 0; i + 1 < size; i += 2)
+    result.push_back(static_cast<uint8_t>(digit(text[i]) << 4 | digit(text[i + 1])));
+  return result;
 }
 
 Bytes Redeem(const COutput &output)
@@ -864,6 +1415,21 @@ CChange AddInput()
   }};
 }
 
+CChange Permute()
+{
+  return {"Permute", [](Tx &tx, std::vector<TxOut> &spent, size_t &input) {
+    const size_t with = other(input);
+    if (input >= tx.TxOut.size() || with >= tx.TxOut.size()) {
+      ADD_FAILURE() << "Permute: an input with no output of its index";
+      return;
+    }
+    std::swap(tx.TxIn[input], tx.TxIn[with]);
+    std::swap(spent[input], spent[with]);
+    std::swap(tx.TxOut[input], tx.TxOut[with]);
+    input = with;
+  }};
+}
+
 CChange LockTime()
 {
   return {"LockTime", [](Tx &tx, std::vector<TxOut>&, size_t) { tx.LockTime ^= 1; }};
@@ -926,6 +1492,161 @@ void spend(const CTx &tx, const COutput &output, const CScriptSig &scriptSig, co
            std::source_location where)
 {
   build(tx, output, scriptSig, witness, verdicts, where);
+}
+
+void interpret(const CTx &tx, const COutput &output, const CScriptSig &scriptSig, const CWitness &witness, uint32_t flags,
+               EScriptError expected, std::source_location where)
+{
+  CBuilt b;
+  bool made;
+  {
+    testing::ScopedTrace trace(where.file_name(), static_cast<int>(where.line()), "building the spend");
+    made = make(tx, output, scriptSig, witness, b);
+  }
+  if (made)
+    checkScript(b, flags, expected, where);
+}
+
+void interpret(const COutput &output, const CScriptSig &scriptSig, const CWitness &witness, uint32_t flags, EScriptError expected,
+               std::source_location where)
+{
+  interpret(CTx{.Version = 1, .Sequence = 0xffffffff}, output, scriptSig, witness, flags, expected, where);
+}
+
+void interpret(const COutput &output, const CScriptSig &scriptSig, uint32_t flags, EScriptError expected, std::source_location where)
+{
+  interpret(output, scriptSig, CWitness(), flags, expected, where);
+}
+
+void interpret(std::string_view scriptSig, std::string_view scriptPubKey, uint32_t flags, EScriptError expected, std::source_location where)
+{
+  interpret(Bare(Script(scriptPubKey, where)), Script(scriptSig, where), flags, expected, where);
+}
+
+void txValid(const CTx &tx, const COutput &output, const CScriptSig &scriptSig, const CWitness &witness, uint32_t excluded,
+             std::source_location where)
+{
+  CBuilt b;
+  bool made;
+  {
+    testing::ScopedTrace trace(where.file_name(), static_cast<int>(where.line()), "building the spend");
+    made = make(tx, output, scriptSig, witness, b);
+  }
+  if (made)
+    checkTxValid(b, excluded, where);
+}
+
+void txValid(const CTx &tx, const COutput &output, const CScriptSig &scriptSig, uint32_t excluded, std::source_location where)
+{
+  txValid(tx, output, scriptSig, CWitness(), excluded, where);
+}
+
+void txInvalid(const CTx &tx, const COutput &output, const CScriptSig &scriptSig, const CWitness &witness, uint32_t flags,
+               EScriptError expected, std::source_location where)
+{
+  CBuilt b;
+  bool made;
+  {
+    testing::ScopedTrace trace(where.file_name(), static_cast<int>(where.line()), "building the spend");
+    made = make(tx, output, scriptSig, witness, b);
+  }
+  if (made)
+    checkTxInvalid(b, flags, expected, where);
+}
+
+void txInvalid(const CTx &tx, const COutput &output, const CScriptSig &scriptSig, uint32_t flags, EScriptError expected,
+               std::source_location where)
+{
+  txInvalid(tx, output, scriptSig, CWitness(), flags, expected, where);
+}
+
+void validUnless(const CTx &tx, const COutput &output, const CScriptSig &scriptSig, const CWitness &witness, uint32_t failing,
+                 std::source_location where)
+{
+  CBuilt b;
+  bool made;
+  {
+    testing::ScopedTrace trace(where.file_name(), static_cast<int>(where.line()), "building the spend");
+    made = make(tx, output, scriptSig, witness, b);
+  }
+  if (made)
+    checkValidUnless(b, failing, where);
+}
+
+void validUnless(const CTx &tx, const COutput &output, const CScriptSig &scriptSig, uint32_t failing, std::source_location where)
+{
+  validUnless(tx, output, scriptSig, CWitness(), failing, where);
+}
+
+// Signatures apart from a spend
+
+Bytes Signature(const CSig &sig, const CTx &tx, COutput::EDigest digest, const Bytes &code)
+{
+  CBuilt b;
+  if (!skeleton(tx, b))
+    return {};
+  COutput output;
+  output.Digest = digest;
+  output.ScriptCode = code;
+  return ecdsa(b, output, sig);
+}
+
+CChosenSig ChosenSig(uint8_t seed, uint8_t hashType, bool highS)
+{
+  CChosenSig chosen;
+  chosen.HashType = hashType;
+  chosen.Nonce = scalarOf(sha256Of({'n', 'o', 'n', 'c', 'e', seed}));
+  chosen.S = scalarOf(sha256Of({'s', seed}));
+  // Below half the order: low. With the top bit and still below the order: high
+  chosen.S[0] &= 0x3f;
+  if (highS)
+    chosen.S[0] |= 0x80;
+
+  // R is x of nonce * G
+  secp256k1_pubkey point;
+  EXPECT_TRUE(secp256k1_ec_pubkey_create(context(), &point, chosen.Nonce.data()));
+  uint8_t data[33];
+  size_t size = sizeof(data);
+  secp256k1_ec_pubkey_serialize(context(), data, &size, &point, SECP256K1_EC_COMPRESSED);
+  memcpy(chosen.R.data(), data + 1, 32);
+
+  uint8_t compact[64];
+  memcpy(compact, chosen.R.data(), 32);
+  memcpy(compact + 32, chosen.S.data(), 32);
+  chosen.Signature = der(CSig(), compact);
+  chosen.Signature.push_back(hashType);
+  return chosen;
+}
+
+// S = (digest + R * key) / nonce, so key = (S * nonce - digest) / R
+Bytes CChosenSig::KeyFor(const CTx &tx, COutput::EDigest digest, const Bytes &code) const
+{
+  CBuilt b;
+  if (!skeleton(tx, b))
+    return {};
+  const BaseBlob<256> message = ecdsaDigest(b, digest, code, HashType);
+  CScalar minusDigest;
+  memcpy(minusDigest.data(), message.begin(), 32);
+  EXPECT_TRUE(secp256k1_ec_seckey_negate(context(), minusDigest.data()));
+  CScalar secret = scalarMul(S, Nonce);
+  EXPECT_TRUE(secp256k1_ec_seckey_tweak_add(context(), secret.data(), minusDigest.data()));
+  secret = scalarMul(secret, scalarInverse(R));
+
+  secp256k1_pubkey key;
+  EXPECT_TRUE(secp256k1_ec_pubkey_create(context(), &key, secret.data()));
+  uint8_t compact[64];
+  memcpy(compact, R.data(), 32);
+  memcpy(compact + 32, S.data(), 32);
+  secp256k1_ecdsa_signature signature;
+  EXPECT_TRUE(secp256k1_ecdsa_signature_parse_compact(context(), &signature, compact));
+  // libsecp256k1 verifies low S alone
+  secp256k1_ecdsa_signature_normalize(context(), &signature, &signature);
+  EXPECT_TRUE(secp256k1_ecdsa_verify(context(), &signature, message.begin(), &key)) << "the chosen signature under its key";
+
+  uint8_t data[33];
+  size_t size = sizeof(data);
+  secp256k1_ec_pubkey_serialize(context(), data, &size, &key, SECP256K1_EC_COMPRESSED);
+  return Bytes(data, data + size);
 }
 
 // Batch

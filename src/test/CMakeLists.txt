@@ -23,6 +23,8 @@ endmacro()
 add_bc_unittest(BTC
   bip34Test.cpp
   fastpathTest.cpp
+  interpreterTest.cpp
+  interpreterTxTest.cpp
   localSpendTest.cpp
   outputInfoTest.cpp
   spendBuilder.cpp
