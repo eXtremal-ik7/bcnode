@@ -16,6 +16,8 @@
 #include <p2putils/xmstream.h>
 #include "loguru.hpp"
 #include "thirdparty/ankerl/unordered_dense.h"
+#include <algorithm>
+#include <atomic>
 #include <deque>
 #include <thread>
 
@@ -45,10 +47,9 @@ static inline uint32_t linkedMeta(uint32_t meta)
   return meta & ~static_cast<uint32_t>(BC::DB::EUtxoRestored);
 }
 
-// Every input still empty: from the database, else from an output of this very block. A worker
-// runs it on a block outside a run, where the state it needs may not exist yet - what it could
-// not answer InputsResolved reports. The connect thread runs it on exactly those, and there the
-// state is the one the block connects to
+// Every input from the database, else from an output of this very block, against the state the
+// block connects to. What a preparation left in the slots is not trusted: the cache's answer or a
+// link into a segment that never connected says nothing about this state
 static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC::Proto::CBlockValidationData &validationData, BC::Proto::CBlock &block, uint32_t height, const BC::DB::UTXODb &db)
 {
   ankerl::unordered_dense::set<CUnspentOutputKey> removed;
@@ -57,6 +58,10 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
   // Built already when a run answered some of the inputs
   if (linkedOutputs.Tx.empty())
     linkedOutputs.build(block, sizeof(BC::Script::CUnspentOutputInfo));
+
+  // The block-wide ordinal of every transaction's first output, where its parsed records are;
+  // built at the first spend of an output of this block
+  std::vector<size_t> outBase;
 
   bool resolved = true;
   size_t inOrdinal = 0;
@@ -69,10 +74,7 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
       auto &txinLinked = txLinked.TxIn[txinIdx];
       uint32_t &meta = linkedOutputs.Meta[inOrdinal];
 
-      // Answered by the run: from the same block, or from an earlier block of it
-      if (!txinLinked.empty())
-        continue;
-
+      txinLinked.resize(0);
       if (db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, txinLinked, meta)) {
         // Unspent output found
         meta = linkedMeta(meta);
@@ -93,15 +95,24 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
             return false;
           }
 
-          SmallStream<128> s;
-          BC::Script::parseTransactionOutput(localReferencedTx, txin.PreviousOutputIndex, s);
-          // An OP_RETURN output is no utxo: not there to spend
-          if (s.data<BC::Script::CUnspentOutputInfo>()->Type == BC::Script::CUnspentOutputInfo::EOpReturn) {
+          if (outBase.empty()) {
+            outBase.resize(block.Vtx.size());
+            size_t ordinal = 0;
+            for (size_t i = 0; i < block.Vtx.size(); i++) {
+              outBase[i] = ordinal;
+              ordinal += block.Vtx[i].TxOut.size();
+            }
+          }
+
+          // An empty record is an output that is no utxo: not there to spend
+          size_t infoSize;
+          const void *info = validationData.outputData(outBase[localTxIdx] + txin.PreviousOutputIndex, infoSize);
+          if (!infoSize) {
             validationData.InputsResolved = false;
             return false;
           }
-          txinLinked.resize(s.sizeOf());
-          memcpy(txinLinked.begin(), s.data(), s.sizeOf());
+          txinLinked.resize(infoSize);
+          memcpy(txinLinked.begin(), info, infoSize);
           meta = BC::DB::utxoMeta(height, BC::DB::utxoCreationFlags(localReferencedTx, localTxIdx, txin.PreviousOutputIndex));
         } else {
           resolved = false;
@@ -158,6 +169,100 @@ static void resolveSegmentResidual(CSegment &segment, const BC::DB::UTXODb &db, 
     entry.Object.get()->validationData().InputsResolved = entry.Completable;
     entry.Object.get()->validationData().InputsInvalid = !entry.Completable;
   }
+}
+
+namespace {
+
+CScriptCheckStats ScriptCheckStats;
+
+// A block's share of a script wave: its transactions take [First, First + Vtx.size())
+struct CScriptTarget {
+  const BC::Common::BlockIndex *Index;
+  const BC::Proto::CBlock *Block;
+  const BC::Proto::CBlockLinkedOutputs *LinkedOutputs;
+  const BC::Proto::CBlockValidationData *ValidationData;
+  bool Signatures;
+  // Transactions not to check (scriptTxSkipped), nullptr for none
+  const uint64_t *Skip = nullptr;
+  size_t First = 0;
+};
+
+// A block already in our files went through this node before, or through the node the files come
+// from: its signatures are taken on trust unless every block is checked in full
+CScriptTarget scriptTarget(EScriptCheck scriptCheck,
+                           const BC::Common::BlockIndex *index,
+                           const BC::Proto::CBlock &block,
+                           const BC::Proto::CBlockLinkedOutputs &linkedOutputs,
+                           const BC::Proto::CBlockValidationData &validationData)
+{
+  return {index, &block, &linkedOutputs, &validationData, scriptCheck == EScriptCheck::All || !index->blockStored(), nullptr};
+}
+
+}
+
+const CScriptCheckStats &scriptCheckStats()
+{
+  return ScriptCheckStats;
+}
+
+// The scripts of blocks whose every input is linked and proved to exist: one wave over their
+// transactions, a block handed to its coin in parts. A verdict needs the linked outputs alone,
+// nothing of the chain state. False with *failedAt the first block that has an invalid input; no
+// runner - on the calling thread. connect: the wave is on the critical path, it takes the pool first
+static bool checkScripts(std::vector<CScriptTarget> &targets,
+                         const BC::Common::ChainParams &chainParams,
+                         CParallelRunner *runner,
+                         bool connect,
+                         size_t *failedAt)
+{
+  size_t count = 0;
+  for (CScriptTarget &target: targets) {
+    target.First = count;
+    count += target.Block->Vtx.size();
+  }
+
+  std::atomic<size_t> firstFailed = targets.size();
+  auto wave = [&targets, &chainParams, &firstFailed, connect](size_t begin, size_t end) {
+    CScriptCheckResult result;
+    size_t pos = std::upper_bound(targets.begin(), targets.end(), begin,
+                                  [](size_t value, const CScriptTarget &target) { return value < target.First; }) - targets.begin() - 1;
+    // Nothing above an invalid block connects
+    for (; pos < targets.size() && targets[pos].First < end && pos <= firstFailed.load(std::memory_order_relaxed); pos++) {
+      const CScriptTarget &target = targets[pos];
+      const size_t firstTx = std::max(begin, target.First) - target.First;
+      const size_t lastTx = std::min(end, target.First + target.Block->Vtx.size()) - target.First;
+      if (BC::Common::checkBlockScripts(*target.Index, *target.Block, *target.LinkedOutputs, chainParams, firstTx, lastTx, target.Signatures, target.Skip, result))
+        continue;
+
+      size_t expected = firstFailed.load(std::memory_order_relaxed);
+      while (pos < expected && !firstFailed.compare_exchange_weak(expected, pos, std::memory_order_relaxed))
+        continue;
+      LOG_F(ERROR,
+            "Block %s (%u): transaction %s input %u fails its script: %s",
+            target.Index->Header.GetHash().getHexLE().c_str(),
+            target.Index->Height,
+            target.ValidationData->TxIds[result.Tx].getHexLE().c_str(),
+            result.Input,
+            result.Error.c_str());
+      break;
+    }
+
+    ScriptCheckStats.Inputs.fetch_add(result.Inputs, std::memory_order_relaxed);
+    ScriptCheckStats.Signatures.fetch_add(result.Signatures, std::memory_order_relaxed);
+    ScriptCheckStats.Unchecked.fetch_add(result.Unchecked, std::memory_order_relaxed);
+    if (connect)
+      ScriptCheckStats.AtConnect.fetch_add(result.Inputs, std::memory_order_relaxed);
+  };
+
+  if (runner)
+    runner->run(count, wave, connect);
+  else
+    wave(0, count);
+
+  if (firstFailed.load(std::memory_order_relaxed) == targets.size())
+    return true;
+  *failedAt = firstFailed.load(std::memory_order_relaxed);
+  return false;
 }
 
 BC::Common::BlockIndex *rebaseChain(BC::Common::BlockIndex *newBest,
@@ -247,6 +352,7 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
                          BC::Common::ChainParams &chainParams,
                          BlockInMemoryIndex &blockIndex,
                          BC::DB::Storage &storage,
+                         EScriptCheck scriptCheck,
                          bool silent = true)
 {
   // Inputs are resolved before the block gets here whenever the state to resolve them against
@@ -280,6 +386,13 @@ static bool ConnectBlock(BC::Common::BlockIndex *index,
           index->Height,
           error.c_str());
     return false;
+  }
+
+  if (scriptCheck != EScriptCheck::Off) {
+    std::vector<CScriptTarget> targets{scriptTarget(scriptCheck, index, block, linkedOutputs, validationData)};
+    size_t failedAt;
+    if (!checkScripts(targets, chainParams, nullptr, true, &failedAt))
+      return false;
   }
 
   applyConnect(index, block, linkedOutputs, validationData, blockIndex, storage, silent);
@@ -402,7 +515,8 @@ static intrusive_ptr<BC::Common::CIndexCacheObject> objectByIndexChecked(BC::Com
 static bool switchTo(BC::Common::BlockIndex *newBest,
                      BC::Common::ChainParams &chainParams,
                      BlockInMemoryIndex &blockIndex,
-                     BC::DB::Storage &storage)
+                     BC::DB::Storage &storage,
+                     EScriptCheck scriptCheck)
 {
   BC::Common::BlockIndex *currentBest = blockIndex.best();
 
@@ -449,7 +563,7 @@ static bool switchTo(BC::Common::BlockIndex *newBest,
   // Connect blocks from new path
   for (auto I = newPath.rbegin(), IE = newPath.rend(); I != IE; ++I) {
     auto object = objectByIndexChecked(*I, chainParams, storage.blockDb());
-    if (!ConnectBlock(*I, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), chainParams, blockIndex, storage, false)) {
+    if (!ConnectBlock(*I, *object.get()->block(), object.get()->linkedOutputs(), object.get()->validationData(), chainParams, blockIndex, storage, scriptCheck, false)) {
       (*I)->Flags.fetch_or(BFInvalid, std::memory_order_relaxed);
       return false;
     }
@@ -871,11 +985,48 @@ static void cutSegment(CSegment &segment, size_t keep, const char *reason)
   segment.Objects.resize(keep);
 }
 
+// The scripts of every transaction whose spent outputs the preparation knows: its own block's, an
+// earlier block's of the segment, or the utxo cache's. Existence stays the connect wave's, but an
+// outpoint never changes its output, so a verdict made on it here is final. False with *failedAt
+// the first block with an invalid input
+static bool prepareSegmentScripts(CSegment &segment,
+                                  const BC::Common::ChainParams &chainParams,
+                                  CParallelRunner &runner,
+                                  EScriptCheck scriptCheck,
+                                  size_t *failedAt)
+{
+  // Unknown first, inverted below into what was checked
+  for (CSegment::CObject &entry: segment.Objects)
+    entry.ScriptsChecked.assign((entry.Object.get()->block()->Vtx.size() + 63) / 64, 0);
+  for (const CSegment::CInput &input: segment.Inputs) {
+    CSegment::CObject &entry = segment.Objects[input.Object];
+    if (entry.Object.get()->linkedOutputs().Tx[input.TxIdx].TxIn[input.InIdx].empty())
+      entry.ScriptsChecked[input.TxIdx >> 6] |= 1ull << (input.TxIdx & 63);
+  }
+
+  std::vector<CScriptTarget> targets;
+  targets.reserve(segment.Objects.size());
+  for (CSegment::CObject &entry: segment.Objects) {
+    BC::Common::CIndexCacheObject *object = entry.Object.get();
+    targets.push_back(scriptTarget(scriptCheck, entry.Index, *object->block(), object->linkedOutputs(), object->validationDataConst()));
+    targets.back().Skip = entry.ScriptsChecked.data();
+  }
+  if (!checkScripts(targets, chainParams, &runner, false, failedAt))
+    return false;
+
+  for (CSegment::CObject &entry: segment.Objects) {
+    for (uint64_t &word: entry.ScriptsChecked)
+      word = ~word;
+  }
+  return true;
+}
+
 bool prepareSegment(BC::Common::ChainParams &chainParams,
                     BC::DB::Storage &storage,
                     CParallelRunner &runner,
                     CSegment &segment,
-                    bool prefetch)
+                    bool prefetch,
+                    EScriptCheck scriptCheck)
 {
   if (segment.Objects.empty())
     return false;
@@ -899,37 +1050,57 @@ bool prepareSegment(BC::Common::ChainParams &chainParams,
   resolveSegmentInputs(segment, chainParams);
 
   // Everything the blocks of this segment will hold until they connect is built now
-  for (const CSegment::CObject &entry: segment.Objects) {
-    if (entry.Object.get())
-      entry.Object.get()->reaccount();
-  }
+  auto reaccount = [&segment]() {
+    for (const CSegment::CObject &entry: segment.Objects) {
+      if (entry.Object.get())
+        entry.Object.get()->reaccount();
+    }
+  };
 
   {
     size_t completable = 0;
     while (completable < segment.Objects.size() && segment.Objects[completable].Completable)
       completable++;
     if (completable < segment.Objects.size()) {
+      reaccount();
       cutSegment(segment, completable, "spends what it may not");
       return false;
     }
   }
 
-  // Warms the cache for the existence wave on the critical path. A probe here has no authority:
-  // it may be stale by the time the segment connects, only the wave decides existence
-  if (prefetch && !segment.Inputs.empty()) {
+  // The utxo cache's answer for a residual input stays in its slot: it warms the cache for the
+  // existence wave and lets the scripts be checked here. It has no authority over existence - it
+  // may be stale by the time the segment connects, only the wave decides that
+  const bool scripts = scriptCheck != EScriptCheck::Off;
+  if ((prefetch || scripts) && !segment.Inputs.empty()) {
     const BC::DB::UTXODb &db = storage.utxodb();
-    runner.run(segment.Inputs.size(), [&segment, &db](size_t begin, size_t end) {
-      xvector<uint8_t> value;
+    runner.run(segment.Inputs.size(), [&segment, &db, prefetch](size_t begin, size_t end) {
       uint32_t meta;
       for (size_t i = begin; i < end; i++) {
         const CSegment::CInput &input = segment.Inputs[i];
         BC::Common::CIndexCacheObject *object = segment.Objects[input.Object].Object.get();
         const auto &txin = object->block()->Vtx[input.TxIdx].TxIn[input.InIdx];
-        db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, value, meta, /*cacheOnly=*/true);
+        auto &slot = object->linkedOutputs().Tx[input.TxIdx].TxIn[input.InIdx];
+        slot.resize(0);
+        if (prefetch)
+          db.query(txin.PreviousOutputHash, txin.PreviousOutputIndex, slot, meta, /*cacheOnly=*/true);
       }
     });
   }
 
+  if (scripts) {
+    size_t failedAt = 0;
+    if (!prepareSegmentScripts(segment, chainParams, runner, scriptCheck, &failedAt)) {
+      reaccount();
+      cutSegment(segment, failedAt, "fails its scripts");
+      return false;
+    }
+  } else {
+    for (CSegment::CObject &entry: segment.Objects)
+      entry.ScriptsChecked.clear();
+  }
+
+  reaccount();
   return true;
 }
 
@@ -938,6 +1109,7 @@ bool connectSegment(BlockInMemoryIndex &blockIndex,
                     BC::DB::Storage &storage,
                     CParallelRunner &runner,
                     CSegment &segment,
+                    EScriptCheck scriptCheck,
                     size_t *failedAt)
 {
 
@@ -948,10 +1120,10 @@ bool connectSegment(BlockInMemoryIndex &blockIndex,
   // The chain may stand elsewhere than when the segment was admitted: only disconnects are
   // needed here; the new path is the segment itself.
   if (head->Prev != blockIndex.best()) {
-    if (!switchTo(head->Prev, chainParams, blockIndex, storage)) {
-      LOG_F(ERROR, "Block database corrupted");
-      abort();
-    }
+    // A block of the new path failing is invalid (switchTo marks it), the segment above it too;
+    // the chain stays at the last block connected
+    if (!switchTo(head->Prev, chainParams, blockIndex, storage, scriptCheck))
+      return false;
   }
 
   // Only now does the database hold the state the segment was built on
@@ -963,6 +1135,20 @@ bool connectSegment(BlockInMemoryIndex &blockIndex,
       result = false;
       break;
     }
+  }
+
+  // Every spent output is known from here on, and the scripts the preparation could not check are
+  // the last verdict before the segment lands
+  if (result && scriptCheck != EScriptCheck::Off) {
+    std::vector<CScriptTarget> targets;
+    targets.reserve(segment.Objects.size());
+    for (const CSegment::CObject &entry: segment.Objects) {
+      BC::Common::CIndexCacheObject *object = entry.Object.get();
+      targets.push_back(scriptTarget(scriptCheck, entry.Index, *object->block(), object->linkedOutputs(), object->validationDataConst()));
+      if (!entry.ScriptsChecked.empty())
+        targets.back().Skip = entry.ScriptsChecked.data();
+    }
+    result = checkScripts(targets, chainParams, &runner, true, failedAt);
   }
 
   if (result) {
@@ -1536,6 +1722,11 @@ bool reindex(BlockInMemoryIndex &blockIndex,
   const double megabytes = totalBytesRead / 1048576.0;
   LOG_F(INFO, "Reindex speed: %.2lf MB/s (%.1lf MB in %.1lf seconds)",
         elapsed > 0.0 ? megabytes / elapsed : 0.0, megabytes, elapsed);
+  LOG_F(INFO, "Scripts: %llu inputs (%llu at connect), %llu signatures verified, %llu inputs taken unchecked",
+        static_cast<unsigned long long>(ScriptCheckStats.Inputs.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(ScriptCheckStats.AtConnect.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(ScriptCheckStats.Signatures.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(ScriptCheckStats.Unchecked.load(std::memory_order_relaxed)));
   return true;
 }
 

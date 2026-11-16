@@ -73,4 +73,16 @@ enum class EScriptError : uint8_t {
 // Core's ScriptErrorString
 const char *scriptErrorString(EScriptError error);
 
+// Why the mempool refuses a transaction's scripts
+enum class EScriptRefusal : uint8_t {
+  None,
+  // Fails the standard flags alone: valid in a block
+  NonStandard,
+  // Fails the flags a block is checked under: the sender is at fault
+  Mandatory,
+  // A witness spend that came without its witness: the transaction itself may be fine, so its
+  // txid is not to be remembered as refused (Core's TX_WITNESS_STRIPPED)
+  WitnessStripped
+};
+
 }

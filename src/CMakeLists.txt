@@ -256,6 +256,14 @@ endmacro()
 # BTC
 prepare_bc_env(BTC)
 
+# Script checks: every target with a coin's rules links them
+set(SCRIPT_SOURCES
+  BTC/scriptChecks.cpp
+  BTC/scriptError.cpp
+  BTC/sigCheck.cpp
+  BTC/sighash.cpp
+)
+
 set(BTC_SOURCES
   common/mempool.cpp
   BTC/policy.cpp
@@ -265,6 +273,7 @@ set(BTC_SOURCES
   BTC/http.cpp
   BTC/nativeApi.cpp
   BTC/script.cpp
+  ${SCRIPT_SOURCES}
 )
 
 add_executable(bcnode-btc
@@ -277,6 +286,7 @@ add_executable(bcterminal-btc
   bcterminal.cpp
   BTC/policy.cpp
   BTC/script.cpp
+  ${SCRIPT_SOURCES}
   BTC/btc.cpp
   BTC/proto.cpp
   BTC/merkleTree.cpp
@@ -286,6 +296,7 @@ add_executable(bctest-btc
   bctest.cpp
   BTC/policy.cpp
   BTC/script.cpp
+  ${SCRIPT_SOURCES}
   BTC/btc.cpp
   BTC/proto.cpp
   BTC/merkleTree.cpp
@@ -318,6 +329,7 @@ add_executable(bcterminal-ltc
   bcterminal.cpp
   BTC/policy.cpp
   BTC/script.cpp
+  ${SCRIPT_SOURCES}
   BTC/proto.cpp
   LTC/ltc.cpp
   LTC/proto.cpp
@@ -346,6 +358,7 @@ add_executable(bcterminal-xpm
   bcterminal.cpp
   BTC/policy.cpp
   BTC/script.cpp
+  ${SCRIPT_SOURCES}
   BTC/proto.cpp
   XPM/xpm.cpp
   XPM/proto.cpp
@@ -377,6 +390,7 @@ if (BCNODE_DOGE)
     bcterminal.cpp
     BTC/policy.cpp
     BTC/script.cpp
+    ${SCRIPT_SOURCES}
     LTC/ltc.cpp
     LTC/proto.cpp
     DOGE/doge.cpp
@@ -409,6 +423,7 @@ if (BCNODE_ZEC)
     bcterminal.cpp
     BTC/policy.cpp
     BTC/script.cpp
+    ${SCRIPT_SOURCES}
     ZEC/zec.cpp
     ZEC/proto.cpp
     BTC/proto.cpp

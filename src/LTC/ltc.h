@@ -43,6 +43,10 @@ public:
   static constexpr size_t MaxStandardScriptSigSize = 1650;
   static constexpr size_t MaxOpReturnRelay = 83;
   static constexpr bool HasWitness = true;
+  // The mempool's script flags, Litecoin Core 0.21: P2SH alone is mandatory, the standard set is
+  // Bitcoin's
+  static constexpr uint32_t MandatoryScriptFlags = BTC::EScriptP2SH;
+  static constexpr uint32_t StandardScriptFlags = BTC::Configuration::StandardScriptFlags;
 
   static constexpr const char *ProjectName = "Litecoin";
   static constexpr const char *TickerName = "LTC";
@@ -132,6 +136,22 @@ namespace Common {
                              std::string &error);
   // The longest transaction checkPolicyStandalone can pass: the network drops longer ones unparsed
   size_t maxStandardTxSize();
+
+  // Scripts, as Bitcoin's (BTC/btc.h): Litecoin Core's GetBlockScriptFlags, every rule by height
+  uint32_t blockScriptFlags(const BlockIndex &index, const ChainParams &chainParams);
+  bool checkBlockScripts(const BlockIndex &index,
+                         const Proto::CBlock &block,
+                         const Proto::CBlockLinkedOutputs &linkedOutputs,
+                         const ChainParams &chainParams,
+                         size_t firstTx,
+                         size_t lastTx,
+                         bool signatures,
+                         const uint64_t *skip,
+                         CScriptCheckResult &result);
+  BTC::EScriptRefusal checkPolicyScripts(const Proto::CTransaction &tx,
+                                         std::span<const Script::CUnspentOutputInfo* const> spent,
+                                         std::string &error,
+                                         BTC::CScriptCount &count);
 };
 
 class X {

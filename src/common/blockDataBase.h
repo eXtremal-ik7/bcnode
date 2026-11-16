@@ -60,24 +60,39 @@ BC::Common::BlockIndex *bestReadyBlock(BlockInMemoryIndex &blockIndex);
 // Everything a segment needs before the chain state matters: proof of work, standalone and
 // contextual checks in parallel waves, then the linking of its inputs - what a block of the
 // segment answers for itself, what an earlier block of the segment answers, and what only the
-// state right before the segment can answer (the residual list). A block that fails its own
+// state right before the segment can answer (the residual list, tried in the utxo cache). Then
+// the scripts of every transaction whose spent outputs are all known. A block that fails its own
 // checks cuts the segment short. False when nothing of it is left
 bool prepareSegment(BC::Common::ChainParams &chainParams,
                     BC::DB::Storage &storage,
                     CParallelRunner &runner,
                     CSegment &segment,
-                    bool prefetch);
+                    bool prefetch,
+                    EScriptCheck scriptCheck);
 
 // Connect of a prepared segment: rebase if needed, the existence wave over the residual inputs,
-// then apply block by block. Every verdict is made before the first block lands - a segment
-// reaches the chain whole or not at all. On failure *failedAt is the position of the block the
-// chain stops at
+// the script wave over the transactions the preparation left, then apply block by block. Every verdict is made before
+// the first block lands - a segment reaches the chain whole or not at all. On failure *failedAt
+// is the position of the block the chain stops at
 bool connectSegment(BlockInMemoryIndex &blockIndex,
                     BC::Common::ChainParams &chainParams,
                     BC::DB::Storage &storage,
                     CParallelRunner &runner,
                     CSegment &segment,
+                    EScriptCheck scriptCheck,
                     size_t *failedAt);
+
+// What the script checks of blocks went through since the start; relaxed counters
+struct CScriptCheckStats {
+  std::atomic<uint64_t> Inputs = 0;
+  std::atomic<uint64_t> Signatures = 0;
+  std::atomic<uint64_t> Unchecked = 0;
+  // Inputs whose scripts waited for the connect: the preparation did not know every output their
+  // transaction spends
+  std::atomic<uint64_t> AtConnect = 0;
+};
+
+const CScriptCheckStats &scriptCheckStats();
 
 bool loadingBlockIndex(BlockInMemoryIndex &blockIndex,
                        const std::filesystem::path &blockPath,

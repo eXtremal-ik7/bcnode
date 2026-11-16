@@ -9,6 +9,7 @@
 #include "common/intrusive_ptr.h"
 #include "common/inbox.h"
 #include "common/parallelRunner.h"
+#include "common/scriptCheck.h"
 
 #include <atomic>
 #include <deque>
@@ -36,6 +37,8 @@ struct CSegment {
     bool Valid = true;
     bool Relay = false;
     bool Completable = true;
+    // Transactions whose scripts the preparation checked, one bit each; empty when it checked none
+    std::vector<uint64_t> ScriptsChecked;
   };
 
   // An input spending a coin older than the segment. Only the state immediately before connect
@@ -113,6 +116,7 @@ public:
     // 0 means hardware_concurrency().
     unsigned WaveThreads = 0;
     bool Prefetch = true;
+    EScriptCheck ScriptCheck = EScriptCheck::New;
   };
 
   bool start(BlockInMemoryIndex &blockIndex,

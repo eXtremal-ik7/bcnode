@@ -5,6 +5,7 @@
 
 #include "ltc.h"
 #include "BTC/policy.h"
+#include "BTC/scriptVerify.h"
 #include "crypto/scrypt.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
@@ -32,6 +33,13 @@ bool setupChainParams(ChainParams *params, const char *network)
     // Soft & hard forks
     params->BIP34Height = 710000;
     params->SegwitHeight = 1201536;
+    params->BIP16Height = 218579;
+    params->BIP66Height = 811879;
+    params->BIP65Height = 918684;
+    params->CSVHeight = 1201536;
+    // A versionbits deployment in Litecoin Core (bit 2 from 2161152, 6048 of 8064): locked in by
+    // the window 2241792..2249855, active one window later. MWEB came a window after it
+    params->TaprootHeight = 2257920;
 
     {
       params->GenesisBlock.Header.Version = 1;
@@ -97,6 +105,11 @@ bool setupChainParams(ChainParams *params, const char *network)
     // Soft & hard forks
     params->BIP34Height = 76;
     params->SegwitHeight = 14667;
+    params->BIP66Height = 76;
+    params->BIP65Height = 76;
+    params->CSVHeight = 6048;
+    // Taproot: a versionbits deployment, its height on this network is not in Litecoin Core's
+    // sources. Left off: a taproot spend passes unchecked
 
     {
       params->GenesisBlock.Header.Version = 1;
@@ -157,6 +170,10 @@ bool setupChainParams(ChainParams *params, const char *network)
     // Soft & hard forks
     params->BIP34Height = 500;
     params->SegwitHeight = std::numeric_limits<uint32_t>::max();
+    params->BIP66Height = 1251;
+    params->BIP65Height = 1351;
+    params->CSVHeight = 432;
+    params->TaprootHeight = 0;
 
     {
       genesis_block_hash_assert_eq<LTC::X>(params->GenesisBlock.Header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
@@ -334,6 +351,49 @@ bool checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost &co
 size_t maxStandardTxSize()
 {
   return BTC::Policy::MaxStandardTxWeight;
+}
+
+uint32_t blockScriptFlags(const BlockIndex &index, const ChainParams &chainParams)
+{
+  uint32_t flags = BTC::EScriptNone;
+  if (index.Height >= chainParams.BIP16Height)
+    flags |= BTC::EScriptP2SH;
+  if (index.Height >= chainParams.BIP66Height)
+    flags |= BTC::EScriptDerSig;
+  if (index.Height >= chainParams.BIP65Height)
+    flags |= BTC::EScriptCheckLockTimeVerify;
+  if (index.Height >= chainParams.CSVHeight)
+    flags |= BTC::EScriptCheckSequenceVerify;
+  if (index.Height >= chainParams.TaprootHeight)
+    flags |= BTC::EScriptTaproot;
+  // BIP147 came with segwit
+  if (index.Height >= chainParams.SegwitHeight)
+    flags |= BTC::EScriptWitness | BTC::EScriptNullDummy;
+  return flags;
+}
+
+// The MWEB part is in none of the digests; the HogEx spends witness programs of versions 8 and 9,
+// the interpreter's
+bool checkBlockScripts(const BlockIndex &index,
+                       const Proto::CBlock &block,
+                       const Proto::CBlockLinkedOutputs &linkedOutputs,
+                       const ChainParams &chainParams,
+                       size_t firstTx,
+                       size_t lastTx,
+                       bool signatures,
+                       const uint64_t *skip,
+                       CScriptCheckResult &result)
+{
+  return BTC::verifyBlockScripts(block, linkedOutputs, firstTx, lastTx, blockScriptFlags(index, chainParams),
+                                 signatures ? BTC::ESigMode::Defer : BTC::ESigMode::Trust, skip, result);
+}
+
+BTC::EScriptRefusal checkPolicyScripts(const Proto::CTransaction &tx,
+                                       std::span<const Script::CUnspentOutputInfo* const> spent,
+                                       std::string &error,
+                                       BTC::CScriptCount &count)
+{
+  return BTC::verifyTransactionPolicy(tx, spent, LTC::Configuration::StandardScriptFlags, LTC::Configuration::MandatoryScriptFlags, error, count);
 }
 
 bool checkPolicyContextual(const Proto::CTransaction &tx,

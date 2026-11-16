@@ -1,11 +1,11 @@
 #pragma once
 
-// Spends written as declarations (mempool-impl-plan.md §14.7): the output spent, its script sig and
+// Spends written as declarations: the output spent, its script sig and
 // witness in Core's CScript notation, the transaction around them, the verdict along the flag sets.
 // The signatures are made with the test keys when a spend is built, over digests put together
 // apart from BTC/sighash.h
 
-#include "BTC/fastpath.h"
+#include "BTC/scriptVerify.h"
 #include <gtest/gtest.h>
 #include <array>
 #include <functional>
@@ -283,8 +283,8 @@ struct CVerdict {
   bool operator==(const CVerdict&) const = default;
 };
 
-// Off the templates: the interpreter's, a stub for now
-inline const CVerdict Interpreter{BTC::EScriptError::UnknownError, true};
+// Off the templates: the interpreter's. A stub for now, it passes every spend
+inline const CVerdict Interpreter{BTC::EScriptError::Ok, true};
 
 void PrintTo(const CVerdict &verdict, std::ostream *os);
 

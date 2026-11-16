@@ -6,6 +6,7 @@
 #include "common/mempool.h"
 #include "BC/script.h"
 #include "BTC/policy.h"
+#include "BTC/scriptVerify.h"
 #include "common/blockDataBase.h"
 #include "common/smallStream.h"
 #include "db/storage.h"
@@ -60,14 +61,14 @@ template<typename C> constexpr bool trucPolicy()
 
 constexpr bool TrucPolicy = trucPolicy<BC::Configuration>();
 
-// A longer way from the base to the utxo revision is not walked block by block (§6.3)
+// A longer way from the base to the utxo revision is not walked block by block
 constexpr size_t MaxSyncBlocks = 100;
 // What the client hears of after a jump or a reset: as deep as its filter of the confirmed
 constexpr size_t RecentBlocks = 10;
 constexpr size_t MinGenerationCapacity = 1024;
 // The API's transactions waiting for the writer, by the memory they hold
 constexpr size_t MaxSubmitQueuedBytes = 16 << 20;
-// Transactions waiting for the base to catch up (§4.4)
+// Transactions waiting for the base to catch up
 constexpr size_t MaxWaiting = 5000;
 constexpr uint64_t MaxWaitingBytes = 32 << 20;
 
@@ -121,6 +122,52 @@ int64_t medianTimePast(const BC::Common::BlockIndex *index)
   return times.empty() ? 0 : times[times.size() / 2];
 }
 
+// The records of the outputs a transaction spends, one to an input: what the script checks take
+using CSpentRecords = std::vector<xvector<uint8_t>>;
+
+// An output of a transaction in the mempool as the rules see it: it counts as the next block.
+// record - its utxo record, for the scripts
+void parentPrevout(const BC::Proto::CTransaction &parent, uint32_t index, uint32_t spendHeight, BTC::CPrevout &prevout, xvector<uint8_t> *record)
+{
+  const BC::Proto::CTxOut &out = parent.TxOut[index];
+  prevout = {out.Value, BC::Script::classify(out.PkScript.data(), out.PkScript.size()), spendHeight, false, false,
+             BC::Script::sigOpCount(out.PkScript.data(), out.PkScript.data() + out.PkScript.size(), true)};
+  if (record) {
+    SmallStream<128> stream;
+    BC::Script::parseTransactionOutput(parent, index, stream);
+    record->resize(stream.sizeOf());
+    memcpy(record->data(), stream.data(), stream.sizeOf());
+  }
+}
+
+// The same of a utxo record and its coin word; restored: put back by a disconnect
+void utxoPrevout(const xvector<uint8_t> &record, uint32_t meta, BTC::CPrevout &prevout, bool &restored)
+{
+  const BC::Script::CUnspentOutputInfo *info = reinterpret_cast<const BC::Script::CUnspentOutputInfo*>(record.data());
+  const uint8_t flags = BC::DB::utxoMetaFlags(meta);
+  prevout = {info->Value, info->Type, BC::DB::utxoMetaHeight(meta), (flags & BC::DB::EUtxoCoinbase) != 0, (flags & BC::DB::EUtxoPegout) != 0,
+             BC::Script::sigOpCount(*info)};
+  restored = (flags & BC::DB::EUtxoRestored) != 0;
+}
+
+// The scripts under the coin's mempool flags, the outcome into the precheck
+void checkScripts(const BC::Proto::CTransaction &tx, const CSpentRecords &records, CPrecheck &precheck)
+{
+  std::vector<const BC::Script::CUnspentOutputInfo*> spent(records.size());
+  for (size_t i = 0; i < records.size(); i++)
+    spent[i] = reinterpret_cast<const BC::Script::CUnspentOutputInfo*>(records[i].data());
+
+  BTC::CScriptCount count;
+  precheck.Refusal = BC::Common::checkPolicyScripts(tx, spent, precheck.Reason, count);
+  if (precheck.Refusal == BTC::EScriptRefusal::None) {
+    precheck.Scripts = CPrecheck::EPassed;
+    precheck.Unchecked = count.Interpreted != 0;
+  } else {
+    precheck.Scripts = CPrecheck::ERefused;
+    precheck.Refused = true;
+  }
+}
+
 }
 
 struct CMempool::CMessage {
@@ -129,6 +176,7 @@ struct CMempool::CMessage {
   // One unpack2 allocation, owned until the writer takes it
   BC::Proto::CTransaction *Tx = nullptr;
   size_t Bytes = 0;
+  CPrecheck Precheck;
   CReply Reply;
 
   ~CMessage() { operator delete(Tx); }
@@ -145,9 +193,13 @@ struct CMempool::CDecision {
 
   EOutcome Outcome = EReject;
   std::string Reason;
+  // Reject: by the scripts, and how
+  BTC::EScriptRefusal Refusal = BTC::EScriptRefusal::None;
   // Accept: what the entry is made of
   int64_t Fee = 0;
   BTC::CTxCost Cost;
+  // Accept: every input went through a script check, none through the interpreter's stub
+  bool Verified = false;
   // Wait: the utxo change sequence the base has to reach
   uint64_t Seq = 0;
   std::vector<TxId> MissingParents;
@@ -243,7 +295,7 @@ void CMempool::activate()
   send(message);
 }
 
-bool CMempool::submit(BC::Proto::CTransaction *tx, size_t size, CReply reply)
+bool CMempool::submit(BC::Proto::CTransaction *tx, size_t size, CPrecheck precheck, CReply reply)
 {
   const size_t bytes = sizeof(CMessage) + size;
   if (SubmitBytes_.fetch_add(bytes, std::memory_order_relaxed) + bytes > MaxSubmitQueuedBytes) {
@@ -256,9 +308,90 @@ bool CMempool::submit(BC::Proto::CTransaction *tx, size_t size, CReply reply)
   message->Type = EMessage::Submit;
   message->Tx = tx;
   message->Bytes = bytes;
+  message->Precheck = std::move(precheck);
   message->Reply = std::move(reply);
   send(message);
   return true;
+}
+
+// The receiving thread's part. Reads the published view, utxo and the block index, all of
+// them open to any thread; touches nothing of the writer's
+CPrecheck CMempool::precheck(const BC::Proto::CTransaction &tx) const
+{
+  CPrecheck result;
+  CViewRef current = view();
+  // Not active, or what the writer refuses whole: it says why
+  if (!current.get() || BTC::isCoinbase(tx) || isHogEx(tx) || hasMweb(tx) || hasShielded(tx))
+    return result;
+
+  std::string error;
+  if (!BC::Common::checkTransactionStandalone(tx, *ChainParams_, error)) {
+    result.Refused = true;
+    result.Reason = error;
+    return result;
+  }
+  BTC::measureTx(tx, result.Cost);
+  if (!BC::Common::checkPolicyStandalone(tx, result.Cost, error)) {
+    result.Refused = true;
+    result.Reason = error;
+    return result;
+  }
+  result.Standalone = true;
+
+  // The spent outputs: a parent in the published mempool, otherwise utxo as it is. Whether they
+  // are there to spend at the base is the writer's to say; what they hold is the outpoint's
+  const BC::Common::BlockIndex *base = BlockIndex_->indexByHash(current.get()->BaseHash);
+  if (!base)
+    return result;
+  const uint32_t spendHeight = base->Height + 1;
+  const size_t inputs = tx.TxIn.size();
+  std::vector<BTC::CPrevout> prevouts(inputs);
+  CSpentRecords records(inputs);
+  for (size_t i = 0; i < inputs; i++) {
+    const auto &in = tx.TxIn[i];
+    if (const CRecord *parent = current.get()->find(in.PreviousOutputHash)) {
+      const BC::Proto::CTransaction &parentTx = *parent->Body->Tx;
+      if (in.PreviousOutputIndex >= parentTx.TxOut.size())
+        return result;
+      parentPrevout(parentTx, in.PreviousOutputIndex, spendHeight, prevouts[i], &records[i]);
+    } else {
+      uint32_t meta = 0;
+      bool restored;
+      if (!Utxo_->query(in.PreviousOutputHash, in.PreviousOutputIndex, records[i], meta))
+        return result;
+      utxoPrevout(records[i], meta, prevouts[i], restored);
+    }
+  }
+
+  // The cheap checks ahead of the scripts, as Core orders them against CPU exhaustion. A refusal
+  // here may be the base's (maturity, locks), so it is the writer's to give: the scripts are only
+  // not run on this thread
+  BTC::CTxContext context;
+  context.Height = spendHeight;
+  context.BlockTime = time(nullptr);
+  context.MedianTimePast = medianTimePast(base);
+  context.MedianTimePastAt = [this, base](uint32_t height) {
+    const BC::Common::BlockIndex *index = BlockIndex_->indexByHeight(height);
+    if (!index) {
+      index = base;
+      while (index && index->Height > height)
+        index = index->Prev;
+    }
+    return medianTimePast(index);
+  };
+  int64_t fee = 0;
+  BTC::CTxCost cost = result.Cost;
+  if (!BC::Common::checkTransactionContextual(tx, prevouts.data(), context, *ChainParams_, fee, error))
+    return result;
+  BTC::measureInputs(tx, prevouts.data(), cost);
+  if (!BC::Common::checkPolicyContextual(tx, prevouts.data(), context, cost, fee, error))
+    return result;
+
+  checkScripts(tx, records, result);
+  Stats_.ScriptsPrechecked.fetch_add(1, std::memory_order_relaxed);
+  if (result.Refused)
+    Stats_.ScriptsRefused.fetch_add(1, std::memory_order_relaxed);
+  return result;
 }
 
 void CMempool::send(CMessage *message)
@@ -289,7 +422,7 @@ void CMempool::onWake()
         SubmitBytes_.fetch_sub(message->Bytes, std::memory_order_relaxed);
         BC::Proto::CTransaction *tx = message->Tx;
         message->Tx = nullptr;
-        accept(tx, tx->getTxId(), std::move(message->Reply));
+        accept(tx, tx->getTxId(), message->Precheck, std::move(message->Reply));
         break;
       }
     }
@@ -318,16 +451,16 @@ void CMempool::onActivate()
   LOG_F(INFO, "mempool: active at %s (%u)", BaseIndex_->Header.GetHash().getHexLE().c_str(), BaseIndex_->Height);
 }
 
-// Acceptance (§5.2)
+// Acceptance
 
-void CMempool::accept(BC::Proto::CTransaction *tx, const TxId &txid, CReply reply)
+void CMempool::accept(BC::Proto::CTransaction *tx, const TxId &txid, const CPrecheck &precheck, CReply reply)
 {
   CDecision decision;
   if (!Active_)
     decision.Reason = "mempool-inactive";
   else
-    decision = decide(*tx, txid);
-  apply(tx, txid, decision, std::move(reply));
+    decision = decide(*tx, txid, precheck);
+  apply(tx, txid, decision, precheck, std::move(reply));
 }
 
 bool CMempool::contains(const TxId &txid) const
@@ -337,13 +470,13 @@ bool CMempool::contains(const TxId &txid) const
 
 // Carries a decision out: the entry, the waiting list, the counters, the verdict, the client. The
 // transaction is ours from here
-void CMempool::apply(BC::Proto::CTransaction *tx, const TxId &txid, CDecision &decision, CReply &&reply)
+void CMempool::apply(BC::Proto::CTransaction *tx, const TxId &txid, CDecision &decision, const CPrecheck &precheck, CReply &&reply)
 {
   CVerdict verdict;
   verdict.TxId = txid;
   switch (decision.Outcome) {
     case CDecision::EAccept :
-      insert(tx, txid, decision.Fee, decision.Cost);
+      insert(tx, txid, decision.Fee, decision.Cost, decision.Verified);
       Stats_.Accepted.fetch_add(1, std::memory_order_relaxed);
       verdict.Result = CVerdict::EAccepted;
       reply(verdict);
@@ -355,6 +488,7 @@ void CMempool::apply(BC::Proto::CTransaction *tx, const TxId &txid, CDecision &d
       Stats_.Rejected.fetch_add(1, std::memory_order_relaxed);
       verdict.Result = CVerdict::ERejected;
       verdict.Reason = decision.Reason;
+      verdict.Refusal = decision.Refusal;
       reply(verdict);
       operator delete(tx);
       break;
@@ -371,16 +505,17 @@ void CMempool::apply(BC::Proto::CTransaction *tx, const TxId &txid, CDecision &d
 
     case CDecision::EWait :
       Stats_.Waiting.fetch_add(1, std::memory_order_relaxed);
-      Waiting_.push_back({tx, txid, std::move(reply), decision.Seq, decision.Cost.Size});
+      // The precheck stays with it: scripts that passed are not run again
+      Waiting_.push_back({tx, txid, std::move(reply), decision.Seq, decision.Cost.Size, precheck});
       WaitingSeq_[txid] = decision.Seq;
       WaitingBytes_ += decision.Cost.Size;
       break;
   }
 }
 
-// Every check of §5.2: the module's own - duplicates, a block's own transactions, parts it cannot
-// hold, the inputs and the age rule of §4.4 - and around them the coin's consensus and policy
-CMempool::CDecision CMempool::decide(const BC::Proto::CTransaction &tx, const TxId &txid) const
+// Every acceptance check: the module's own - duplicates, a block's own transactions, parts it cannot
+// hold, the inputs and the age rule - and around them the coin's consensus and policy
+CMempool::CDecision CMempool::decide(const BC::Proto::CTransaction &tx, const TxId &txid, const CPrecheck &precheck) const
 {
   CDecision decision;
   auto reject = [&decision](std::string reason) {
@@ -408,15 +543,26 @@ CMempool::CDecision CMempool::decide(const BC::Proto::CTransaction &tx, const Tx
   if (hasShielded(tx))
     return reject("shielded-unsupported");
 
-  // The transaction alone
-  std::string error;
-  if (!BC::Common::checkTransactionStandalone(tx, *ChainParams_, error))
-    return reject(error);
-  BTC::measureTx(tx, decision.Cost);
-  if (!BC::Common::checkPolicyStandalone(tx, decision.Cost, error))
-    return reject(error);
+  // Refused by the thread that received it: the transaction alone or its scripts, the same at
+  // any base
+  if (precheck.Refused) {
+    decision.Refusal = precheck.Refusal;
+    return reject(precheck.Reason);
+  }
 
-  // Inputs: a parent in the mempool, otherwise the utxo database read as it is (§4.4). A parent in
+  // The transaction alone, unless that thread has checked
+  std::string error;
+  if (precheck.Standalone) {
+    decision.Cost = precheck.Cost;
+  } else {
+    if (!BC::Common::checkTransactionStandalone(tx, *ChainParams_, error))
+      return reject(error);
+    BTC::measureTx(tx, decision.Cost);
+    if (!BC::Common::checkPolicyStandalone(tx, decision.Cost, error))
+      return reject(error);
+  }
+
+  // Inputs: a parent in the mempool, otherwise the utxo database read as it is. A parent in
   // the mempool counts as the next block
   const uint32_t spendHeight = BaseIndex_->Height + 1;
   const size_t inputs = tx.TxIn.size();
@@ -424,6 +570,9 @@ CMempool::CDecision CMempool::decide(const BC::Proto::CTransaction &tx, const Tx
   std::vector<uint8_t> probed(inputs, 0);
   std::vector<uint8_t> found(inputs, 0);
   std::vector<uint8_t> restored(inputs, 0);
+  // The scripts are the writer's when the precheck could not run them: it keeps the records then
+  const bool ownScripts = precheck.Scripts != CPrecheck::EPassed;
+  CSpentRecords records(ownScripts ? inputs : 0);
   xvector<uint8_t> data;
   for (size_t i = 0; i < inputs; i++) {
     const COutpoint outpoint{tx.TxIn[i].PreviousOutputHash, tx.TxIn[i].PreviousOutputIndex};
@@ -435,31 +584,28 @@ CMempool::CDecision CMempool::decide(const BC::Proto::CTransaction &tx, const Tx
       const BC::Proto::CTransaction &parentTx = *parent->second->Tx;
       if (outpoint.Index >= parentTx.TxOut.size())
         return reject("bad-txns-inputs-missingorspent");
-      const BC::Proto::CTxOut &out = parentTx.TxOut[outpoint.Index];
-      prevouts[i] = {out.Value, BC::Script::classify(out.PkScript.data(), out.PkScript.size()), spendHeight, false, false,
-                     BC::Script::sigOpCount(out.PkScript.data(), out.PkScript.data() + out.PkScript.size(), true)};
+      parentPrevout(parentTx, outpoint.Index, spendHeight, prevouts[i], ownScripts ? &records[i] : nullptr);
       found[i] = 1;
       continue;
     }
 
-    // Behind a parent that waits for the chain (§5.9)
+    // Behind a parent that waits for the chain
     if (auto parent = WaitingSeq_.find(outpoint.Tx); parent != WaitingSeq_.end())
       return wait(parent->second);
 
     probed[i] = 1;
     uint32_t meta = 0;
-    if (Utxo_->query(outpoint.Tx, outpoint.Index, data, meta)) {
-      const BC::Script::CUnspentOutputInfo *info = reinterpret_cast<const BC::Script::CUnspentOutputInfo*>(data.data());
-      const uint8_t flags = BC::DB::utxoMetaFlags(meta);
-      prevouts[i] = {info->Value, info->Type, BC::DB::utxoMetaHeight(meta), (flags & BC::DB::EUtxoCoinbase) != 0, (flags & BC::DB::EUtxoPegout) != 0,
-                     BC::Script::sigOpCount(*info)};
-      restored[i] = (flags & BC::DB::EUtxoRestored) != 0;
+    xvector<uint8_t> &record = ownScripts ? records[i] : data;
+    if (Utxo_->query(outpoint.Tx, outpoint.Index, record, meta)) {
+      bool isRestored;
+      utxoPrevout(record, meta, prevouts[i], isRestored);
+      restored[i] = isRestored;
       found[i] = 1;
     }
   }
 
   // One load after all probes: how many steps utxo may have moved from the base under them. A
-  // found output without the Restored mark and no higher than r - L was there at the base (§4.4)
+  // found output without the Restored mark and no higher than r - L was there at the base
   const uint64_t lag = Utxo_->changeSeq() - BaseSeq_;
   const int64_t oldestSafe = static_cast<int64_t>(BaseIndex_->Height) - static_cast<int64_t>(lag);
   bool allFound = true;
@@ -481,7 +627,7 @@ CMempool::CDecision CMempool::decide(const BC::Proto::CTransaction &tx, const Tx
     return wait(BaseSeq_ + lag);
 
   if (!allFound) {
-    // Missing at the base and not in the mempool (§5.2 p.3). Outputs of its own in utxo: it is in
+    // Missing at the base and not in the mempool. Outputs of its own in utxo: it is in
     // the chain already. The cache only, as Core's HaveCoinInCache: no read per output, none
     // without the cache
     for (uint32_t i = 0; Utxo_->cacheEnabled() && i < tx.TxOut.size(); i++) {
@@ -518,13 +664,29 @@ CMempool::CDecision CMempool::decide(const BC::Proto::CTransaction &tx, const Tx
   if (Bytes_ + decision.Cost.Size > MaxBytes_)
     return reject("mempool full");
 
+  // The scripts last, as in Core. The thread that received the transaction has them checked,
+  // unless a spent output was not known there: an orphan tried again, a parent not yet published,
+  // a transaction that waited for the base
+  decision.Verified = !precheck.Unchecked;
+  if (ownScripts) {
+    CPrecheck own;
+    checkScripts(tx, records, own);
+    Stats_.ScriptsOnWriter.fetch_add(1, std::memory_order_relaxed);
+    if (own.Refused) {
+      Stats_.ScriptsRefused.fetch_add(1, std::memory_order_relaxed);
+      decision.Refusal = own.Refusal;
+      return reject(own.Reason);
+    }
+    decision.Verified = !own.Unchecked;
+  }
+
   decision.Outcome = CDecision::EAccept;
   return decision;
 }
 
 // The base's block at a height. Deep below the base the best chain's height index has it: another
 // block in the slot means B - height + 1 disconnects first, each step begun before that slot store,
-// so the sequence loaded after the slot counts them (§4.4); a cleared slot reads null. Near the
+// so the sequence loaded after the slot counts them; a cleared slot reads null. Near the
 // base, a short walk
 const BC::Common::BlockIndex *CMempool::baseAncestor(uint32_t height) const
 {
@@ -539,7 +701,7 @@ const BC::Common::BlockIndex *CMempool::baseAncestor(uint32_t height) const
   return index;
 }
 
-// Ancestors and descendants by walking the links (§5.9): the union of the ancestors, then for
+// Ancestors and descendants by walking the links: the union of the ancestors, then for
 // each of them the descendants it would have with the new transaction
 bool CMempool::limitsPass(const BC::Proto::CTransaction &tx, uint32_t vsize, std::string &error) const
 {
@@ -667,9 +829,10 @@ bool CMempool::trucPass(const BC::Proto::CTransaction &tx, uint32_t vsize) const
   return true;
 }
 
-void CMempool::insert(BC::Proto::CTransaction *tx, const TxId &txid, int64_t fee, const BTC::CTxCost &cost)
+void CMempool::insert(BC::Proto::CTransaction *tx, const TxId &txid, int64_t fee, const BTC::CTxCost &cost, bool verified)
 {
   CTxBody *body = new CTxBody;
+  body->Flags = verified ? ERecordVerified : 0;
   body->Size = cost.Size;
   body->VSize = cost.vsize();
   body->SigOpsCost = cost.SigOpsCost;
@@ -682,17 +845,18 @@ void CMempool::insert(BC::Proto::CTransaction *tx, const TxId &txid, int64_t fee
 
   if (Generation_->full())
     compact(2 * (Entries_.size() + 1));
-  Generation_->put(body, Revision_ + 1, 0);
+  Generation_->put(body, Revision_ + 1, body->Flags);
 
   Entries_[txid] = body;
   for (const auto &in: body->Tx->TxIn)
     Spent_[COutpoint{in.PreviousOutputHash, in.PreviousOutputIndex}] = txid;
   Bytes_ += body->Size;
   Fees_ += fee;
+  Unverified_ += !verified;
   Dirty_ = true;
 }
 
-// After a synchronization that brought the base to what they waited for (§4.4)
+// After a synchronization that brought the base to what they waited for
 void CMempool::retryWaiting()
 {
   std::vector<CWaiting> waitingNow;
@@ -706,8 +870,8 @@ void CMempool::retryWaiting()
       Waiting_.push_back(std::move(entry));
       continue;
     }
-    CDecision decision = decide(*entry.Tx, entry.Id);
-    apply(entry.Tx, entry.Id, decision, std::move(entry.Reply));
+    CDecision decision = decide(*entry.Tx, entry.Id, entry.Precheck);
+    apply(entry.Tx, entry.Id, decision, entry.Precheck, std::move(entry.Reply));
   }
 }
 
@@ -747,6 +911,7 @@ void CMempool::erase(const TxId &txid)
     Spent_.erase(COutpoint{in.PreviousOutputHash, in.PreviousOutputIndex});
   Bytes_ -= body->Size;
   Fees_ -= body->Fee;
+  Unverified_ -= !(body->Flags & ERecordVerified);
   Generation_->erase(txid, Revision_ + 1);
   Entries_.erase(it);
   Dirty_ = true;
@@ -764,7 +929,7 @@ void CMempool::eraseWithDescendants(const TxId &txid)
 
 // The chain
 
-// §4.3: the base catches up with the published utxo revision, block by block from the index and
+// The base catches up with the published utxo revision, block by block from the index and
 // the block objects; it jumps when there is nothing to apply the blocks to
 void CMempool::sync()
 {
@@ -803,7 +968,7 @@ void CMempool::sync()
 
   // Forward and not far: block by block, an empty mempool too, for the client to hear of every
   // block. Otherwise a jump, starting over if there are entries (the waiting stay either way);
-  // disconnect is step 7 of the plan (§6.3)
+  // a disconnect is not walked yet
   const bool walk = BaseIndex_ && !disconnects && connects.size() <= MaxSyncBlocks;
   if (walk) {
     for (auto it = connects.rbegin(); it != connects.rend(); ++it)
@@ -829,7 +994,7 @@ void CMempool::sync()
     compact(2 * Entries_.size());
 }
 
-// §6.1: confirmed entries leave and their children stay; entries spending what the block spent
+// A block connected: confirmed entries leave and their children stay; entries spending what the block spent
 // leave with all their descendants. The statistics are the main check of the stand
 void CMempool::connectBlock(BC::Common::BlockIndex *index)
 {
@@ -920,6 +1085,7 @@ void CMempool::reset(const char *why)
   Spent_.clear();
   Bytes_ = 0;
   Fees_ = 0;
+  Unverified_ = 0;
 }
 
 // Core's 336 hours by acceptance time: the generation lists entries in that order
@@ -968,8 +1134,7 @@ void CMempool::publish()
   view->TxCount = Entries_.size();
   view->Bytes = Bytes_;
   view->Fees = Fees_;
-  // No script checker yet (§5.5): everything accepted is Unverified
-  view->Unverified = Entries_.size();
+  view->Unverified = Unverified_;
   view->PublishedTime = time(nullptr);
   Current_.reset(view);
   Dirty_ = false;

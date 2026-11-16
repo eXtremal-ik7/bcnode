@@ -339,6 +339,21 @@ int main(int argc, char **argv)
       pipelineParams.PrepLanes = static_cast<size_t>(cfg->lookupInt("bcnode", "prepLanes", static_cast<int>(pipelineParams.PrepLanes)));
       pipelineParams.PreparedSizeLimit = static_cast<size_t>(cfg->lookupInt("bcnode", "preparedMb", static_cast<int>(pipelineParams.PreparedSizeLimit / 1048576))) * 1048576;
       pipelineParams.Prefetch = cfg->lookupBoolean("bcnode", "prefetch", pipelineParams.Prefetch);
+      {
+        // "new": a block from the network in full, one of our own files without its signatures;
+        // "all": every block in full; "off": no script is checked
+        const std::string scriptCheck = cfg->lookupString("bcnode", "scriptCheck", "new");
+        if (scriptCheck == "off") {
+          pipelineParams.ScriptCheck = EScriptCheck::Off;
+        } else if (scriptCheck == "new") {
+          pipelineParams.ScriptCheck = EScriptCheck::New;
+        } else if (scriptCheck == "all") {
+          pipelineParams.ScriptCheck = EScriptCheck::All;
+        } else {
+          LOG_F(ERROR, "bcnode.scriptCheck: unknown value '%s' (off, new, all)", scriptCheck.c_str());
+          return 1;
+        }
+      }
       blockCacheSize = static_cast<size_t>(cfg->lookupInt("bcnode", "blockCacheSizeMb", static_cast<int>(blockCacheSize / 1048576))) * 1048576;
 
       {

@@ -62,11 +62,14 @@ public:
 
   void start();
 
-  // For the transaction relay, which keeps peers past their disconnect notice (§7.5 of the plan)
+  // For the transaction relay, which keeps peers past their disconnect notice
   bool deleted() const { return Deleted_.load(std::memory_order_relaxed) != 0; }
   void requestTransactions(const xvector<BC::Proto::TxHashTy> &txids);
   // Memory held by this peer's messages waiting for the mempool writer
   std::atomic<size_t> RelayQueuedBytes = 0;
+  // Set by the mempool writer: a transaction of the peer fails the scripts a block is checked
+  // under. The peer's thread disconnects it at its next transaction
+  std::atomic<bool> RelayPunished = false;
 
 public:
   uintptr_t ref_fetch_add(uintptr_t tag) { return objectIncrementReference(btcSocketHandle(Socket), tag); }
@@ -154,7 +157,7 @@ private:
   void onInv(BC::Proto::CMessageInv &inv);
   void onNotFound(BC::Proto::CMessageInv &notfound);
   // Takes ownership of the unpack2 allocation
-  void onTx(BC::Proto::CTransaction *tx, size_t size);
+  bool onTx(BC::Proto::CTransaction *tx, size_t size);
   // Takes ownership of the serialized block data
   void onBlockData(void *data, size_t size, size_t memorySize, std::chrono::time_point<std::chrono::steady_clock> receivedTime);
   void onReject(BC::Proto::CMessageReject &reject);

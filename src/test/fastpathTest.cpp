@@ -1,4 +1,4 @@
-// Fast path (mempool-impl-plan.md §14.2, §14.7): a spend to a line with its verdict along the flag
+// Fast path: a spend to a line with its verdict along the flag
 // sets (spendBuilder.h). The builder signs digests of its own, put together apart from BTC/sighash.h:
 // a digest wrong in a byte there fails the spends here
 

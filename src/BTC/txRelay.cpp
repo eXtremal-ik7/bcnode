@@ -28,7 +28,7 @@ constexpr int64_t OverloadedPeerDelay = 2;
 constexpr uint32_t MaxPeerAnnouncements = 5000;
 // Stale marks beyond twice the requests and this are compacted away
 constexpr size_t MarksSlack = 1024;
-// Blocks whose txids are still recognized as confirmed (§5.7)
+// Blocks whose txids are still recognized as confirmed
 constexpr size_t ConfirmedBlocks = 10;
 // A rolling filter in Core; here a set dropped whole when it gets this big
 constexpr size_t MaxRejected = 120000;
@@ -57,6 +57,10 @@ struct CTxRelay::CMessage {
   // One unpack2 allocation, owned until the writer takes it
   BC::Proto::CTransaction *Tx = nullptr;
   TxId Id;
+  // Refused: what the refusal is remembered by
+  TxId Key;
+  // Tx, Refused: what the receiving thread found out
+  BC::Mempool::CPrecheck Precheck;
   // Counted against the queue shares; none for PeerGone, which is never dropped
   size_t Bytes = 0;
 
@@ -105,29 +109,52 @@ void CTxRelay::receiveInv(Peer *peer, xvector<TxId> &&txids)
   send(message);
 }
 
-void CTxRelay::receiveTx(Peer *peer, BC::Proto::CTransaction *tx, size_t size)
+bool CTxRelay::receiveTx(Peer *peer, BC::Proto::CTransaction *tx, size_t size)
 {
+  // Marked by the writer, where only it could check the scripts
+  if (peer->RelayPunished.load(std::memory_order_relaxed)) {
+    operator delete(tx);
+    return false;
+  }
+
   BC::Mempool::CViewRef current = Mempool_.view();
   const TxId txid = tx->getTxId();
   if (!current.get() || current.get()->find(txid)) {
     if (current.get())
       Stats_.Duplicates.fetch_add(1, std::memory_order_relaxed);
     operator delete(tx);
-    return;
+    return true;
   }
   const size_t bytes = sizeof(CMessage) + size;
   if (!admit(peer, bytes)) {
     operator delete(tx);
-    return;
+    return true;
   }
 
+  // What no state decides is checked here, signatures among it, not on the writer
+  BC::Mempool::CPrecheck precheck = Mempool_.precheck(*tx);
+  const bool punish = precheck.Refusal == BTC::EScriptRefusal::Mandatory;
+
   CMessage *message = new CMessage;
-  message->Type = EMessage::Tx;
   message->Source = CPeerRef(peer);
-  message->Tx = tx;
   message->Id = txid;
   message->Bytes = bytes;
+  if (precheck.Refused) {
+    // Final at any base: the writer only forgets the request and remembers the refusal
+    message->Type = EMessage::Refused;
+    message->Key = rejectKey(*tx, txid);
+    operator delete(tx);
+    Stats_.Refused.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    message->Type = EMessage::Tx;
+    message->Tx = tx;
+  }
+  message->Precheck = std::move(precheck);
   send(message);
+
+  if (punish)
+    Stats_.Punished.fetch_add(1, std::memory_order_relaxed);
+  return !punish;
 }
 
 // Nothing is asked and no peer has state before activation
@@ -292,7 +319,7 @@ void CTxRelay::blockConnected(const BC::Common::BlockIndex *index, const BC::Pro
   LOG_F(INFO, "txrelay: block %u: rejected %zu%s, orphan %zu, orphan conflicts %zu", index->Height, rejected, list.c_str(), orphans, orphanConflicts);
 }
 
-// A refusal could depend on the chain state (§5.7), a missing parent may be in the chain now
+// A refusal could depend on the chain state, a missing parent may be in the chain now
 void CTxRelay::baseChanged(bool disconnected)
 {
   Rejected_.clear();
@@ -312,6 +339,9 @@ void CTxRelay::handle(CMessage &message)
       break;
     case EMessage::Tx :
       onTx(message);
+      break;
+    case EMessage::Refused :
+      onRefused(message);
       break;
     case EMessage::NotFound :
       for (const TxId &txid: message.TxIds)
@@ -340,7 +370,7 @@ void CTxRelay::onTx(CMessage &message)
   message.Tx = nullptr;
   forget(txid);
 
-  // Already decided (§5.7). A txid refused stands for every witness: a child of refused parents
+  // Already decided. A txid refused stands for every witness: a child of refused parents
   const TxId key = rejectKey(*tx, txid);
   if (Orphans_.contains(txid) || Confirmed_.contains(txid) || Rejected_.contains(key) || Rejected_.contains(txid) || Mempool_.contains(txid)) {
     Stats_.Duplicates.fetch_add(1, std::memory_order_relaxed);
@@ -348,12 +378,21 @@ void CTxRelay::onTx(CMessage &message)
     return;
   }
 
-  accept(tx, txid, key, message.Source, 0);
+  accept(tx, txid, key, message.Precheck, message.Source, 0);
 }
 
-void CTxRelay::accept(BC::Proto::CTransaction *tx, const TxId &txid, const TxId &key, const CPeerRef &source, int64_t orphanExpire)
+// Nothing for the mempool to decide. A missing witness leaves the txid open for the real
+// transaction: without a witness the key is the txid
+void CTxRelay::onRefused(CMessage &message)
 {
-  Mempool_.accept(tx, txid, [this, key, source, orphanExpire](CVerdict &verdict) { onVerdict(verdict, key, source, orphanExpire); });
+  forget(message.Id);
+  if (message.Precheck.Refusal != BTC::EScriptRefusal::WitnessStripped)
+    reject(message.Key, message.Precheck.Reason);
+}
+
+void CTxRelay::accept(BC::Proto::CTransaction *tx, const TxId &txid, const TxId &key, const BC::Mempool::CPrecheck &precheck, const CPeerRef &source, int64_t orphanExpire)
+{
+  Mempool_.accept(tx, txid, precheck, [this, key, source, orphanExpire](CVerdict &verdict) { onVerdict(verdict, key, source, orphanExpire); });
 }
 
 void CTxRelay::onVerdict(CVerdict &verdict, const TxId &key, const CPeerRef &source, int64_t orphanExpire)
@@ -361,7 +400,12 @@ void CTxRelay::onVerdict(CVerdict &verdict, const TxId &key, const CPeerRef &sou
   if (verdict.Result == CVerdict::EAccepted)
     return;
   if (verdict.Result == CVerdict::ERejected) {
-    reject(key, verdict.Reason);
+    // The scripts were the writer's to check: the peer's own thread disconnects it, at its next
+    // transaction
+    if (verdict.Refusal == BTC::EScriptRefusal::Mandatory && !source.get()->RelayPunished.exchange(true, std::memory_order_relaxed))
+      Stats_.Punished.fetch_add(1, std::memory_order_relaxed);
+    if (verdict.Refusal != BTC::EScriptRefusal::WitnessStripped)
+      reject(key, verdict.Reason);
     return;
   }
 
@@ -390,7 +434,7 @@ void CTxRelay::onVerdict(CVerdict &verdict, const TxId &key, const CPeerRef &sou
     Stats_.Orphans.fetch_add(1, std::memory_order_relaxed);
   Orphans_[verdict.TxId] = COrphan{verdict.Tx, source, retry ? orphanExpire : steadySeconds() + OrphanLifetime, verdict.MissingParents};
   verdict.Tx = nullptr;
-  // The parents are asked of whoever sent the child (§5.8)
+  // The parents are asked of whoever sent the child
   if (!retry) {
     for (const TxId &parent: verdict.MissingParents)
       announce(source.get(), parent);
@@ -425,7 +469,8 @@ void CTxRelay::retryOrphans()
         continue;
       COrphan orphan = std::move(it->second);
       Orphans_.erase(it);
-      accept(orphan.Tx, txid, rejectKey(*orphan.Tx, txid), orphan.Source, orphan.Expire);
+      // Its outputs to spend are known only now: every check is the writer's
+      accept(orphan.Tx, txid, rejectKey(*orphan.Tx, txid), BC::Mempool::CPrecheck(), orphan.Source, orphan.Expire);
     }
   }
 }
@@ -453,7 +498,7 @@ bool CTxRelay::known(const TxId &txid) const
          Rejected_.contains(txid);
 }
 
-// A peer's messages may outlive its disconnect notice (§7.5): a dead peer gets no state
+// A peer's messages may outlive its disconnect notice: a dead peer gets no state
 CTxRelay::CPeerState *CTxRelay::peerState(Peer *peer)
 {
   if (!peer)

@@ -115,6 +115,23 @@ namespace Common {
   // The longest transaction checkPolicyStandalone can pass: the network drops longer ones unparsed
   size_t maxStandardTxSize();
 
+  // Scripts (BTC/btc.h). Zcash signs digests of its own (ZIP-143, 243, 244), none of them here:
+  // nothing is checked and every spend is taken as valid
+  uint32_t blockScriptFlags(const BlockIndex &index, const ChainParams &chainParams);
+  bool checkBlockScripts(const BlockIndex &index,
+                         const Proto::CBlock &block,
+                         const Proto::CBlockLinkedOutputs &linkedOutputs,
+                         const ChainParams &chainParams,
+                         size_t firstTx,
+                         size_t lastTx,
+                         bool signatures,
+                         const uint64_t *skip,
+                         CScriptCheckResult &result);
+  BTC::EScriptRefusal checkPolicyScripts(const Proto::CTransaction &tx,
+                                         std::span<const Script::CUnspentOutputInfo* const> spent,
+                                         std::string &error,
+                                         BTC::CScriptCount &count);
+
   bool checkPow(const Proto::CBlockHeader &header, uint32_t nBits, CheckConsensusCtx &, const UInt<256> &powLimit);
   UInt<256> GetBlockProof(const Proto::CBlockHeader &header);
 

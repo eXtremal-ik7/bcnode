@@ -132,6 +132,9 @@ void txDigests(const TxTy &tx, CTxDigests &digests)
 // The amounts and scripts of the spent outputs, the scripts restored from their records
 void spentDigests(std::span<const Script::CUnspentOutputInfo* const> spent, CTxDigests &digests);
 
+// The script of P2PKH, the scriptCode BIP143 gives P2WPKH
+void keyHashScript(const uint8_t *hash, uint8_t (&script)[25]);
+
 // Core's SignatureHash for SigVersion::BASE. scriptCode has no OP_CODESEPARATOR; SIGHASH_SINGLE
 // without its output signs 1, Core's old bug kept by consensus
 template<typename TxTy>

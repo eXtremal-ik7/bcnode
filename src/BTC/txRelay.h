@@ -5,7 +5,7 @@
 
 #pragma once
 
-// The peer side of transactions (mempool-impl-plan.md §5.7, §5.8, §7.3): who announced what, what
+// The peer side of transactions: who announced what, what
 // is asked of whom, orphans and the filters of what was already decided. Core keeps all of it in
 // net_processing; here it is the mempool writer's client and runs on its thread, so the mempool
 // knows no peers. Network threads only push messages.
@@ -35,6 +35,10 @@ public:
     std::atomic<uint64_t> Orphans = 0;
     // Over a share of the writer's queue, or longer than the policy passes
     std::atomic<uint64_t> Dropped = 0;
+    // Refused by the thread that received them: the mempool never saw these
+    std::atomic<uint64_t> Refused = 0;
+    // Peers marked for a transaction that fails the scripts a block is checked under
+    std::atomic<uint64_t> Punished = 0;
   };
 
   explicit CTxRelay(BC::Mempool::CMempool &mempool);
@@ -43,7 +47,9 @@ public:
 
   // Network threads. The transaction is one unpack2 allocation of the given size, the relay takes it
   void receiveInv(Peer *peer, xvector<TxId> &&txids);
-  void receiveTx(Peer *peer, BC::Proto::CTransaction *tx, size_t size);
+  // Checks the transaction as far as this thread can. False: the peer is to be
+  // disconnected, it sent what no block may hold
+  bool receiveTx(Peer *peer, BC::Proto::CTransaction *tx, size_t size);
   void receiveNotFound(Peer *peer, xvector<TxId> &&txids);
   void peerGone(Peer *peer);
   // A tx message left unparsed: longer than the policy passes
@@ -65,6 +71,8 @@ private:
   enum class EMessage {
     Inv,
     Tx,
+    // A transaction refused by the thread that received it: no body, only what to remember
+    Refused,
     NotFound,
     PeerGone
   };
@@ -106,13 +114,14 @@ private:
 
   // Acceptance through the mempool. orphanExpire: an orphan tried again keeps its lifetime
   void onTx(CMessage &message);
-  void accept(BC::Proto::CTransaction *tx, const TxId &txid, const TxId &key, const CPeerRef &source, int64_t orphanExpire);
+  void onRefused(CMessage &message);
+  void accept(BC::Proto::CTransaction *tx, const TxId &txid, const TxId &key, const BC::Mempool::CPrecheck &precheck, const CPeerRef &source, int64_t orphanExpire);
   void onVerdict(BC::Mempool::CVerdict &verdict, const TxId &key, const CPeerRef &source, int64_t orphanExpire);
   void reject(const TxId &txid, const std::string &reason);
   void retryOrphans();
   void expireOrphans();
 
-  // Requests (§7.3)
+  // Requests
   bool known(const TxId &txid) const;
   CPeerState *peerState(Peer *peer);
   void announce(Peer *peer, const TxId &txid);
@@ -141,7 +150,7 @@ private:
   std::vector<TxId> Added_;
   bool RetryAllOrphans_ = false;
 
-  // Filters (§5.7): confirmed by the last blocks, refused at this base (a transaction with a
+  // Filters: confirmed by the last blocks, refused at this base (a transaction with a
   // witness by its wtxid)
   std::deque<std::vector<TxId>> ConfirmedBlocks_;
   CTxMap<uint32_t> Confirmed_;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "proto.h"
+#include "scriptFlags.h"
 #include "validation.h"
 #include <openssl/sha.h>
 #include <string.h>
@@ -41,6 +42,15 @@ public:
   // Clusters are bounded instead of ancestors and descendants
   static constexpr size_t MempoolClusterLimit = 64;
   static constexpr uint64_t MempoolClusterSizeLimit = 101000;
+  // The mempool's script flags: Core's MANDATORY_SCRIPT_VERIFY_FLAGS and STANDARD_SCRIPT_VERIFY_FLAGS
+  static constexpr uint32_t MandatoryScriptFlags =
+    EScriptP2SH | EScriptDerSig | EScriptNullDummy | EScriptCheckLockTimeVerify | EScriptCheckSequenceVerify |
+    EScriptWitness | EScriptTaproot;
+  static constexpr uint32_t StandardScriptFlags =
+    MandatoryScriptFlags | EScriptStrictEnc | EScriptMinimalData | EScriptDiscourageUpgradableNops | EScriptCleanStack |
+    EScriptMinimalIf | EScriptNullFail | EScriptLowS | EScriptDiscourageUpgradableWitnessProgram |
+    EScriptWitnessPubKeyType | EScriptConstScriptCode | EScriptDiscourageUpgradableTaprootVersion |
+    EScriptDiscourageOpSuccess | EScriptDiscourageUpgradablePubKeyType;
 
   static constexpr bool HasWitness = true;
   static constexpr uint32_t ProtocolVersion = 70015;
@@ -77,6 +87,14 @@ namespace Common {
     // Soft&hard forks
     uint32_t BIP34Height;
     uint32_t SegwitHeight;
+    // Script rules by height, for the coin's blockScriptFlags: P2SH, DERSIG, CHECKLOCKTIMEVERIFY,
+    // CHECKSEQUENCEVERIFY, taproot. A coin sets the ones its function reads
+    uint32_t BIP16Height = 0;
+    uint32_t BIP66Height = NeverHeight;
+    uint32_t BIP65Height = NeverHeight;
+    uint32_t CSVHeight = NeverHeight;
+    uint32_t TaprootHeight = NeverHeight;
+    std::vector<CScriptFlagException> ScriptFlagExceptions;
 
     // Blocks that repeat an earlier coinbase transaction (see CBIP30Repeat);
     // empty on every chain but Bitcoin
@@ -160,6 +178,28 @@ namespace Common {
                              std::string &error);
   // The longest transaction checkPolicyStandalone can pass: the network drops longer ones unparsed
   size_t maxStandardTxSize();
+
+  // Scripts (BTC/scriptVerify.h). The flags a block's scripts are checked under: Core's
+  // GetBlockScriptFlags
+  uint32_t blockScriptFlags(const BlockIndex &index, const ChainParams &chainParams);
+  // What the engine asks of a block: transactions [firstTx, lastTx) against the linked outputs of
+  // their inputs - a wave hands a block out in parts. signatures: verified, or taken on trust with
+  // the other rules checked; skip: transactions checked already (scriptTxSkipped), or nullptr.
+  // False at an invalid input, named in the result
+  bool checkBlockScripts(const BlockIndex &index,
+                         const Proto::CBlock &block,
+                         const Proto::CBlockLinkedOutputs &linkedOutputs,
+                         const ChainParams &chainParams,
+                         size_t firstTx,
+                         size_t lastTx,
+                         bool signatures,
+                         const uint64_t *skip,
+                         CScriptCheckResult &result);
+  // The mempool's: under this coin's standard flags, and its mandatory ones for the reason
+  EScriptRefusal checkPolicyScripts(const Proto::CTransaction &tx,
+                                    std::span<const Script::CUnspentOutputInfo* const> spent,
+                                    std::string &error,
+                                    CScriptCount &count);
 }
 
 class X {

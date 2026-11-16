@@ -613,7 +613,8 @@ void BC::Network::HttpApiConnection::onMempoolSummary(rapidjson::Document&)
       object.addInt("tx_count", view.get()->TxCount);
       object.addInt("size_bytes", view.get()->Bytes);
       object.addString("fees", FormatMoney(view.get()->Fees, BC::Configuration::RationalPartSize));
-      // Accepted without a script check (§5.5 of the plan): not relayed, not served, not mined
+      // With an input no script check went through: off the fast path, left to the interpreter,
+      // a stub so far
       object.addInt("unverified", view.get()->Unverified);
       object.addInt("published", view.get()->PublishedTime);
     }
@@ -634,6 +635,9 @@ void BC::Network::HttpApiConnection::onMempoolSummary(rapidjson::Document&)
       writer.addInt("confirmed", value(stats.Confirmed));
       writer.addInt("conflicted", value(stats.Conflicted));
       writer.addInt("expired", value(stats.Expired));
+      writer.addInt("scripts_prechecked", value(stats.ScriptsPrechecked));
+      writer.addInt("scripts_on_writer", value(stats.ScriptsOnWriter));
+      writer.addInt("scripts_refused", value(stats.ScriptsRefused));
     }
 
     const BC::Network::CTxRelay::CStats &relayStats = Node_->txRelay().stats();
@@ -645,6 +649,8 @@ void BC::Network::HttpApiConnection::onMempoolSummary(rapidjson::Document&)
       relay.addInt("duplicates", value(relayStats.Duplicates));
       relay.addInt("orphans", value(relayStats.Orphans));
       relay.addInt("dropped", value(relayStats.Dropped));
+      relay.addInt("refused", value(relayStats.Refused));
+      relay.addInt("punished", value(relayStats.Punished));
     }
   }
 
@@ -1013,7 +1019,9 @@ void BC::Network::HttpApiConnection::onTxsSend(rapidjson::Document &request)
     self.get()->finishChunk(stream, offset);
     aioWrite(self.get()->Socket_, stream.data(), stream.sizeOf(), afWaitAll, 0, writeCb, self.get());
   };
-  if (!Node_->mempool().submit(tx, unpackedSize, std::move(reply)))
+  // The scripts on this thread, as for a peer's transaction
+  BC::Mempool::CPrecheck precheck = Node_->mempool().precheck(*tx);
+  if (!Node_->mempool().submit(tx, unpackedSize, std::move(precheck), std::move(reply)))
     replyWithError("MEMPOOL_BUSY", "", "", "");
 }
 

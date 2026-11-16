@@ -8,7 +8,7 @@
 // The mempool writer: one thread owns every change, the rest of the node sends it messages and
 // reads what it published. The storage wakes it after every utxo change; the wake carries nothing,
 // the writer follows the published utxo revision itself and is consistent with the block it stands
-// at (mempool-impl-plan.md §3, §4).
+// at.
 //
 // The core is the same for every coin; what a transaction must satisfy is the coin's consensus and
 // mempool policy (checkTransaction*, checkPolicy*). Peers are not its business: the coin's network side runs on the writer
@@ -29,9 +29,8 @@
 
 class BlockInMemoryIndex;
 
-namespace BTC {
-struct CTxCost;
-}
+#include "BTC/policy.h"
+#include "BTC/scriptError.h"
 
 namespace config4cpp {
 class Configuration;
@@ -64,11 +63,37 @@ struct CVerdict {
 
   EResult Result;
   std::string Reason;
+  // ERejected by the scripts, and how: the client's to act on
+  BTC::EScriptRefusal Refusal = BTC::EScriptRefusal::None;
   BC::Proto::TxHashTy TxId;
   // EMissingInputs: the parents not found, and the transaction itself, which the reply may take
   // by nulling the field
   std::vector<BC::Proto::TxHashTy> MissingParents;
   BC::Proto::CTransaction *Tx = nullptr;
+};
+
+// What the thread that received a transaction found out ahead of the writer. Only what
+// no state decides: the transaction alone, and its scripts - a function of the transaction and
+// the outputs it spends, the same on any thread and at any base
+struct CPrecheck {
+  enum EScripts : uint8_t {
+    // Not checked there: a spent output was not known, or the policy would refuse anyway. The
+    // writer checks once it knows the outputs
+    EUnknown,
+    EPassed,
+    ERefused
+  };
+
+  // The transaction alone passed consensus and policy, Cost is measured
+  bool Standalone = false;
+  BTC::CTxCost Cost;
+  EScripts Scripts = EUnknown;
+  // EPassed, but an input was left to the interpreter: a stub, nothing checked it
+  bool Unchecked = false;
+  BTC::EScriptRefusal Refusal = BTC::EScriptRefusal::None;
+  // A refusal no base changes, with Core's reason: the standalone checks or the scripts
+  bool Refused = false;
+  std::string Reason;
 };
 
 struct COutpoint {
@@ -94,7 +119,7 @@ public:
   virtual int64_t deadline() const = 0;
 
   virtual void transactionAdded(const BC::Proto::TxHashTy &txid) = 0;
-  // A block the base moved over (§6.1): its transactions have left the mempool. After a jump or a
+  // A block the base moved over: its transactions have left the mempool. After a jump or a
   // reset, only the last few blocks, for the client's filters. txids[i] is block.Vtx[i + 1]'s
   virtual void blockConnected(const BC::Common::BlockIndex *index,
                               const BC::Proto::CBlock &block,
@@ -121,10 +146,14 @@ public:
     std::atomic<uint64_t> Confirmed = 0;
     std::atomic<uint64_t> Conflicted = 0;
     std::atomic<uint64_t> Expired = 0;
+    // Transactions whose scripts were checked: by the thread that received them, by the writer
+    std::atomic<uint64_t> ScriptsPrechecked = 0;
+    std::atomic<uint64_t> ScriptsOnWriter = 0;
+    std::atomic<uint64_t> ScriptsRefused = 0;
   };
 
   // Runs once on the writer thread with the final verdict: at once, or when the base reached what
-  // an input waits for (§4.4)
+  // an input waits for
   using CReply = std::function<void(CVerdict&)>;
 
   CMempool();
@@ -144,14 +173,20 @@ public:
   // Once the node has caught up with its peers, and for good: later calls do nothing
   void activate();
 
+  // Any thread that received a transaction, before it goes to the writer: the checks of
+  // the transaction alone and, with every spent output found in the published mempool or in utxo,
+  // its scripts. The writer takes the result with the transaction
+  CPrecheck precheck(const BC::Proto::CTransaction &tx) const;
+
   // Any thread: a transaction from the API, one unpack2 allocation of the given size the mempool
   // takes. False, with no reply, when such transactions already fill their share of the queue
-  bool submit(BC::Proto::CTransaction *tx, size_t size, CReply reply);
+  bool submit(BC::Proto::CTransaction *tx, size_t size, CPrecheck precheck, CReply reply);
   // Any thread, after start(): a pass of the writer, for the client's messages
   void wake() { userEventActivate(WakeEvent_); }
 
-  // The writer thread only, for the client. accept() takes the transaction
-  void accept(BC::Proto::CTransaction *tx, const TxId &txid, CReply reply);
+  // The writer thread only, for the client. accept() takes the transaction; a default precheck
+  // leaves every check to the writer
+  void accept(BC::Proto::CTransaction *tx, const TxId &txid, const CPrecheck &precheck, CReply reply);
   // In the mempool or waiting for the chain
   bool contains(const TxId &txid) const;
 
@@ -175,6 +210,7 @@ private:
     CReply Reply;
     uint64_t Seq;
     uint32_t Size;
+    CPrecheck Precheck;
   };
 
   struct CBlockStats {
@@ -197,15 +233,16 @@ private:
   void onWake();
   void onActivate();
 
-  // Acceptance (§5.2): decide() only reads, apply() makes every change
-  CDecision decide(const BC::Proto::CTransaction &tx, const TxId &txid) const;
+  // Acceptance: decide() only reads, apply() makes every change. What the precheck left
+  // open is checked here, the scripts last
+  CDecision decide(const BC::Proto::CTransaction &tx, const TxId &txid, const CPrecheck &precheck) const;
   // The coin's bounds on what the transaction joins in the mempool; the error is the reason
   bool limitsPass(const BC::Proto::CTransaction &tx, uint32_t vsize, std::string &error) const;
   bool chainPass(const BC::Proto::CTransaction &tx, uint32_t vsize) const;
   bool clusterPass(const BC::Proto::CTransaction &tx, uint32_t vsize) const;
   bool trucPass(const BC::Proto::CTransaction &tx, uint32_t vsize) const;
-  void apply(BC::Proto::CTransaction *tx, const TxId &txid, CDecision &decision, CReply &&reply);
-  void insert(BC::Proto::CTransaction *tx, const TxId &txid, int64_t fee, const BTC::CTxCost &cost);
+  void apply(BC::Proto::CTransaction *tx, const TxId &txid, CDecision &decision, const CPrecheck &precheck, CReply &&reply);
+  void insert(BC::Proto::CTransaction *tx, const TxId &txid, int64_t fee, const BTC::CTxCost &cost, bool verified);
   void retryWaiting();
   bool waiting(const TxId &txid) const;
   const BC::Common::BlockIndex *baseAncestor(uint32_t height) const;
@@ -215,7 +252,7 @@ private:
   void erase(const TxId &txid);
   void eraseWithDescendants(const TxId &txid);
 
-  // The chain (§4.3, §6.1)
+  // The chain
   void sync();
   void connectBlock(BC::Common::BlockIndex *index);
   void recentBlocks(BC::Common::BlockIndex *position);
@@ -223,7 +260,7 @@ private:
   void expire();
   void armTimer();
 
-  // Publication (§8)
+  // Publication
   void publish();
   void compact(size_t capacity);
   void replaceGeneration(CGeneration *next);
@@ -245,7 +282,7 @@ private:
   mutable atomic_intrusive_ptr<CView, CViewDeleter> Current_;
   // Views whose last reader is gone, for the writer to free
   CReturnList<CView> RetiredViews_;
-  CStats Stats_;
+  mutable CStats Stats_;
 
   // Set by start()
   BlockInMemoryIndex *BlockIndex_ = nullptr;
@@ -255,7 +292,7 @@ private:
   CMempoolClient *Client_ = nullptr;
   uint64_t MaxBytes_ = 0;
 
-  // Everything below is the writer thread's (§3): plain structures, no atomics
+  // Everything below is the writer thread's: plain structures, no atomics
   bool Active_ = false;
   // The base (B, M): the block the mempool stands at and the utxo change sequence it matches
   BC::Common::BlockIndex *BaseIndex_ = nullptr;
@@ -272,8 +309,10 @@ private:
   ankerl::unordered_dense::map<COutpoint, TxId, COutpointHash> Spent_;
   uint64_t Bytes_ = 0;
   int64_t Fees_ = 0;
+  // Entries with an input no script check went through: the interpreter's, while it is a stub
+  uint64_t Unverified_ = 0;
 
-  // Waiting for the base (§4.4): in arrival order, and txid -> the sequence it waits for
+  // Waiting for the base: in arrival order, and txid -> the sequence it waits for
   std::vector<CWaiting> Waiting_;
   ankerl::unordered_dense::map<TxId, uint64_t, CTxIdHash> WaitingSeq_;
   uint64_t WaitingBytes_ = 0;

@@ -5,7 +5,7 @@
 
 #pragma once
 
-// The mempool policy of the Bitcoin family (mempool-impl-plan.md §5.3): what a transaction valid
+// The mempool policy of the Bitcoin family: what a transaction valid
 // by consensus must also be to enter the mempool - standard, cheap to check, paying for itself.
 // One rule to a function, as the consensus rules in validation.h; a coin lists the rules its node
 // keeps in checkPolicyStandalone/Contextual. The errors are Core's reject strings

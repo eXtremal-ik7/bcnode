@@ -6,6 +6,7 @@
 #include "doge.h"
 #include "validation.h"
 #include "BTC/policy.h"
+#include "BTC/scriptVerify.h"
 #include "crypto/scrypt.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
@@ -28,6 +29,8 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->BIP34Height = 1034383;
     // TODO: find it
     params->SegwitHeight = 0;
+    params->BIP66Height = 1034383;
+    params->BIP65Height = 3464751;
 
     {
       params->GenesisBlock.Header.Version = 1;
@@ -96,6 +99,8 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     params->BIP34Height = 708658;
     // TODO: find it
     params->SegwitHeight = 0;
+    params->BIP66Height = 708658;
+    params->BIP65Height = 1854705;
 
     {
       params->GenesisBlock.Header.Version = 1;
@@ -153,6 +158,8 @@ bool DOGE::Common::setupChainParams(ChainParams *params, const char *network)
     // Soft & hard forks
     params->BIP34Height = 500;
     params->SegwitHeight = std::numeric_limits<uint32_t>::max();
+    params->BIP66Height = 1251;
+    params->BIP65Height = 1351;
 
     {
       genesis_block_hash_assert_eq<DOGE::X>(params->GenesisBlock.Header, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9");
@@ -251,6 +258,38 @@ bool DOGE::Common::checkPolicyStandalone(const Proto::CTransaction &tx, const BT
 size_t DOGE::Common::maxStandardTxSize()
 {
   return BTC::Policy::MaxStandardTxWeight / BTC::Policy::WitnessScaleFactor;
+}
+
+uint32_t DOGE::Common::blockScriptFlags(const BlockIndex &index, const ChainParams &chainParams)
+{
+  uint32_t flags = BTC::EScriptP2SH;
+  if (index.Height >= chainParams.BIP66Height)
+    flags |= BTC::EScriptDerSig;
+  if (index.Height >= chainParams.BIP65Height)
+    flags |= BTC::EScriptCheckLockTimeVerify;
+  return flags;
+}
+
+bool DOGE::Common::checkBlockScripts(const BlockIndex &index,
+                                     const Proto::CBlock &block,
+                                     const Proto::CBlockLinkedOutputs &linkedOutputs,
+                                     const ChainParams &chainParams,
+                                     size_t firstTx,
+                                     size_t lastTx,
+                                     bool signatures,
+                                     const uint64_t *skip,
+                                     CScriptCheckResult &result)
+{
+  return BTC::verifyBlockScripts(block, linkedOutputs, firstTx, lastTx, blockScriptFlags(index, chainParams),
+                                 signatures ? BTC::ESigMode::Defer : BTC::ESigMode::Trust, skip, result);
+}
+
+BTC::EScriptRefusal DOGE::Common::checkPolicyScripts(const Proto::CTransaction &tx,
+                                                     std::span<const Script::CUnspentOutputInfo* const> spent,
+                                                     std::string &error,
+                                                     BTC::CScriptCount &count)
+{
+  return BTC::verifyTransactionPolicy(tx, spent, DOGE::Configuration::StandardScriptFlags, DOGE::Configuration::MandatoryScriptFlags, error, count);
 }
 
 // Core's STANDARD_LOCKTIME_VERIFY_FLAGS: BIP68 and BIP113 of the mempool only

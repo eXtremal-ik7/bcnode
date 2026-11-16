@@ -6,6 +6,7 @@
 #include "btc.h"
 #include "validation.h"
 #include "policy.h"
+#include "scriptVerify.h"
 #include "merkleTree.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
@@ -33,6 +34,15 @@ bool setupChainParams(ChainParams *params, const char *network)
     // Soft & hard forks
     params->BIP34Height = 227931;
     params->SegwitHeight = 481824;
+    params->BIP66Height = 363725;
+    params->BIP65Height = 388381;
+    params->CSVHeight = 419328;
+    // P2SH, segwit and taproot hold from genesis but for the one block that broke BIP16 and the
+    // one that broke taproot before their activation
+    params->ScriptFlagExceptions = {
+      {Proto::BlockHashTy::fromHexLE("00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22"), EScriptNone},
+      {Proto::BlockHashTy::fromHexLE("0000000000000000000f14c35b2d841e986ab5441de8c585d5ffe55ea1e395ad"), EScriptP2SH | EScriptWitness}
+    };
 
     // 91842 repeats the coinbase of 91812, 91880 that of 91722. Block hashes,
     // twins and txids read back from the chain itself (a scan of the first
@@ -117,6 +127,12 @@ bool setupChainParams(ChainParams *params, const char *network)
     // Soft & hard forks
     params->BIP34Height = 21111;
     params->SegwitHeight = 834624;
+    params->BIP66Height = 330776;
+    params->BIP65Height = 581885;
+    params->CSVHeight = 770112;
+    params->ScriptFlagExceptions = {
+      {Proto::BlockHashTy::fromHexLE("00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105"), EScriptNone}
+    };
 
     {
       // Genesis block
@@ -186,6 +202,9 @@ bool setupChainParams(ChainParams *params, const char *network)
     // Soft & hard forks
     params->BIP34Height = 500;
     params->SegwitHeight = 0;
+    params->BIP66Height = 1;
+    params->BIP65Height = 1;
+    params->CSVHeight = 1;
 
     {
       // Genesis block
@@ -353,6 +372,52 @@ bool checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost &co
 size_t maxStandardTxSize()
 {
   return BTC::Policy::MaxStandardTxWeight;
+}
+
+uint32_t blockScriptFlags(const BlockIndex &index, const ChainParams &chainParams)
+{
+  // Core keeps P2SH, WITNESS and TAPROOT on from genesis, the exceptions aside
+  uint32_t flags = EScriptP2SH | EScriptWitness | EScriptTaproot;
+  if (!chainParams.ScriptFlagExceptions.empty()) {
+    const Proto::BlockHashTy hash = index.Header.GetHash();
+    for (const CScriptFlagException &exception: chainParams.ScriptFlagExceptions) {
+      if (hash == exception.Hash)
+        flags = exception.Flags;
+    }
+  }
+
+  if (index.Height >= chainParams.BIP66Height)
+    flags |= EScriptDerSig;
+  if (index.Height >= chainParams.BIP65Height)
+    flags |= EScriptCheckLockTimeVerify;
+  if (index.Height >= chainParams.CSVHeight)
+    flags |= EScriptCheckSequenceVerify;
+  // BIP147 came with segwit
+  if (index.Height >= chainParams.SegwitHeight)
+    flags |= EScriptNullDummy;
+  return flags;
+}
+
+bool checkBlockScripts(const BlockIndex &index,
+                       const Proto::CBlock &block,
+                       const Proto::CBlockLinkedOutputs &linkedOutputs,
+                       const ChainParams &chainParams,
+                       size_t firstTx,
+                       size_t lastTx,
+                       bool signatures,
+                       const uint64_t *skip,
+                       CScriptCheckResult &result)
+{
+  return BTC::verifyBlockScripts(block, linkedOutputs, firstTx, lastTx, blockScriptFlags(index, chainParams),
+                                 signatures ? BTC::ESigMode::Defer : BTC::ESigMode::Trust, skip, result);
+}
+
+EScriptRefusal checkPolicyScripts(const Proto::CTransaction &tx,
+                                  std::span<const Script::CUnspentOutputInfo* const> spent,
+                                  std::string &error,
+                                  CScriptCount &count)
+{
+  return BTC::verifyTransactionPolicy(tx, spent, BTC::Configuration::StandardScriptFlags, BTC::Configuration::MandatoryScriptFlags, error, count);
 }
 
 bool checkPolicyContextual(const Proto::CTransaction &tx,

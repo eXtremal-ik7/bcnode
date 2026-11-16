@@ -3,6 +3,7 @@
 #include "proto.h"
 #include "script.h"
 #include "merkleTree.h"
+#include "common/scriptCheck.h"
 #include "common/serializeUtils.h"
 #include <algorithm>
 #include <cassert>
@@ -10,6 +11,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -322,6 +324,10 @@ struct CTxContext {
 // What the mempool policy measures (policy.h)
 struct CTxCost;
 
+// The mempool's script checks (scriptVerify.h): a coin's checkPolicyScripts takes these
+struct CScriptCount;
+enum class EScriptRefusal : uint8_t;
+
 // Core's IsCoinBase: one input, the null prevout
 template<typename TxTy>
 bool isCoinbase(const TxTy &tx)
@@ -612,12 +618,6 @@ bool validateUnexpectedWitness(const typename X::BlockIndex &index, const typena
   bool result = !(index.Height < chainParams.SegwitHeight && block.validationData.HasWitness);
   error = "unexpected-witness-data";
   return result;
-}
-
-template<typename X>
-bool validateScriptSig(const typename X::Proto::ValidationData&, const typename X::Proto::CTransaction&, const typename X::ChainParams&, std::string&)
-{
-  return true;
 }
 
 template<typename X>

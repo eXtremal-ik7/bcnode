@@ -26,10 +26,11 @@ add_bc_unittest(BTC
   localSpendTest.cpp
   outputInfoTest.cpp
   spendBuilder.cpp
-  ${CMAKE_SOURCE_DIR}/BTC/fastpath.cpp
   ${CMAKE_SOURCE_DIR}/BTC/policy.cpp
   ${CMAKE_SOURCE_DIR}/BTC/proto.cpp
   ${CMAKE_SOURCE_DIR}/BTC/script.cpp
   ${CMAKE_SOURCE_DIR}/BTC/scriptChecks.cpp
   ${CMAKE_SOURCE_DIR}/BTC/scriptError.cpp
+  ${CMAKE_SOURCE_DIR}/BTC/sigCheck.cpp
+  ${CMAKE_SOURCE_DIR}/BTC/sighash.cpp
 )

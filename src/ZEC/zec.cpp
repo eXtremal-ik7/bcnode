@@ -6,6 +6,7 @@
 #include "zec.h"
 #include "BTC/policy.h"
 #include "BTC/script.h"
+#include "BTC/scriptVerify.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
 
@@ -298,6 +299,41 @@ bool ZEC::Common::checkPolicyStandalone(const Proto::CTransaction &tx, const BTC
 size_t ZEC::Common::maxStandardTxSize()
 {
   return ZEC::Configuration::MaxBlockSize;
+}
+
+uint32_t ZEC::Common::blockScriptFlags(const BlockIndex&, const ChainParams&)
+{
+  return BTC::EScriptNone;
+}
+
+bool ZEC::Common::checkBlockScripts(const BlockIndex&,
+                                    const Proto::CBlock &block,
+                                    const Proto::CBlockLinkedOutputs&,
+                                    const ChainParams&,
+                                    size_t firstTx,
+                                    size_t lastTx,
+                                    bool,
+                                    const uint64_t *skip,
+                                    CScriptCheckResult &result)
+{
+  for (size_t i = std::max<size_t>(firstTx, 1); i < lastTx; i++) {
+    if (scriptTxSkipped(skip, i))
+      continue;
+    result.Inputs += block.Vtx[i].TxIn.size();
+    result.Unchecked += block.Vtx[i].TxIn.size();
+  }
+  return true;
+}
+
+// Nothing to check with: every input counts as left unchecked
+BTC::EScriptRefusal ZEC::Common::checkPolicyScripts(const Proto::CTransaction &tx,
+                                                    std::span<const Script::CUnspentOutputInfo* const>,
+                                                    std::string&,
+                                                    BTC::CScriptCount &count)
+{
+  count.Inputs += tx.TxIn.size();
+  count.Interpreted += tx.TxIn.size();
+  return BTC::EScriptRefusal::None;
 }
 
 // Zcash's STANDARD_LOCKTIME_VERIFY_FLAGS: BIP113 of the mempool only

@@ -5,7 +5,7 @@
 
 #pragma once
 
-// What readers of the mempool see (mempool-impl-plan.md §8). A generation is an append-only array
+// What readers of the mempool see. A generation is an append-only array
 // of records in insertion order plus a map from txid to the newest record of that txid; a record
 // is visible to a view whose revision falls into [Born, Dead). A reader pins a view once per
 // request and walks the generation it names. The writer never moves a record a view can see:
@@ -51,7 +51,8 @@ struct CTxIdHash {
 };
 
 enum ERecordFlags : uint8_t {
-  // Own scripts checked under the policy flags; nothing sets it until the checker exists (§5.5)
+  // Own scripts checked under the policy flags, every input of them: none was left to the
+  // interpreter, a stub so far
   ERecordVerified = 1,
   // Verified, and so is every unconfirmed ancestor: what may be relayed, served and mined
   ERecordEligible = 2
@@ -69,6 +70,8 @@ struct CTxBody {
   int64_t Time = 0;
   // The writer's insertion counter: the order HTTP pages by
   uint64_t Sequence = 0;
+  // ERecordFlags of its records
+  uint8_t Flags = 0;
   BC::Proto::TxHashTy TxId;
   BC::Proto::TxHashTy WTxId;
   // One allocation from unpack2

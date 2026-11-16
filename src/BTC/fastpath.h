@@ -1,149 +1,40 @@
 #pragma once
 
-#include "proto.h"
 #include "script.h"
 #include "scriptChecks.h"
+#include "sigCheck.h"
 #include "sighash.h"
-#include <span>
+#include <optional>
 #include <string.h>
-#include <vector>
 
-// Spends checked without the interpreter (mempool-impl-plan.md §14.2): a template of the spent
+// Spends checked without the interpreter: a template of the spent
 // output and the spend fixes what runs, the fast path runs it with Core's rules and errors
 
 namespace BTC {
 
-enum class ESigKind : uint8_t {
-  Ecdsa,
-  Schnorr
-};
-
-// A signature check: all libsecp256k1 takes, and whose it is
-struct CSigJob {
-  ESigKind Kind = ESigKind::Ecdsa;
-  uint8_t PubKeySize = 0;
-  uint8_t PubKey[65];
-  // ECDSA: r and s, S normalized as Core's CPubKey::Verify does; Schnorr: as in the witness
-  uint8_t Signature[64];
-  BaseBlob<256> Digest;
-  // The spend's error when it fails, under the flags it was made with
-  EScriptError Error = EScriptError::Ok;
-  uint32_t Tx = 0;
-  uint32_t Input = 0;
-};
-
-bool verifySigJob(const CSigJob &job);
-
-class CSigBatch {
-public:
-  void add(const CSigJob &job) { Jobs_.push_back(job); }
-  size_t size() const { return Jobs_.size(); }
-  const CSigJob &operator[](size_t index) const { return Jobs_[index]; }
-  void clear() { Jobs_.clear(); }
-  // The positions of the jobs that failed. One by one through libsecp256k1 for now
-  void verify(std::vector<uint32_t> &failed) const;
-
-private:
-  std::vector<CSigJob> Jobs_;
-};
-
-// What becomes of a fast path signature; the interpreter always checks at once
-enum class ESigMode : uint8_t {
-  // libsecp256k1 right away: the mempool
-  Now,
-  // A job into the batch: sync
-  Defer,
-  // No digest, no signature, the rest checked: a reindex of our own data
-  Trust
-};
-
-enum class EVerdict : uint8_t {
-  Valid,
-  Invalid,
-  // All but the signature checked, its job is in the batch
-  Pending
-};
-
-struct CInputVerdict {
-  EVerdict Result = EVerdict::Invalid;
-  EScriptError Error = EScriptError::Ok;
-  // Off the fast path's templates: the interpreter's verdict
-  bool Interpreted = false;
-};
-
-// A transaction and the records of the outputs its inputs spend, one to an input; the digests
-// every input shares on the first need, with no lock: one thread to a checker. ordinal names the
-// transaction in its jobs
+// One input of a template under the flags; nothing when the spend is off the templates. The
+// record's type and the shape of the script sig pick the template, the rest of it is checked as it
+// goes. batch takes the jobs of Defer
 template<typename TxTy>
-class CTxChecker {
-public:
-  CTxChecker(const TxTy &tx, std::span<const Script::CUnspentOutputInfo* const> spent, uint32_t ordinal = 0) :
-    Tx_(tx), Spent_(spent), Ordinal_(ordinal) {}
-
-  const TxTy &tx() const { return Tx_; }
-  const Script::CUnspentOutputInfo &spent(size_t input) const { return *Spent_[input]; }
-  uint32_t ordinal() const { return Ordinal_; }
-
-  const CTxDigests &digests() {
-    if (!HasTxDigests_) {
-      txDigests(Tx_, Digests_);
-      HasTxDigests_ = true;
-    }
-    return Digests_;
-  }
-
-  const CTxDigests &taprootDigests() {
-    digests();
-    if (!HasSpentDigests_) {
-      spentDigests(Spent_, Digests_);
-      HasSpentDigests_ = true;
-    }
-    return Digests_;
-  }
-
-private:
-  const TxTy &Tx_;
-  std::span<const Script::CUnspentOutputInfo* const> Spent_;
-  uint32_t Ordinal_;
-  CTxDigests Digests_;
-  bool HasTxDigests_ = false;
-  bool HasSpentDigests_ = false;
-};
-
-inline bool hash160Is(Script::CSpan data, const uint8_t *hash)
-{
-  return memcmp(sha256FollowRipemd160(data.Data, data.Size).begin(), hash, 20) == 0;
-}
-
-// The script of P2PKH, the scriptCode BIP143 gives P2WPKH
-void keyHashScript(const uint8_t *hash, uint8_t (&script)[25]);
-
-// Core's EvalChecksigPreTapscript ahead of the digest: Ok and the job, or the error. codePush is
-// the push of a legacy scriptCode, the key or its hash, FindAndDelete looks for the signature there
-EScriptError ecdsaChecksig(Script::CSpan sig,
-                           Script::CSpan key,
-                           Script::CSpan codePush,
-                           ESigVersion version,
-                           uint32_t flags,
-                           CSigJob &job,
-                           uint8_t &hashType);
-
-// One input under the flags: Core's flag sets for blocks, the standard and the mandatory ones for
-// the mempool's two passes. The record's type and the shape of the script sig pick the template,
-// the rest of it is checked as it goes; a spend off the template is the interpreter's. batch takes
-// the jobs of Defer
-template<typename TxTy>
-CInputVerdict verifyInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flags, ESigMode mode, CSigBatch *batch)
+std::optional<CInputVerdict> fastPathInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flags, ESigMode mode, CSigBatch *batch)
 {
   using Info = Script::CUnspentOutputInfo;
   const TxTy &tx = checker.tx();
-  const Proto::CTxIn &in = tx.TxIn[input];
+  const auto &in = tx.TxIn[input];
   const Info &spent = checker.spent(input);
   auto valid = []() { return CInputVerdict{EVerdict::Valid, EScriptError::Ok}; };
   auto invalid = [](EScriptError error) { return CInputVerdict{EVerdict::Invalid, error}; };
+  auto hash160Is = [](Script::CSpan data, const uint8_t *hash) {
+    return memcmp(sha256FollowRipemd160(data.Data, data.Size).begin(), hash, 20) == 0;
+  };
 
-  // Off the template: the interpreter's, not there yet
-  CInputVerdict offTemplate{EVerdict::Invalid, EScriptError::UnknownError, true};
+  // Off the template: the interpreter's, unless a push already failed
+  EScriptError pushError = EScriptError::Ok;
+  auto offTemplate = [&]() -> std::optional<CInputVerdict> {
+    if (pushError != EScriptError::Ok)
+      return invalid(pushError);
+    return std::nullopt;
+  };
   // The data of the script sig's next push, an opcode OP_0 to 75; false on anything else. Core runs
   // the script sig push by push: under MINIMALDATA a byte OP_1..OP_16 or OP_1NEGATE pushes is its
   // error at that very push, whatever follows
@@ -154,7 +45,7 @@ CInputVerdict verifyInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flag
       return false;
     data = {p + 1, *p};
     if ((flags & EScriptMinimalData) && !checkMinimalPush(data, *p)) {
-      offTemplate = invalid(EScriptError::MinimalData);
+      pushError = EScriptError::MinimalData;
       return false;
     }
     p += 1 + *p;
@@ -175,7 +66,7 @@ CInputVerdict verifyInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flag
         return invalid(EScriptError::WitnessUnexpected);
       Script::CSpan sig;
       if (!readPush(sig) || p != end)
-        return offTemplate;
+        return offTemplate();
       const Script::CSpan key = spent.Type == Info::EPubKeyCompressed ? Script::CSpan{spent.PubKeyCompressed, 33}
                                                                       : Script::CSpan{spent.CustomData, 65};
       if (auto error = ecdsaChecksig(sig, key, key, ESigVersion::Base, flags, job, hashType); error != EScriptError::Ok)
@@ -196,7 +87,7 @@ CInputVerdict verifyInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flag
         return invalid(EScriptError::WitnessUnexpected);
       Script::CSpan sig, key;
       if (!readPush(sig) || !readPush(key) || p != end)
-        return offTemplate;
+        return offTemplate();
       const uint8_t *hash = spent.PubKeyHash.begin();
       if (!hash160Is(key, hash))
         return invalid(EScriptError::EqualVerify);
@@ -218,7 +109,7 @@ CInputVerdict verifyInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flag
         Script::CSpan redeem;
         if (!readPush(redeem) || p != end || redeem.Size != 22 || redeem.Data[0] != Script::OP_0 ||
             redeem.Data[1] != Script::OP_PUSH20)
-          return offTemplate;
+          return offTemplate();
         if (!hash160Is(redeem, spent.ScriptHash.begin()))
           return invalid(EScriptError::EvalFalse);
         if (!(flags & EScriptP2SH))
@@ -227,7 +118,7 @@ CInputVerdict verifyInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flag
       } else {
         // Core runs a script sig ahead of the witness: one here is the interpreter's
         if (p != end)
-          return offTemplate;
+          return offTemplate();
       }
 
       // OP_0 <program> leaves the program on the stack; without WITNESS that is all
@@ -258,7 +149,7 @@ CInputVerdict verifyInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flag
       // OP_1 <program>; under TAPROOT two witness elements and more are the script path or an annex
       const bool taproot = (flags & EScriptWitness) && (flags & EScriptTaproot);
       if (p != end || (taproot && in.WitnessStack.size() > 1))
-        return offTemplate;
+        return offTemplate();
       if (!castToBool(spent.WitnessProgram, 32))
         return invalid(EScriptError::EvalFalse);
       // Without TAPROOT a v1 program is a future one, valid as it is
@@ -280,7 +171,7 @@ CInputVerdict verifyInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flag
     }
 
     default :
-      return offTemplate;
+      return offTemplate();
   }
 
   if (mode == ESigMode::Trust)
@@ -289,7 +180,7 @@ CInputVerdict verifyInput(CTxChecker<TxTy> &checker, size_t input, uint32_t flag
     job.Tx = checker.ordinal();
     job.Input = static_cast<uint32_t>(input);
     batch->add(job);
-    return {EVerdict::Pending, EScriptError::Ok};
+    return CInputVerdict{EVerdict::Pending, EScriptError::Ok};
   }
   return verifySigJob(job) ? valid() : invalid(job.Error);
 }

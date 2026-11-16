@@ -45,6 +45,14 @@ public:
   static constexpr size_t MaxOpReturnRelay = 83;
   // Segwit never activated: witness outputs are not standard
   static constexpr bool HasWitness = false;
+  // The mempool's script flags, Dogecoin Core 1.14: P2SH alone is mandatory; no CONST_SCRIPTCODE
+  // and no taproot among the standard ones
+  static constexpr uint32_t MandatoryScriptFlags = BTC::EScriptP2SH;
+  static constexpr uint32_t StandardScriptFlags =
+    MandatoryScriptFlags | BTC::EScriptDerSig | BTC::EScriptStrictEnc | BTC::EScriptMinimalData | BTC::EScriptNullDummy |
+    BTC::EScriptDiscourageUpgradableNops | BTC::EScriptCleanStack | BTC::EScriptMinimalIf | BTC::EScriptNullFail |
+    BTC::EScriptCheckLockTimeVerify | BTC::EScriptCheckSequenceVerify | BTC::EScriptLowS | BTC::EScriptWitness |
+    BTC::EScriptDiscourageUpgradableWitnessProgram | BTC::EScriptWitnessPubKeyType;
 
   static constexpr const char *ProjectName = "Dogecoin";
   static constexpr const char *TickerName = "DOGE";
@@ -122,6 +130,24 @@ namespace Common {
                              std::string &error);
   // The longest transaction checkPolicyStandalone can pass: the network drops longer ones unparsed
   size_t maxStandardTxSize();
+
+  // Scripts, as Bitcoin's (BTC/btc.h). Dogecoin Core's flags of a block: P2SH from the start,
+  // DERSIG and CHECKLOCKTIMEVERIFY by height; CSV and segwit never activated, so a witness
+  // program stays spendable by anyone
+  uint32_t blockScriptFlags(const BlockIndex &index, const ChainParams &chainParams);
+  bool checkBlockScripts(const BlockIndex &index,
+                         const Proto::CBlock &block,
+                         const Proto::CBlockLinkedOutputs &linkedOutputs,
+                         const ChainParams &chainParams,
+                         size_t firstTx,
+                         size_t lastTx,
+                         bool signatures,
+                         const uint64_t *skip,
+                         CScriptCheckResult &result);
+  BTC::EScriptRefusal checkPolicyScripts(const Proto::CTransaction &tx,
+                                         std::span<const Script::CUnspentOutputInfo* const> spent,
+                                         std::string &error,
+                                         BTC::CScriptCount &count);
 
   static inline UInt<256> GetBlockProof(const Proto::CBlockHeader &header, const ChainParams&) {
     return LTC::Common::GetBlockProof(header);

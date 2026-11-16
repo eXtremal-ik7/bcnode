@@ -9,6 +9,7 @@
 
 #include "BTC/blockIndex.h"
 #include "BTC/defaults.h"
+#include "BTC/scriptFlags.h"
 #include "BTC/validation.h"
 #include "BTC/merkleTree.h"
 #include "common/utils.h"
@@ -53,6 +54,14 @@ public:
   static constexpr size_t MaxOpReturnRelay = 83;
   // Segwit never activated: witness outputs are not standard
   static constexpr bool HasWitness = false;
+  // The mempool's script flags, Primecoin 0.16.3: P2SH alone is mandatory; no LOW_S and no
+  // taproot among the standard ones
+  static constexpr uint32_t MandatoryScriptFlags = BTC::EScriptP2SH;
+  static constexpr uint32_t StandardScriptFlags =
+    MandatoryScriptFlags | BTC::EScriptDerSig | BTC::EScriptStrictEnc | BTC::EScriptMinimalData | BTC::EScriptNullDummy |
+    BTC::EScriptDiscourageUpgradableNops | BTC::EScriptCleanStack | BTC::EScriptMinimalIf | BTC::EScriptNullFail |
+    BTC::EScriptCheckLockTimeVerify | BTC::EScriptCheckSequenceVerify | BTC::EScriptWitness |
+    BTC::EScriptDiscourageUpgradableWitnessProgram | BTC::EScriptWitnessPubKeyType | BTC::EScriptConstScriptCode;
 
   static constexpr const char *ProjectName = "Primecoin";
   static constexpr const char *TickerName = "XPM";
@@ -86,6 +95,9 @@ namespace Common {
     bool ConnectGenesis = false;
 
     uint32_t BIP34Height;
+    // DERSIG and CHECKLOCKTIMEVERIFY by height; never on the main network
+    uint32_t BIP66Height = BTC::Common::NeverHeight;
+    uint32_t BIP65Height = BTC::Common::NeverHeight;
     // No BIP30 repeats on XPM; kept for the shared HTTP code
     std::vector<BTC::Common::CBIP30Repeat> BIP30Repeats;
 
@@ -167,6 +179,24 @@ namespace Common {
                              std::string &error);
   // The longest transaction checkPolicyStandalone can pass: the network drops longer ones unparsed
   size_t maxStandardTxSize();
+
+  // Scripts, as Bitcoin's (BTC/btc.h). Primecoin's flags of a block: P2SH from the start, DERSIG
+  // and CHECKLOCKTIMEVERIFY by height. Segwit never activated; CSV is a versionbits deployment
+  // that failed on the main network, and its state on the test one is not in the sources: left off
+  uint32_t blockScriptFlags(const BlockIndex &index, const ChainParams &chainParams);
+  bool checkBlockScripts(const BlockIndex &index,
+                         const Proto::CBlock &block,
+                         const Proto::CBlockLinkedOutputs &linkedOutputs,
+                         const ChainParams &chainParams,
+                         size_t firstTx,
+                         size_t lastTx,
+                         bool signatures,
+                         const uint64_t *skip,
+                         CScriptCheckResult &result);
+  BTC::EScriptRefusal checkPolicyScripts(const Proto::CTransaction &tx,
+                                         std::span<const Script::CUnspentOutputInfo* const> spent,
+                                         std::string &error,
+                                         BTC::CScriptCount &count);
 };
 
 class X {

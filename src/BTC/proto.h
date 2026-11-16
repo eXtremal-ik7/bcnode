@@ -727,6 +727,15 @@ struct CBIP30Repeat {
   Proto::TxHashTy TxId;
 };
 
+// A height no chain reaches: a rule that never activated
+static constexpr uint32_t NeverHeight = 0xFFFFFFFFu;
+
+// A block checked under script flags of its own (Core's script_flag_exceptions)
+struct CScriptFlagException {
+  Proto::BlockHashTy Hash;
+  uint32_t Flags;
+};
+
 // The part of the validation context that follows from the block's place in the chain and
 // not from its bytes. The contextual check is not the only caller: a block reloaded from
 // disk for a disconnect or for a database catching up never runs one, and the databases

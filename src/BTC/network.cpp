@@ -242,7 +242,7 @@ void Peer::onMessage(AsyncOpStatus status)
       bool accepted = tx && !ReceiveStream.remaining();
       aioBtcRecv(Socket, Command, ReceiveStream, Limit, afNone, 0, onMessageCb, this);
       if (accepted) {
-        onTx(tx, unpackedSize);
+        result = onTx(tx, unpackedSize);
       } else {
         LOG_F(INFO, "Peer %s: can't unserialize tx message", Name.c_str());
         operator delete(tx);
@@ -608,13 +608,17 @@ void Peer::onNotFound(BC::Proto::CMessageInv &notfound)
     ParentNode->txRelay().receiveNotFound(this, std::move(txids));
 }
 
-void Peer::onTx(BC::Proto::CTransaction *tx, size_t size)
+// False disconnects the peer, Core's Misbehaving for a transaction no block may hold
+bool Peer::onTx(BC::Proto::CTransaction *tx, size_t size)
 {
-  ParentNode->txRelay().receiveTx(this, tx, size);
+  if (ParentNode->txRelay().receiveTx(this, tx, size))
+    return true;
+  LOG_F(WARNING, "Peer %s: a transaction fails the mandatory script flags", Name.c_str());
+  return false;
 }
 
 // Always with witness where the coin has it: a transaction without its witness has another
-// wtxid and cannot be checked (§7.2 of the plan)
+// wtxid and cannot be checked
 void Peer::requestTransactions(const xvector<BC::Proto::TxHashTy> &txids)
 {
   // Core's MAX_GETDATA_SZ
@@ -1091,7 +1095,7 @@ void Node::Sync()
   }
 
   // The mempool switches on once and for good when the node has caught up: nothing to download,
-  // no peer ahead by more than a block, a tip at most an hour old (§7.6 of the plan)
+  // no peer ahead by more than a block, a tip at most an hour old
   if (MempoolEnabled_ &&
       hasConnectedPeers &&
       !BlockSources_.hasActiveBlockSource() &&

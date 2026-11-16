@@ -16,7 +16,7 @@ using BTC::ESigMode;
 using BTC::EVerdict;
 using TxOut = BTC::Proto::CTxOut;
 
-// Core's STANDARD_SCRIPT_VERIFY_FLAGS; the coins' own sets come with §14.3
+// Core's STANDARD_SCRIPT_VERIFY_FLAGS
 constexpr uint32_t StandardFlags =
   BTC::EScriptP2SH | BTC::EScriptStrictEnc | BTC::EScriptDerSig | BTC::EScriptLowS | BTC::EScriptNullDummy |
   BTC::EScriptMinimalData | BTC::EScriptDiscourageUpgradableNops | BTC::EScriptCleanStack |
@@ -880,7 +880,7 @@ void PrintTo(const CVerdict &verdict, std::ostream *os)
 {
   if (verdict.Interpreted) {
     *os << "Interpreter";
-    if (verdict.Error != EScriptError::UnknownError)
+    if (verdict.Error != EScriptError::Ok)
       *os << " " << ErrorNames[static_cast<size_t>(verdict.Error)];
     return;
   }

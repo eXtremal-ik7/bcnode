@@ -5,6 +5,7 @@
 
 #include "xpm.h"
 #include "BTC/policy.h"
+#include "BTC/scriptVerify.h"
 #include "common/serializeUtils.h"
 
 namespace XPM {
@@ -83,6 +84,8 @@ bool setupChainParams(ChainParams *params, const char *network)
 
     // As Primecoin: the height is in the coinbase from genesis on, OP_0..OP_16 below 17
     params->BIP34Height = 0;
+    params->BIP66Height = 3058199;
+    params->BIP65Height = 3058199;
 
     {
       // Genesis block
@@ -456,6 +459,38 @@ bool checkPolicyStandalone(const Proto::CTransaction &tx, const BTC::CTxCost &co
 size_t maxStandardTxSize()
 {
   return BTC::Policy::MaxStandardTxWeight;
+}
+
+uint32_t blockScriptFlags(const BlockIndex &index, const ChainParams &chainParams)
+{
+  uint32_t flags = BTC::EScriptP2SH;
+  if (index.Height >= chainParams.BIP66Height)
+    flags |= BTC::EScriptDerSig;
+  if (index.Height >= chainParams.BIP65Height)
+    flags |= BTC::EScriptCheckLockTimeVerify;
+  return flags;
+}
+
+bool checkBlockScripts(const BlockIndex &index,
+                       const Proto::CBlock &block,
+                       const Proto::CBlockLinkedOutputs &linkedOutputs,
+                       const ChainParams &chainParams,
+                       size_t firstTx,
+                       size_t lastTx,
+                       bool signatures,
+                       const uint64_t *skip,
+                       CScriptCheckResult &result)
+{
+  return BTC::verifyBlockScripts(block, linkedOutputs, firstTx, lastTx, blockScriptFlags(index, chainParams),
+                                 signatures ? BTC::ESigMode::Defer : BTC::ESigMode::Trust, skip, result);
+}
+
+BTC::EScriptRefusal checkPolicyScripts(const Proto::CTransaction &tx,
+                                       std::span<const Script::CUnspentOutputInfo* const> spent,
+                                       std::string &error,
+                                       BTC::CScriptCount &count)
+{
+  return BTC::verifyTransactionPolicy(tx, spent, XPM::Configuration::StandardScriptFlags, XPM::Configuration::MandatoryScriptFlags, error, count);
 }
 
 // Core's STANDARD_LOCKTIME_VERIFY_FLAGS: BIP68 and BIP113 of the mempool only

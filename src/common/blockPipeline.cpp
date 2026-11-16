@@ -43,10 +43,11 @@ bool CBlockPipeline::start(BlockInMemoryIndex &blockIndex,
     threadsNum = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 2;
 
   LOG_F(INFO,
-        "Block pipeline: %u wave threads, %zu preparation lanes, segment %.1lfMb (%zu blocks), bulk floor %.1lfMb (%zu blocks), ready queue %zu, prepared %.1lfMb",
+        "Block pipeline: %u wave threads, %zu preparation lanes, segment %.1lfMb (%zu blocks), bulk floor %.1lfMb (%zu blocks), ready queue %zu, prepared %.1lfMb, scripts: %s",
         threadsNum, lanes, Params_.SegmentSizeLimit / 1048576.0,
         Params_.SegmentBlocksLimit, Params_.BiteFloorSize / 1048576.0,
-        Params_.BiteFloorBlocks, Params_.ReadyQueueDepth, Params_.PreparedSizeLimit / 1048576.0);
+        Params_.BiteFloorBlocks, Params_.ReadyQueueDepth, Params_.PreparedSizeLimit / 1048576.0,
+        Params_.ScriptCheck == EScriptCheck::Off ? "off" : Params_.ScriptCheck == EScriptCheck::All ? "all" : "new");
 
   Runner_.start(threadsNum > 1 ? threadsNum - 1 : 0);
   SerialWorker_.Thread = std::thread([this]() { worker(SerialWorker_, false); });
@@ -388,9 +389,12 @@ void CBlockPipeline::reset()
 
 void CBlockPipeline::discard(CSegment &segment)
 {
+  // Its links and lookups hold only for this segment connecting whole
   for (auto &entry: segment.Objects) {
-    if (entry.Object.get())
+    if (entry.Object.get()) {
       entry.Object.get()->validationData().dropPairs();
+      entry.Object.get()->validationData().InputsResolved = false;
+    }
   }
 }
 
@@ -403,13 +407,13 @@ void CBlockPipeline::worker(CWorker &lane, bool preparation)
       return;
 
     if (preparation) {
-      event->Ok = prepareSegment(*ChainParams_, *Storage_, Runner_, *event->Segment, Params_.Prefetch);
+      event->Ok = prepareSegment(*ChainParams_, *Storage_, Runner_, *event->Segment, Params_.Prefetch, Params_.ScriptCheck);
     } else if (event->Segment->CatchUp) {
       if (CatchUpSink_)
         CatchUpSink_(std::move(event->Segment));
     } else {
       event->Ok = connectSegment(*BlockIndex_, *ChainParams_, *Storage_, Runner_,
-                                 *event->Segment, &event->FailedAt);
+                                 *event->Segment, Params_.ScriptCheck, &event->FailedAt);
       Storage_->wakeUp();
       if (event->Ok && Callback_) {
         std::vector<BC::Common::BlockIndex*> relay;
