@@ -95,7 +95,11 @@ static bool resolveBlockInputs(BC::Proto::CBlockLinkedOutputs &linkedOutputs, BC
 
           SmallStream<128> s;
           BC::Script::parseTransactionOutput(localReferencedTx, txin.PreviousOutputIndex, s);
-          s.data<BC::Script::CUnspentOutputInfo>()->IsLocalTx = 1;
+          // An OP_RETURN output is no utxo: not there to spend
+          if (s.data<BC::Script::CUnspentOutputInfo>()->Type == BC::Script::CUnspentOutputInfo::EOpReturn) {
+            validationData.InputsResolved = false;
+            return false;
+          }
           txinLinked.resize(s.sizeOf());
           memcpy(txinLinked.begin(), s.data(), s.sizeOf());
           meta = BC::DB::utxoMeta(height, BC::DB::utxoCreationFlags(localReferencedTx, localTxIdx, txin.PreviousOutputIndex));
@@ -631,7 +635,6 @@ static void resolveSegmentInputs(CSegment &segment, const BC::Common::ChainParam
           const BC::Proto::CTransaction &localTx = block.Vtx[localTxIdx];
           SmallStream<128> s;
           BC::Script::parseTransactionOutput(localTx, txin.PreviousOutputIndex, s);
-          s.data<BC::Script::CUnspentOutputInfo>()->IsLocalTx = 1;
           txinLinked.resize(s.sizeOf());
           memcpy(txinLinked.begin(), s.data(), s.sizeOf());
           meta = BC::DB::utxoMeta(height, BC::DB::utxoCreationFlags(localTx, localTxIdx, txin.PreviousOutputIndex));

@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "policy.h"
+#include "scriptChecks.h"
 #include <algorithm>
 
 namespace BTC {
@@ -25,23 +26,13 @@ constexpr size_t MaxP2WSHStackItemSize = 80;
 constexpr size_t MaxTapscriptStackItemSize = 80;
 constexpr int MwebPeginWitnessVersion = 9;
 
-// EvalScript of a scriptSig fails past them: Core's MAX_SCRIPT_ELEMENT_SIZE and MAX_STACK_SIZE
-constexpr size_t MaxScriptElementSize = 520;
+// EvalScript of a scriptSig fails past it and past MaxScriptElementSize: Core's MAX_STACK_SIZE
 constexpr size_t MaxStackSize = 1000;
 
 constexpr uint8_t OP_RESERVED = 0x50;
 constexpr uint8_t AnnexTag = 0x50;
 constexpr uint8_t TaprootLeafMask = 0xFE;
 constexpr uint8_t TaprootLeafTapscript = 0xC0;
-
-size_t pubKeySize(uint8_t prefix)
-{
-  if (prefix == 2 || prefix == 3)
-    return 33;
-  if (prefix == 4 || prefix == 6 || prefix == 7)
-    return 65;
-  return 0;
-}
 
 }
 
@@ -79,80 +70,50 @@ bool lastPush(const xvector<uint8_t> &script, std::vector<uint8_t> &result)
   return pushes != 0;
 }
 
-bool witnessProgram(const uint8_t *script, size_t size, int &version, CSpan &program)
+bool isStandardOutput(const xvector<uint8_t> &script, uint8_t &type)
 {
-  if (size < 4 || size > 42)
-    return false;
-  if (script[0] != Script::OP_0 && (script[0] < Script::OP_1 || script[0] > Script::OP_16))
-    return false;
-  if (static_cast<size_t>(script[1]) + 2 != size)
-    return false;
-  version = script[0] == Script::OP_0 ? 0 : script[0] - Script::OP_1 + 1;
-  program = {script + 2, size - 2};
-  return true;
-}
-
-EOutput solve(const xvector<uint8_t> &script)
-{
+  using Info = Script::CUnspentOutputInfo;
   const uint8_t *s = script.data();
   const size_t size = script.size();
-
-  if (size == 23 && s[0] == Script::OP_HASH160 && s[1] == Script::OP_PUSH20 && s[22] == Script::OP_EQUAL)
-    return EOutput::ScriptHash;
-
-  int version;
-  CSpan program;
-  if (witnessProgram(s, size, version, program)) {
-    if (version == 0 && program.Size == 20)
-      return EOutput::WitnessKeyHash;
-    if (version == 0 && program.Size == 32)
-      return EOutput::WitnessScriptHash;
-    if (version == 1 && program.Size == 32)
-      return EOutput::WitnessTaproot;
-    return version != 0 ? EOutput::WitnessUnknown : EOutput::NonStandard;
+  type = Script::classify(s, size);
+  switch (type) {
+    case Info::ENonStandard :
+      return false;
+    case Info::EOpReturn :
+      return isPushOnly(s + 1, s + size);
+    case Info::EMultisig :
+      // Up to x-of-3; n of 17 and more is a push, never OP_1..OP_3
+      return s[size - 2] >= Script::OP_1 && s[size - 2] <= Script::OP_3;
+    default :
+      return true;
   }
+}
 
-  if (size >= 1 && s[0] == Script::OP_RETURN && isPushOnly(s + 1, s + size))
-    return EOutput::NullData;
+bool isDataOutput(const xvector<uint8_t> &script)
+{
+  uint8_t type;
+  return isStandardOutput(script, type) && type == Script::CUnspentOutputInfo::EOpReturn;
+}
 
-  if ((size == 35 || size == 67) && s[0] == size - 2 && pubKeySize(s[1]) == size - 2 && s[size - 1] == Script::OP_CHECKSIG)
-    return EOutput::PubKey;
-
-  if (size == 25 && s[0] == Script::OP_DUP && s[1] == Script::OP_HASH160 && s[2] == Script::OP_PUSH20 &&
-      s[23] == Script::OP_EQUALVERIFY && s[24] == Script::OP_CHECKSIG)
-    return EOutput::PubKeyHash;
-
-  // OP_m <keys> OP_n OP_CHECKMULTISIG
-  if (size >= 3 && s[size - 1] == Script::OP_CHECKMULTISIG &&
-      s[0] >= Script::OP_1 && s[0] <= Script::OP_16 &&
-      s[size - 2] >= Script::OP_1 && s[size - 2] <= Script::OP_16) {
-    unsigned required = s[0] - Script::OP_1 + 1;
-    unsigned declared = s[size - 2] - Script::OP_1 + 1;
-    unsigned keys = 0;
-    const uint8_t *p = s + 1;
-    const uint8_t *end = s + size - 2;
-    uint8_t opcode;
-    CSpan data;
-    while (p < end) {
-      data = {};
-      if (!Script::getOp(p, end, opcode, &data) || opcode > Script::OP_PUSHDATA4 || !data.Size || pubKeySize(data.Data[0]) != data.Size)
-        return EOutput::NonStandard;
-      keys++;
-    }
-    // IsStandard: up to x-of-3
-    if (keys == declared && required <= declared && declared <= 3)
-      return EOutput::Multisig;
-    return EOutput::NonStandard;
+bool isWitnessOutput(uint8_t type)
+{
+  switch (type) {
+    case Script::CUnspentOutputInfo::EWitnessPubKeyHash :
+    case Script::CUnspentOutputInfo::EWitnessScriptHash :
+    case Script::CUnspentOutputInfo::EWitnessTaproot :
+    case Script::CUnspentOutputInfo::EAnchor :
+    case Script::CUnspentOutputInfo::EWitnessUnknown :
+      return true;
+    default :
+      return false;
   }
-
-  return EOutput::NonStandard;
 }
 
 bool isMwebPegin(const xvector<uint8_t> &script)
 {
   int version;
   CSpan program;
-  return witnessProgram(script.data(), script.size(), version, program) && version == MwebPeginWitnessVersion && program.Size == 32;
+  return Script::witnessProgram(script.data(), script.size(), version, program) && version == MwebPeginWitnessVersion && program.Size == 32;
 }
 
 int64_t feeForSize(int64_t ratePerKb, size_t size, bool roundUp)
@@ -169,7 +130,7 @@ bool spentWitnessProgram(const CPrevout &prevout, const xvector<uint8_t> &script
   switch (prevout.Type) {
     case Script::CUnspentOutputInfo::EScriptHash :
       redeemScript.clear();
-      return lastPush(scriptSig, redeemScript) && witnessProgram(redeemScript.data(), redeemScript.size(), version, program);
+      return lastPush(scriptSig, redeemScript) && Script::witnessProgram(redeemScript.data(), redeemScript.size(), version, program);
     case Script::CUnspentOutputInfo::EWitnessPubKeyHash :
       version = 0;
       program = {nullptr, 20};

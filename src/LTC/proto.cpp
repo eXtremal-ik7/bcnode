@@ -28,28 +28,6 @@ Proto::BlockHashTy Proto::CTransaction::getWTxid() const
 }
 }
 
-namespace BTC {
-
-void serializeForSignature(xmstream &dst,
-                           const LTC::Proto::CTransaction &data,
-                           size_t targetInput,
-                           const uint8_t *utxo,
-                           size_t utxoSize)
-{
-  BTC::serialize(dst, data.Version);
-  serializeVarSize(dst, data.TxIn.size());
-  for (size_t i = 0; i < data.TxIn.size(); i++) {
-    if (i == targetInput)
-      BTC::serializeForSignature(dst, data.TxIn[i], utxo, utxoSize);
-    else
-      BTC::serializeForSignature(dst, data.TxIn[i], nullptr, 0);
-  }
-  BTC::serialize(dst, data.TxOut);
-  BTC::serialize(dst, data.LockTime);
-}
-
-}
-
 namespace {
 
 void jsonFieldName(xmstream &stream, const char *fieldName)

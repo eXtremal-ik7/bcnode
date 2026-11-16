@@ -10,6 +10,7 @@ project(bcnode)
 set (CMAKE_CXX_STANDARD 20)
 option(BCNODE_DOGE "Build bcnode for dogecoin" OFF)
 option(BCNODE_ZEC "Build bcnode for ZCash" OFF)
+option(BCNODE_BUILD_TESTS "Build unit tests" OFF)
 
 # Whole-program build modes. The names are shared by convention across projects in one
 # build tree (cache is common, so the same option here and in asyncio merges into a single
@@ -421,6 +422,11 @@ if (BCNODE_ZEC)
   target_include_directories(bcterminal-zec PUBLIC ${CMAKE_BINARY_DIR}/ZEC)
   target_compile_definitions(bcterminal-zec PUBLIC -DBC=ZEC)
   target_link_libraries(bcterminal-zec ${COMMON_LIBRARIES})
+endif()
+
+if (BCNODE_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(test)
 endif()
 
 # Windows has no rpath: DLLs of imported shared packages (mpir and the like) are

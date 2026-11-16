@@ -102,14 +102,6 @@ template<typename T> bool hasShielded(const T &tx)
     return false;
 }
 
-// The utxo type an output would be stored with
-uint8_t outputType(const BC::Proto::CTxOut &out)
-{
-  SmallStream<256> stream;
-  BC::Script::parseTransactionOutput(out, stream);
-  return stream.data<BC::Script::CUnspentOutputInfo>()->Type;
-}
-
 using CTxSet = ankerl::unordered_dense::set<TxId, CTxIdHash>;
 
 // The writer and every view on a generation hold a reference
@@ -444,7 +436,8 @@ CMempool::CDecision CMempool::decide(const BC::Proto::CTransaction &tx, const Tx
       if (outpoint.Index >= parentTx.TxOut.size())
         return reject("bad-txns-inputs-missingorspent");
       const BC::Proto::CTxOut &out = parentTx.TxOut[outpoint.Index];
-      prevouts[i] = {out.Value, outputType(out), spendHeight, false, false};
+      prevouts[i] = {out.Value, BC::Script::classify(out.PkScript.data(), out.PkScript.size()), spendHeight, false, false,
+                     BC::Script::sigOpCount(out.PkScript.data(), out.PkScript.data() + out.PkScript.size(), true)};
       found[i] = 1;
       continue;
     }
@@ -458,7 +451,8 @@ CMempool::CDecision CMempool::decide(const BC::Proto::CTransaction &tx, const Tx
     if (Utxo_->query(outpoint.Tx, outpoint.Index, data, meta)) {
       const BC::Script::CUnspentOutputInfo *info = reinterpret_cast<const BC::Script::CUnspentOutputInfo*>(data.data());
       const uint8_t flags = BC::DB::utxoMetaFlags(meta);
-      prevouts[i] = {info->Value, info->Type, BC::DB::utxoMetaHeight(meta), (flags & BC::DB::EUtxoCoinbase) != 0, (flags & BC::DB::EUtxoPegout) != 0};
+      prevouts[i] = {info->Value, info->Type, BC::DB::utxoMetaHeight(meta), (flags & BC::DB::EUtxoCoinbase) != 0, (flags & BC::DB::EUtxoPegout) != 0,
+                     BC::Script::sigOpCount(*info)};
       restored[i] = (flags & BC::DB::EUtxoRestored) != 0;
       found[i] = 1;
     }

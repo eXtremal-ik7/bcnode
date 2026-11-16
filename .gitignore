@@ -7,5 +7,8 @@
 # Sources fetched by FetchContent (asyncio, config4cpp, secp256k1)
 /dependencies/
 
+# The build tree
+/x86_64-Linux/
+
 /src/.qtcreator/
 /src/CMakeLists.txt.user*

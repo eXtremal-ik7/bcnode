@@ -31,36 +31,21 @@ constexpr uint32_t MaxStandardTxWeight = 400000;
 constexpr uint32_t MaxStandardTxSigOpsCost = 80000 / 5;
 constexpr uint32_t MaxP2SHSigOps = 15;
 constexpr uint32_t WitnessScaleFactor = 4;
-// A bare multisig coin is typed only up to OP_16 keys (isBareMultisig)
-constexpr unsigned MaxBareMultisigKeys = 16;
 
 using CSpan = Script::CSpan;
-
-enum class EOutput {
-  NonStandard,
-  PubKey,
-  PubKeyHash,
-  ScriptHash,
-  Multisig,
-  NullData,
-  WitnessKeyHash,
-  WitnessScriptHash,
-  WitnessTaproot,
-  WitnessUnknown
-};
 
 // OP_RESERVED counts as a push, as in Core
 bool isPushOnly(const uint8_t *p, const uint8_t *end);
 // The P2SH redeem script: the last element a push-only scriptSig leaves on the stack. False past
 // EvalScript's limits of a push and of the stack
 bool lastPush(const xvector<uint8_t> &script, std::vector<uint8_t> &result);
-bool witnessProgram(const uint8_t *script, size_t size, int &version, CSpan &program);
-// Core's Solver, with the multisig bounds IsStandard puts on it
-EOutput solve(const xvector<uint8_t> &script);
-static inline bool isWitnessOutput(EOutput type)
-{
-  return type == EOutput::WitnessKeyHash || type == EOutput::WitnessScriptHash || type == EOutput::WitnessTaproot || type == EOutput::WitnessUnknown;
-}
+// Core's IsStandard of an output: its Solver type (Script::classify, into type) within the bounds,
+// NULL_DATA pushes only, multisig up to x-of-3. To spend is another matter: CUnspentOutputInfo::isStandard
+bool isStandardOutput(const xvector<uint8_t> &script, uint8_t &type);
+// A data output IsStandard takes: what the data rules count
+bool isDataOutput(const xvector<uint8_t> &script);
+// A coin without segwit refuses these
+bool isWitnessOutput(uint8_t type);
 // MWEB: a witness program of version 9 and 32 bytes is a peg-in
 bool isMwebPegin(const xvector<uint8_t> &script);
 // roundUp: Core's CFeeRate::GetFee; the coins forked from older Core round down
@@ -85,7 +70,7 @@ bool isDust(const OutTy &out, int64_t dustRelayFee, bool roundUp)
   int version;
   CSpan program;
   // An input spending it: outpoint, scriptSig length, sequence, and its witness at a quarter
-  size += witnessProgram(script.data(), script.size(), version, program) ? 32 + 4 + 1 + 107 / WitnessScaleFactor + 4 : 32 + 4 + 1 + 107 + 4;
+  size += Script::witnessProgram(script.data(), script.size(), version, program) ? 32 + 4 + 1 + 107 / WitnessScaleFactor + 4 : 32 + 4 + 1 + 107 + 4;
   return out.Value < feeForSize(dustRelayFee, size, roundUp);
 }
 
@@ -170,9 +155,9 @@ template<typename TxTy>
 bool validateStandardOutputs(const TxTy &tx, size_t maxDataSize, bool witness, std::string &error)
 {
   for (const auto &out: tx.TxOut) {
-    Policy::EOutput type = Policy::solve(out.PkScript);
-    if (type == Policy::EOutput::NonStandard ||
-        (type == Policy::EOutput::NullData && out.PkScript.size() > maxDataSize) ||
+    uint8_t type;
+    if (!Policy::isStandardOutput(out.PkScript, type) ||
+        (type == Script::CUnspentOutputInfo::EOpReturn && out.PkScript.size() > maxDataSize) ||
         (!witness && Policy::isWitnessOutput(type))) {
       error = "scriptpubkey";
       return false;
@@ -186,7 +171,7 @@ bool validateSingleDataOutput(const TxTy &tx, std::string &error)
 {
   unsigned dataOutputs = 0;
   for (const auto &out: tx.TxOut)
-    dataOutputs += Policy::solve(out.PkScript) == Policy::EOutput::NullData;
+    dataOutputs += Policy::isDataOutput(out.PkScript);
   if (dataOutputs > 1) {
     error = "multi-op-return";
     return false;
@@ -200,7 +185,7 @@ bool validateDataCarrier(const TxTy &tx, size_t budget, std::string &error)
 {
   size_t bytes = 0;
   for (const auto &out: tx.TxOut) {
-    if (Policy::solve(out.PkScript) == Policy::EOutput::NullData)
+    if (Policy::isDataOutput(out.PkScript))
       bytes += out.PkScript.size();
   }
   if (bytes > budget) {
@@ -255,9 +240,7 @@ bool validateStandardInputs(const TxTy &tx, const CPrevout *prevouts, std::strin
   std::vector<uint8_t> redeemScript;
   for (size_t i = 0; i < tx.TxIn.size(); i++) {
     const uint8_t type = prevouts[i].Type;
-    bool standard = type != Script::CUnspentOutputInfo::ENonStandard &&
-                    type != Script::CUnspentOutputInfo::EOpReturn &&
-                    type != Script::CUnspentOutputInfo::EInvalid;
+    bool standard = Script::CUnspentOutputInfo::isStandard(type);
     if (standard && type == Script::CUnspentOutputInfo::EScriptHash) {
       redeemScript.clear();
       standard = Policy::lastPush(tx.TxIn[i].ScriptSig, redeemScript) &&
@@ -271,9 +254,8 @@ bool validateStandardInputs(const TxTy &tx, const CPrevout *prevouts, std::strin
   return true;
 }
 
-// Core 30's CheckSigopsBIP54: the legacy sigops of the scriptSigs and of what they spend, P2SH
-// redeem scripts counted accurately. CPrevout carries no key count of a bare multisig coin: it counts
-// the most its type allows
+// Core 30's CheckSigopsBIP54: the legacy sigops of the scriptSigs and of what they spend, counted
+// accurately; a P2SH coin's are its redeem script's
 template<typename TxTy>
 bool validateLegacySigOps(const TxTy &tx, const CPrevout *prevouts, unsigned limit, std::string &error)
 {
@@ -282,21 +264,11 @@ bool validateLegacySigOps(const TxTy &tx, const CPrevout *prevouts, unsigned lim
   for (size_t i = 0; i < tx.TxIn.size(); i++) {
     const xvector<uint8_t> &scriptSig = tx.TxIn[i].ScriptSig;
     sigOps += Script::sigOpCount(scriptSig.data(), scriptSig.data() + scriptSig.size(), true);
-    switch (prevouts[i].Type) {
-      case Script::CUnspentOutputInfo::EPubKey :
-      case Script::CUnspentOutputInfo::EPubKeyHash :
-        sigOps++;
-        break;
-      case Script::CUnspentOutputInfo::EMultisig :
-        sigOps += Policy::MaxBareMultisigKeys;
-        break;
-      case Script::CUnspentOutputInfo::EScriptHash :
-        redeemScript.clear();
-        if (Policy::isPushOnly(scriptSig.data(), scriptSig.data() + scriptSig.size()) && Policy::lastPush(scriptSig, redeemScript))
-          sigOps += Script::sigOpCount(redeemScript.data(), redeemScript.data() + redeemScript.size(), true);
-        break;
-      default :
-        break;
+    sigOps += prevouts[i].SigOps;
+    if (prevouts[i].Type == Script::CUnspentOutputInfo::EScriptHash) {
+      redeemScript.clear();
+      if (Policy::isPushOnly(scriptSig.data(), scriptSig.data() + scriptSig.size()) && Policy::lastPush(scriptSig, redeemScript))
+        sigOps += Script::sigOpCount(redeemScript.data(), redeemScript.data() + redeemScript.size(), true);
     }
     if (sigOps > limit) {
       error = "bad-txns-nonstandard-inputs";

@@ -58,23 +58,27 @@ public:
 
 #pragma pack(push, 1)
   struct CUnspentOutputInfo {
+    // Core's Solver types, standard to spend first (isStandard compares). The record keeps only
+    // what the script cannot be rebuilt without. The values are stored, and are addrdb keys
     enum EType {
-      ENonStandard = 0,
-      EOpReturn,
-      EPubKey,
-      EPubKeyHash,
-      EScriptHash,
-      EWitnessPubKeyHash,
-      EWitnessScriptHash,
-      EWitnessTaproot,
-      EMultisig,
-      EInvalid
+      EPubKeyCompressed = 0,  // 21 <02|03 key> ac        PubKeyCompressed
+      EPubKeyUncompressed,    // 41 <04 key> ac           the key in CustomData
+      EPubKeyHybrid,          // 41 <06|07 key> ac        the key in CustomData
+      EPubKeyHash,            // 76 a9 14 <20> 88 ac      PubKeyHash
+      EScriptHash,            // a9 14 <20> 87            ScriptHash
+      EMultisig,              // m <keys> n ae            the script
+      EWitnessPubKeyHash,     // 00 14 <20>               WitnessProgram
+      EWitnessScriptHash,     // 00 20 <32>               WitnessProgram
+      EWitnessTaproot,        // 51 20 <32>               WitnessProgram
+      EAnchor,                // 51 02 4e 73              nothing
+      ELastStandard = EAnchor,
+      EWitnessUnknown,        // v1..v16, 2..40 bytes     the script
+      ENonStandard,           //                          the script
+      EOpReturn               // 6a ...                   nothing, never stored
     };
 
-    // One byte, kept as it is by the stored form of linked outputs (BTC/proto.h)
+    // One byte, kept as it is by the stored form of linked outputs (BTC/proto.h); four bits free
     uint8_t Type : 4;
-    uint8_t IsLocalTx : 1;
-    uint8_t IsPubKeyCompressed : 1;
 
     int64_t Value;
 
@@ -83,13 +87,17 @@ public:
       BaseBlob<160> PubKeyHash;
       BaseBlob<160> ScriptHash;
       uint8_t WitnessProgram[32];
+      // A 65-byte key, or a whole script: its length as VarSize, then the bytes
       uint8_t CustomData[1];
     };
 
+    // Core 28+ AreInputsStandard by the type alone; a P2SH redeem script has its own limit
+    static constexpr bool isStandard(uint8_t type) { return type <= ELastStandard; }
     static size_t customDataOffset() { return offsetof(CUnspentOutputInfo, CustomData); }
   };
 
   static_assert(sizeof(CUnspentOutputInfo) == 1 + 8 + 33, "the flags must pack into one byte");
+  static_assert(CUnspentOutputInfo::EOpReturn < 16, "the type takes four bits");
   static_assert(offsetof(CUnspentOutputInfo, Value) == BTC::Proto::CTxLinkedOutputs::AmountOffset);
 
   // Typed address, the addrdb/addrhistorydb key. Type is part of the key:
@@ -115,6 +123,18 @@ public:
     bool operator==(const CAddress &r) const { return memcmp(this, &r, sizeof(CAddress)) == 0; }
   };
 #pragma pack(pop)
+
+  // Core's IsWitnessProgram
+  static bool witnessProgram(const uint8_t *script, size_t size, int &version, CSpan &program);
+  // Core's Solver: CUnspentOutputInfo::EType of a script. EOpReturn is any script that starts with
+  // OP_RETURN, as Core's IsUnspendable, not only NULL_DATA
+  static uint8_t classify(const uint8_t *script, size_t size);
+  // The script of EMultisig, EWitnessUnknown and ENonStandard, kept in the record whole
+  static CSpan storedScript(const CUnspentOutputInfo &info);
+  // The script a record was parsed from; false on EOpReturn, which keeps nothing
+  static bool restoreScript(const CUnspentOutputInfo &info, xvector<uint8_t> &script);
+  // Core's GetSigOpCount(true) of that script
+  static unsigned sigOpCount(const CUnspentOutputInfo &info);
 
   static bool extractAddress(const BC::Proto::CTxOut &txOut, CAddress &address);
   static bool extractAddress(const CUnspentOutputInfo &info, CAddress &address);

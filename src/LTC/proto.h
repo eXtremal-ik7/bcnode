@@ -198,13 +198,4 @@ public:
 };
 }
 
-// Serialize
-namespace BTC {
-void serializeForSignature(xmstream &dst,
-                           const LTC::Proto::CTransaction &data,
-                           size_t targetInput,
-                           const uint8_t *utxo,
-                           size_t utxoSize);
-}
-
 void serializeJson(xmstream &stream, const char *fieldName, const LTC::Proto::CTransaction &data);

@@ -751,13 +751,6 @@ static inline void fillChainContext(const BlockIndexTy &index,
 
 }
 
-// Not part of the Io contract: the input being signed is replaced by the utxo it spends
-void serializeForSignature(xmstream &dst, const BTC::Proto::CTxIn &data, const uint8_t *utxo, size_t utxoSize);
-void serializeForSignature(xmstream &dst,
-                           const BTC::Proto::CTransaction &data,
-                           size_t targetInput,
-                           const uint8_t *utxo,
-                           size_t utxoSize);
 
 // Where each transaction lies inside the serialized block: the header size and the transaction
 // count give the offset of the first one, every next offset is the previous plus that

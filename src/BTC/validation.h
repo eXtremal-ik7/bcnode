@@ -98,6 +98,8 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
     }
   }
 
+  BTC::fillLocalSpendTopology(block, validation);
+
   // What the parsed output blob is sized by; the topology pass counts for itself
   uint64_t outputsNum = 0;
   for (size_t i = 0; i < block.Vtx.size(); i++)
@@ -121,16 +123,18 @@ void validationDataInitialize(const BlockTy &block, BTC::Proto::CBlockValidation
         Script::parseTransactionOutput(tx, j, outputData);
         const Script::CUnspentOutputInfo *info =
           reinterpret_cast<const Script::CUnspentOutputInfo*>(outputData.data<uint8_t>() + begin);
-        if (info->Type == Script::CUnspentOutputInfo::EOpReturn)
+        if (info->Type == Script::CUnspentOutputInfo::EOpReturn) {
           outputData.seekSet(begin);
+          // No utxo, as in Core: a spend of it from this very block is of an output that is not there
+          if (validation.OutputSpentLocally[ordinal >> 6] & (1ull << (ordinal & 63)))
+            validation.LocalSpendInvalid = true;
+        }
       }
     }
 
     validation.OutputDataOffset[outputsNum] = static_cast<uint32_t>(outputData.offsetOf());
     xvectorFromStream(std::move(outputData), validation.OutputData);
   }
-
-  BTC::fillLocalSpendTopology(block, validation);
 }
 
 
@@ -247,30 +251,37 @@ bool validateWitnessCommitment(const BlockTy &block, bool &hasWitness, std::stri
   return result;
 }
 
+// Core's rule: the coinbase scriptSig starts with the bytes of CScript() << height - OP_1..OP_16 for the
+// small heights, a direct push of the minimal CScriptNum otherwise. No other encoding of the height passes
 template<typename BlockTy>
 bool validateBIP34(uint32_t height, const BlockTy &block, uint32_t bip34Height, std::string &error) {
   if (height < bip34Height)
     return true;
 
-  if (block.Vtx.empty() || block.Vtx[0].TxIn.empty()) {
-    error = "coinbase-height-missing";
-    return false;
+  // The push length, four bytes of the height and a sign byte at most
+  uint8_t expected[6];
+  size_t size = 0;
+  if (height == 0) {
+    expected[size++] = Script::OP_0;
+  } else if (height <= 16) {
+    expected[size++] = static_cast<uint8_t>(Script::OP_1 + height - 1);
+  } else {
+    size = 1;
+    for (uint32_t v = height; v; v >>= 8)
+      expected[size++] = static_cast<uint8_t>(v);
+    // The top bit of the last byte is the sign: a positive number that sets it takes one more byte
+    if (expected[size - 1] & 0x80)
+      expected[size++] = 0;
+    expected[0] = static_cast<uint8_t>(size - 1);
   }
 
-  auto &coinbaseTxIn = block.Vtx[0].TxIn[0];
-
-  xmstream src(coinbaseTxIn.ScriptSig.data(), coinbaseTxIn.ScriptSig.size());
-
-  // Read size followed by little endian number
-  uint8_t size = src.read<uint8_t>();
-  uint64_t v = 0;
-  for (uint8_t i = 0; i < size; i++)
-    v |= (static_cast<uint64_t>(src.read<uint8_t>()) << 8*i);
-
-  bool result = !src.eof() && v == height;
-  if (!result)
-    error = "coinbase-height-mismatch";
-  return result;
+  if (block.Vtx.empty() || block.Vtx[0].TxIn.empty() ||
+      block.Vtx[0].TxIn[0].ScriptSig.size() < size ||
+      memcmp(block.Vtx[0].TxIn[0].ScriptSig.data(), expected, size) != 0) {
+    error = "bad-cb-height";
+    return false;
+  }
+  return true;
 }
 
 static inline bool validateUnexpectedWitness(uint32_t height, bool hasWitnessData, uint32_t segwitHeight, std::string &error) {
@@ -288,12 +299,14 @@ static inline bool validateUnexpectedWitness(uint32_t height, bool hasWitnessDat
 struct CPrevout {
   int64_t Value = 0;
   // Script::CUnspentOutputInfo::EType: policy needs no more of the script than its form
-  uint8_t Type = 0;
+  uint8_t Type = Script::CUnspentOutputInfo::ENonStandard;
   // The height of the block that created it
   uint32_t Height = 0;
   bool Coinbase = false;
   // MWEB: a peg-out, a HogEx output past the first
   bool Pegout = false;
+  // Core's GetSigOpCount(true) of its script
+  uint32_t SigOps = 0;
 };
 
 // The block a transaction is checked for

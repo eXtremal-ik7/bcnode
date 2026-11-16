@@ -69,8 +69,8 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 8232;
     params->PublicKeyPrefix = {0x1C,0xB8};    // t1
 
-    // ZCash has neither BIP34 nor segwit, checkBlockContextual does not look at these
-    params->BIP34Height = 0;
+    // As zcashd: the height is in the coinbase from block 1 on, the genesis has none (spec 6.8). No segwit
+    params->BIP34Height = 1;
     params->SegwitHeight = 0;
 
     params->powLimit = UInt<256>::fromHex("0007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
@@ -114,8 +114,8 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 18232;
     params->PublicKeyPrefix = {0x1D,0x25};    // tm
 
-    // ZCash has neither BIP34 nor segwit, checkBlockContextual does not look at these
-    params->BIP34Height = 0;
+    // As zcashd: the height is in the coinbase from block 1 on, the genesis has none (spec 6.8). No segwit
+    params->BIP34Height = 1;
     params->SegwitHeight = 0;
 
     params->powLimit = UInt<256>::fromHex("07ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
@@ -157,8 +157,8 @@ bool ZEC::Common::setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 18232;
     params->PublicKeyPrefix = {0x1D,0x25};    // tm
 
-    // ZCash has neither BIP34 nor segwit, checkBlockContextual does not look at these
-    params->BIP34Height = 0;
+    // As zcashd: the height is in the coinbase from block 1 on, the genesis has none (spec 6.8). No segwit
+    params->BIP34Height = 1;
     params->SegwitHeight = 0;
 
     params->powLimit = UInt<256>::fromHex("0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f");
@@ -236,16 +236,17 @@ bool ZEC::Common::checkBlockStandalone(const Proto::CBlock &block,
 }
 
 bool ZEC::Common::checkBlockContextual(const BlockIndex &index,
-                                      const Proto::CBlock&,
+                                      const Proto::CBlock &block,
                                       Proto::CBlockValidationData &validation,
                                       const Proto::CBlockLinkedOutputs&,
                                       const ChainParams &chainParams,
-                                      std::string&)
+                                      std::string &error)
 {
-  // Nothing of Bitcoin's applies - no BIP34 threshold and no pinned repeats - but the call
-  // stays, so that the block reload path has the same context filler to reproduce
   fillChainContext(index, chainParams, validation);
-  return true;
+
+  bool isValid = true;
+  isValid &= BTC::validateBIP34(index.Height, block, chainParams.BIP34Height, error);
+  return isValid;
 }
 
 // Bitcoin's rules, aware of the shielded parts. Zcash's own (versions, the shielded values and

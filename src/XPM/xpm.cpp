@@ -22,8 +22,8 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->PublicKeyPrefix = {23};
     params->ScriptPrefix = {83};
 
-    // TODO: do correct BIP34 checking
-    params->BIP34Height = 17;
+    // As Primecoin: the height is in the coinbase from genesis on, OP_0..OP_16 below 17
+    params->BIP34Height = 0;
 
     {
       // Genesis block
@@ -79,10 +79,10 @@ bool setupChainParams(ChainParams *params, const char *network)
     params->DefaultRPCPort = 9914;
 
     params->PublicKeyPrefix = {111};
-    params->PublicKeyPrefix = {196};
+    params->ScriptPrefix = {196};
 
-    // TODO: do correct BIP34 checking
-    params->BIP34Height = 17;
+    // As Primecoin: the height is in the coinbase from genesis on, OP_0..OP_16 below 17
+    params->BIP34Height = 0;
 
     {
       // Genesis block

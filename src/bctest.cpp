@@ -2,6 +2,7 @@
 #include "common/serializeUtils.h"
 #include "common/smallStream.h"
 #include "BTC/hash.h"
+#include "BTC/sighash.h"
 
 #include <asyncio/asyncio.h>
 #include <asyncio/coroutine.h>
@@ -350,12 +351,7 @@ private:
       // restore utxo scriptPubKey
       memcpy(p2pkhOutput + 3, inputs[i].Addr.Address.begin(), sizeof(BC::Proto::AddressTy));
 
-      // serialize transaction for sign
-      SmallStream<4096> sigData;
-      BC::serializeForSignature(sigData, tx, i, p2pkhOutput, sizeof(p2pkhOutput));
-      sigData.write<int32_t>(1);
-
-      BaseBlob<256> sigHash = BTC::sha256d(sigData.data(), sigData.sizeOf());
+      BaseBlob<256> sigHash = BTC::sighashLegacy(tx, i, p2pkhOutput, sizeof(p2pkhOutput), BTC::ESighashAll);
 
       {
         secp256k1_ecdsa_signature sig;
