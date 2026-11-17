@@ -169,8 +169,11 @@ struct CSchnorr {
   std::optional<CKey> Signer;
   std::optional<uint8_t> WrittenType;
   bool DamageR = false;
+  // Tapscript: the position of the last OP_CODESEPARATOR run, counted in opcodes; none by default
+  uint32_t CodeSeparator = 0xffffffff;
 
   CSchnorr By(const CKey &key) const { CSchnorr s = *this; s.Signer = key; return s; }
+  CSchnorr Separator(uint32_t position) const { CSchnorr s = *this; s.CodeSeparator = position; return s; }
   CSchnorr AsType(uint8_t type) const { CSchnorr s = *this; s.WrittenType = type; return s; }
   CSchnorr FlipR() const { CSchnorr s = *this; s.DamageR = true; return s; }
 };
@@ -194,8 +197,15 @@ struct CWitnessScript {};
 inline CRedeemScript Redeem() { return {}; }
 inline CWitnessScript WitnessScript() { return {}; }
 
+// Taproot's script path: the script of the leaf spent and the control block of the output
+struct CLeafScript {};
+struct CControl {};
+
+inline CLeafScript LeafScript() { return {}; }
+inline CControl Control() { return {}; }
+
 // What a push or a witness element holds
-using CElement = std::variant<Bytes, CKey, CSig, CSchnorr, CRedeemScript, CWitnessScript>;
+using CElement = std::variant<Bytes, CKey, CSig, CSchnorr, CRedeemScript, CWitnessScript, CLeafScript, CControl>;
 
 // OP_PUSHDATA1, 2 or 4 whatever the size
 struct CPushData {
@@ -281,7 +291,9 @@ struct COutput {
     None,
     Legacy,
     Bip143,
-    Bip341
+    Bip341,
+    // BIP342: BIP341's with the leaf
+    Tapscript
   };
   Bytes Script;
   EDigest Digest = EDigest::None;
@@ -291,7 +303,22 @@ struct COutput {
   // What Redeem() and WitnessScript() push
   Bytes Redeem;
   Bytes WitnessScript;
+  // What LeafScript() and Control() push; the leaf's TapLeaf hash, its signatures commit to it
+  Bytes LeafScript;
+  Bytes Control;
+  Bytes LeafHash;
 };
+
+// A leaf of a taproot tree: tapscript under 0xc0, a leaf of the future under another version
+struct CTapLeaf {
+  Bytes Script;
+  uint8_t Version = 0xc0;
+};
+
+inline CTapLeaf Leaf(const Bytes &script, uint8_t version = 0xc0) { return {script, version}; }
+CTapLeaf Leaf(const CScriptSig &script, uint8_t version = 0xc0);
+// TapLeaf hash: a branch of the tree that is this leaf
+Bytes LeafHash(const CTapLeaf &leaf);
 
 COutput P2PK(const CKey &key);
 COutput P2PKH(const CKey &key);
@@ -306,6 +333,9 @@ COutput P2SH(const CScriptSig &redeem);
 COutput P2WSH(const CScriptSig &witnessScript);
 COutput P2TR(const CKey &key);
 COutput P2TR(const Bytes &program);
+// The output of the internal key committed to a tree that has the leaf, path the hashes beside it from
+// the leaf up. Schnorr signatures sign under the leaf, by the internal key unless By names another
+COutput P2TR(const CKey &internal, const CTapLeaf &leaf, const std::vector<Bytes> &path = {});
 COutput P2WSH(const Bytes &program);
 // OP_version and a push of the program
 COutput WitnessProgram(uint8_t version, const Bytes &program);
@@ -344,6 +374,8 @@ CChange OtherScriptSig();
 CChange AddInput();
 CChange LockTime();
 CChange Version();
+// The annex, the last witness element, a byte longer
+CChange OtherAnnex();
 // The input checked and another change places, their outputs with them
 CChange Permute();
 

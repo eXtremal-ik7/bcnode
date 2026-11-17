@@ -232,7 +232,7 @@ TEST(FastPath, TaprootKeyPath)
   spend(P2TR(Bytes(32, 0xff)), Witness() << Schnorr().By(K1),     Ok | Taproot(SchnorrSig));
   // The script path, an annex, a script sig: the interpreter's
   spend(P2TR(K1), Witness() << Schnorr() << Bytes{0x01},          Ok | Taproot(Interpreter(TaprootWrongControlSize)));
-  spend(P2TR(K1), Witness() << Schnorr() << Annex(),              Ok | Taproot(Interpreter(SchnorrSig)));
+  spend(P2TR(K1), Witness() << Schnorr() << Annex(),              Ok | Taproot(Interpreter(Ok)));
   spend(P2TR(K1), ScriptSig() << OP_0, Witness() << Schnorr(),    Interpreter(Ok | Segwit(WitnessMalleated)));
 }
 
@@ -244,6 +244,11 @@ TEST(FastPath, OtherOutputs)
   spend(P2WSH(Bytes(32, 0x22)),             Witness() << Bytes{0x51},      Interpreter(Ok | Segwit(WitnessProgramMismatch)));
   spend(WitnessProgram(2, Bytes(32, 0x01)), Witness() << Bytes{0x01},      Interpreter(Ok | Standard(DiscourageUpgradableWitnessProgram)));
   spend(Anchor(),                           Witness(),                     Interpreter(Ok));
+  // P2A runs nothing, a witness on it included; in P2SH, or a program beside it, a program of the future
+  spend(Anchor(),                           Witness() << Bytes{0x01},      Interpreter(Ok));
+  spend(P2SH(Anchor()), ScriptSig() << Redeem(), Witness(),                Interpreter(Ok | Standard(DiscourageUpgradableWitnessProgram)));
+  spend(WitnessProgram(1, {0x4e, 0x74}),    Witness(),                     Interpreter(Ok | Standard(DiscourageUpgradableWitnessProgram)));
+  spend(WitnessProgram(1, {0x4f, 0x73}),    Witness(),                     Interpreter(Ok | Standard(DiscourageUpgradableWitnessProgram)));
   spend(Output({0x51}),                     ScriptSig(),                   Interpreter(Ok));
   spend(Output(noKey),                      ScriptSig() << Sig().By(K1),   Interpreter(EvalFalse | Standard(PubKeyType)));
 }

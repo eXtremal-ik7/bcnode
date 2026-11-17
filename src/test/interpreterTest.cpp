@@ -2,7 +2,8 @@
 // is the script sig, the script of the output, the flags and the error; the scripts are text in the notation of
 // spendBuilder.h, the same bytes as Core's. Where a script is hashed or signed, the line is the output spent, the
 // script sig, the witness if there is one, then the flags and the error. Where Core's TestBuilder signs, the test
-// keys sign in the same places: its key0, key1 and key2 are K1, K2, K6
+// keys sign in the same places: its key0, key1 and key2 are K1, K2, K6. The last test is ours: what Core's vectors
+// leave untaken
 
 #include "spendBuilder.h"
 
@@ -1863,4 +1864,27 @@ TEST(Interpreter, OutputForms)
   interpret(P2WSH(multi), ScriptSig(), bothWitness, StandardFlags, Ok);
   interpret(P2SH(P2WSH(multi)), ScriptSig() << Redeem(), bothWitness, segwit, Ok);
   interpret(P2SH(P2WSH(multi)), ScriptSig() << Redeem(), bothWitness, StandardFlags, Ok);
+}
+
+// Ours: branches Core's vectors leave untaken
+TEST(Interpreter, BeyondCoreVectors)
+{
+  interpret("1 2", "NUMEQUALVERIFY 1", EScriptNone, NumEqualVerify);
+
+  // FindAndDelete of a signature too long for a direct push: its PUSHDATA1 and PUSHDATA2 forms
+  for (size_t size: {76, 256}) {
+    const Bytes sig(size, 0x61);
+    const COutput output = Bare(Script() << sig << OP_DROP << K1 << Script("CHECKSIG NOT"));
+    interpret(output, ScriptSig() << sig, EScriptNone, Ok);
+    interpret(output, ScriptSig() << sig, EScriptConstScriptCode, SigFindAndDelete);
+  }
+
+  // The script code of a script cut short: CHECKSIG takes it, the push fails after
+  interpret("0", "0 CHECKSIG 0x4c", EScriptNone, BadOpcode);
+
+  // BIP68 is off for an input with bit 31 of its sequence set
+  interpret(CTx{.Version = 2, .Sequence = 0}, Bare(Script("0 CHECKSEQUENCEVERIFY DROP 1")), ScriptSig(), Witness(),
+            EScriptCheckSequenceVerify, Ok);
+  interpret(CTx{.Version = 2, .Sequence = 0x80000000}, Bare(Script("0 CHECKSEQUENCEVERIFY DROP 1")), ScriptSig(), Witness(),
+            EScriptCheckSequenceVerify, UnsatisfiedLocktime);
 }

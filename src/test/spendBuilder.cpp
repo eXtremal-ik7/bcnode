@@ -178,6 +178,8 @@ struct CBuilt {
   Tx Transaction;
   std::vector<TxOut> Spent;
   size_t Input = 0;
+  // The input's annex, taproot signatures commit to it
+  Bytes Annex;
   // Which signatures, for the trace
   std::string Note;
 };
@@ -458,9 +460,17 @@ BaseBlob<256> bip143Digest(const Tx &tx, size_t input, const Bytes &scriptCode, 
   return blobOf(sha256dOf(message));
 }
 
-// BIP341's SigMsg of the key path with no annex, the epoch ahead of it, under the TapSighash tag.
-// The amounts and scripts are those of the outputs themselves, not of their records
-BaseBlob<256> bip341Digest(const Tx &tx, const std::vector<TxOut> &spent, size_t input, uint8_t hashType)
+// BIP340: SHA256 of the tag twice ahead of the message
+Bytes taggedHash(const char *tag, const Bytes &message)
+{
+  const Bytes tagHash = sha256Of(Bytes(tag, tag + strlen(tag)));
+  return sha256Of(Concat(Concat(tagHash, tagHash), message));
+}
+
+// BIP341's SigMsg, the epoch ahead of it, under the TapSighash tag; BIP342's extension when there is a
+// leaf. The amounts and scripts are those of the outputs themselves, not of their records
+BaseBlob<256> bip341Digest(const Tx &tx, const std::vector<TxOut> &spent, size_t input, uint8_t hashType, const Bytes &annex,
+                           const Bytes *leafHash, uint32_t codeSeparator)
 {
   const bool anyoneCanPay = (hashType & SIGHASH_ANYONECANPAY) != 0;
   const unsigned outputType = hashType & 0x03;
@@ -487,8 +497,8 @@ BaseBlob<256> bip341Digest(const Tx &tx, const std::vector<TxOut> &spent, size_t
       putOutput(outputs, out);
     append(message, sha256Of(outputs));
   }
-  // The spend type
-  message.push_back(0x00);
+  // The spend type: ext_flag 1 for tapscript, then whether there is an annex
+  message.push_back(static_cast<uint8_t>((leafHash ? 2 : 0) | (annex.empty() ? 0 : 1)));
   if (anyoneCanPay) {
     putOutpoint(message, in);
     putOutput(message, spent[input]);
@@ -496,14 +506,23 @@ BaseBlob<256> bip341Digest(const Tx &tx, const std::vector<TxOut> &spent, size_t
   } else {
     putLe32(message, static_cast<uint32_t>(input));
   }
+  if (!annex.empty()) {
+    Bytes sized;
+    putSized(sized, annex);
+    append(message, sha256Of(sized));
+  }
   if (outputType == SIGHASH_SINGLE) {
     Bytes own;
     putOutput(own, tx.TxOut[input]);
     append(message, sha256Of(own));
   }
-
-  const Bytes tag = sha256Of({'T', 'a', 'p', 'S', 'i', 'g', 'h', 'a', 's', 'h'});
-  return blobOf(sha256Of(Concat(Concat(tag, tag), message)));
+  if (leafHash) {
+    append(message, *leafHash);
+    // key_version
+    message.push_back(0x00);
+    putLe32(message, codeSeparator);
+  }
+  return blobOf(taggedHash("TapSighash", message));
 }
 
 BaseBlob<256> ecdsaDigest(const CBuilt &b, COutput::EDigest digest, const Bytes &scriptCode, uint8_t hashType)
@@ -527,14 +546,15 @@ BaseBlob<256> ecdsaDigest(const CBuilt &b, const COutput &output, const CSig &si
   return ecdsaDigest(b, segwit ? COutput::EDigest::Bip143 : COutput::EDigest::Legacy, *sig.ScriptCode, sig.HashType);
 }
 
-BaseBlob<256> schnorrDigest(const CBuilt &b, const COutput &output, uint8_t hashType)
+BaseBlob<256> schnorrDigest(const CBuilt &b, const COutput &output, uint8_t hashType, uint32_t codeSeparator)
 {
   // An undefined hash type, SIGHASH_SINGLE without its output: refused ahead of the digest
   const bool defined = hashType <= SIGHASH_SINGLE || (hashType >= 0x81 && hashType <= 0x83);
   const bool single = (hashType & 0x03) == SIGHASH_SINGLE;
-  if (output.Digest != COutput::EDigest::Bip341 || !defined || (single && b.Input >= b.Transaction.TxOut.size()))
+  const bool tapscript = output.Digest == COutput::EDigest::Tapscript;
+  if ((output.Digest != COutput::EDigest::Bip341 && !tapscript) || !defined || (single && b.Input >= b.Transaction.TxOut.size()))
     return BaseBlob<256>();
-  return bip341Digest(b.Transaction, b.Spent, b.Input, hashType);
+  return bip341Digest(b.Transaction, b.Spent, b.Input, hashType, b.Annex, tapscript ? &output.LeafHash : nullptr, codeSeparator);
 }
 
 std::optional<CKey> signer(const std::optional<CKey> &own, const COutput &output)
@@ -585,7 +605,7 @@ Bytes schnorr(CBuilt &b, const COutput &output, const CSchnorr &sig)
     return {};
   const uint8_t hashType = sig.HashType.value_or(SIGHASH_DEFAULT);
   noteSignature(b, "Schnorr", hashType);
-  const BaseBlob<256> digest = schnorrDigest(b, output, hashType);
+  const BaseBlob<256> digest = schnorrDigest(b, output, hashType, sig.CodeSeparator);
   uint8_t secret[32];
   secretKey(*key, secret);
   secp256k1_keypair keypair;
@@ -610,7 +630,9 @@ Bytes element(CBuilt &b, const COutput &output, const CElement &item)
     [&](const CSig &sig) { return ecdsa(b, output, sig); },
     [&](const CSchnorr &sig) { return schnorr(b, output, sig); },
     [&](const CRedeemScript&) { return output.Redeem; },
-    [&](const CWitnessScript&) { return output.WitnessScript; }
+    [&](const CWitnessScript&) { return output.WitnessScript; },
+    [&](const CLeafScript&) { return output.LeafScript; },
+    [&](const CControl&) { return output.Control; }
   }, item);
 }
 
@@ -660,7 +682,14 @@ bool make(const CTx &shape, const COutput &output, const CScriptSig &scriptSig, 
   Tx &tx = b.Transaction;
   assign(b.Spent[b.Input].PkScript, output.Script);
 
-  // The digests take neither the script sig nor the witness of the input
+  // The digests take neither the script sig nor the witness of the input, but its annex: the last of two
+  // elements or more that starts with 0x50
+  const std::vector<CElement> &elements = witness.Elements;
+  if (elements.size() >= 2) {
+    const Bytes *last = std::get_if<Bytes>(&elements.back());
+    if (last && !last->empty() && (*last)[0] == 0x50)
+      b.Annex = *last;
+  }
   BTC::Proto::CTxIn &in = tx.TxIn[b.Input];
   assign(in.ScriptSig, assemble(scriptSig, [&](const CElement &data) { return element(b, output, data); }));
   in.WitnessStack.resize(witness.Elements.size());
@@ -1083,6 +1112,48 @@ COutput P2TR(const CKey &key)
   return output;
 }
 
+CTapLeaf Leaf(const CScriptSig &script, uint8_t version)
+{
+  return {Code(script), version};
+}
+
+Bytes LeafHash(const CTapLeaf &leaf)
+{
+  Bytes message{leaf.Version};
+  putSized(message, leaf.Script);
+  return taggedHash("TapLeaf", message);
+}
+
+COutput P2TR(const CKey &internal, const CTapLeaf &leaf, const std::vector<Bytes> &path)
+{
+  // TapBranch hashes the two in their byte order
+  Bytes root = LeafHash(leaf);
+  for (const Bytes &sibling: path)
+    root = taggedHash("TapBranch", root < sibling ? Concat(root, sibling) : Concat(sibling, root));
+
+  // Q = P + tG, t = TapTweak(P || root); the control block carries the parity of Q
+  const Bytes key = internal.xOnly();
+  const Bytes tweak = taggedHash("TapTweak", Concat(key, root));
+  secp256k1_xonly_pubkey p, q;
+  secp256k1_pubkey tweaked;
+  int parity = 0;
+  EXPECT_TRUE(secp256k1_xonly_pubkey_parse(context(), &p, key.data()));
+  EXPECT_TRUE(secp256k1_xonly_pubkey_tweak_add(context(), &tweaked, &p, tweak.data()));
+  EXPECT_TRUE(secp256k1_xonly_pubkey_from_pubkey(context(), &q, &parity, &tweaked));
+  uint8_t program[32];
+  secp256k1_xonly_pubkey_serialize(context(), program, &q);
+
+  COutput output = WitnessProgram(1, Bytes(program, program + 32));
+  output.Digest = COutput::EDigest::Tapscript;
+  output.Key = internal;
+  output.LeafScript = leaf.Script;
+  output.LeafHash = LeafHash(leaf);
+  output.Control = Concat({static_cast<uint8_t>(leaf.Version | parity)}, key);
+  for (const Bytes &sibling: path)
+    output.Control = Concat(output.Control, sibling);
+  return output;
+}
+
 COutput P2WSH(const Bytes &program)
 {
   return WitnessProgram(0, program);
@@ -1444,6 +1515,11 @@ CChange LockTime()
 CChange Version()
 {
   return {"Version", [](Tx &tx, std::vector<TxOut>&, size_t) { tx.Version ^= 1; }};
+}
+
+CChange OtherAnnex()
+{
+  return {"OtherAnnex", [](Tx &tx, std::vector<TxOut>&, size_t input) { tx.TxIn[input].WitnessStack.back().emplace_back(uint8_t{0}); }};
 }
 
 // Verdicts
