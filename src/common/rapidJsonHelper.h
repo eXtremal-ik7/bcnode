@@ -1,6 +1,6 @@
 #pragma once
 #include "rapidjson/document.h"
-#include "common/baseBlob.h"
+#include "libpow/baseBlob.h"
 #include <optional>
 
 static inline uint8_t hexParse(char c)

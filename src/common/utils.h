@@ -5,8 +5,8 @@
 
 #pragma once
 
-#include "common/baseBlob.h"
-#include "common/uint.h"
+#include "libpow/baseBlob.h"
+#include "libpow/uint.h"
 #include "loguru.hpp"
 #include <filesystem>
 

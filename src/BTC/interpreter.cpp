@@ -1,6 +1,6 @@
 #include "interpreter.h"
 #include "hash.h"
-#include "crypto/ripemd160.h"
+#include "libpow/ripemd160.h"
 #include <openssl/evp.h>
 #include <secp256k1.h>
 #include <secp256k1_extrakeys.h>

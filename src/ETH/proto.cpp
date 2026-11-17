@@ -1,6 +1,6 @@
 #include "proto.h"
 
-#include "crypto/sha3.h"
+#include "libpow/sha3.h"
 
 namespace ETH {
 

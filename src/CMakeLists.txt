@@ -91,7 +91,7 @@ else()
 endif()
 
 # The modules below drive FetchContent by hand: asyncio is added from a non-default source
-# subdirectory and all three need EXCLUDE_FROM_ALL, which FetchContent_MakeAvailable only
+# subdirectory and all of them need EXCLUDE_FROM_ALL, which FetchContent_MakeAvailable only
 # supports from CMake 3.28. Keep FetchContent_Populate until the minimum version is raised.
 if (POLICY CMP0169)
   cmake_policy(SET CMP0169 OLD)
@@ -99,6 +99,7 @@ endif()
 
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectConfig4cpp.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectAsyncio.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/ProjectLibpow.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ProjectSecp256k1.cmake)
 
 include_directories(
@@ -127,42 +128,8 @@ add_library(bcnodecommon STATIC
 )
 
 target_link_libraries(bcnodecommon
+  pow
   ${BIGNUM_LIBRARIES}
-)
-
-option(LIBPOW_SSE2_ENABLED off)
-option(LIBPOW_SHANI_ENABLED off)
-option(LIBPOW_ARM_SHA2_ENABLED off)
-option(LIBPOW_SCRYPT_SSE2_DISABLED off)
-
-if (LIBPOW_SHANI_ENABLED)
-  add_definitions(-DLIBPOW_SHANI_ENABLED)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msha -msse4.1")
-endif()
-
-if (LIBPOW_ARM_SHA2_ENABLED)
-  add_definitions(-DLIBPOW_ARM_SHA2_ENABLED)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8-a+crypto")
-endif()
-
-if (LIBPOW_SSE2_ENABLED)
-  add_definitions(-DLIBPOW_SSE2_ENABLED)
-endif()
-
-if (LIBPOW_SCRYPT_SSE2_DISABLED)
-  add_definitions(-DLIBPOW_SCRYPT_SSE2_DISABLED)
-endif()
-
-add_library(bcnodecrypto STATIC
-  crypto/ripemd160.c
-  crypto/scrypt.c
-  crypto/sha256.c
-  crypto/sha3.c
-)
-
-target_link_libraries(bcnodecrypto
-  OpenSSL::SSL
-  OpenSSL::Crypto
 )
 
 set(BASE_SOURCES
@@ -188,7 +155,7 @@ set(BASE_SOURCES
 # Linker configuration
 set(COMMON_LIBRARIES
   bcnodecommon
-  bcnodecrypto
+  pow
   asyncio-0.6
   asyncioextras-0.6
   p2putils

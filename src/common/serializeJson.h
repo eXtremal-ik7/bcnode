@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "common/baseBlob.h"
+#include "libpow/baseBlob.h"
 #include "xvector.h"
 #include <vector>
 #include <p2putils/xmstream.h>

@@ -6,7 +6,7 @@
 #pragma once
 
 #include "BTC/serialize.h"
-#include "common/baseBlob.h"
+#include "libpow/baseBlob.h"
 #include "common/xvector.h"
 #include <array>
 

@@ -4,8 +4,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #pragma once
-#include "endiantools.h"
-#include "uint.h"
+#include "libpow/endiantools.h"
+#include "libpow/uint.h"
 #include <gmpxx.h>
 
 // UInt -> mpz_class

@@ -8,7 +8,6 @@
 #include "proto.h"
 #include "LTC/ltc.h"
 #include "BTC/merkleTree.h"
-#include "crypto/scrypt.h"
 #include <algorithm>
 #include <string.h>
 
@@ -166,10 +165,10 @@ namespace Common {
                                          CheckConsensusCtx&,
                                          ChainParams &chainParams,
                                          bool *results) {
-    for (size_t base = 0; base < count; base += SCRYPT_WAYS) {
-      size_t num = std::min<size_t>(SCRYPT_WAYS, count - base);
-      const Proto::CPureBlockHeader *hashed[SCRYPT_WAYS];
-      uint32_t nBits[SCRYPT_WAYS];
+    for (size_t base = 0; base < count; base += LTC::Common::SCRYPT_WAYS) {
+      size_t num = std::min<size_t>(LTC::Common::SCRYPT_WAYS, count - base);
+      const Proto::CPureBlockHeader *hashed[LTC::Common::SCRYPT_WAYS];
+      uint32_t nBits[LTC::Common::SCRYPT_WAYS];
 
       for (size_t i = 0; i < num; i++) {
         const Proto::CBlockHeader *header = headers[base + i];

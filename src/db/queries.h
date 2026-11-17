@@ -14,7 +14,7 @@
 #include "BC/script.h"
 #include "common/blockLayout.h"
 #include "common/blockDataBase.h"
-#include "common/uint.h"
+#include "libpow/uint.h"
 
 #include <string>
 #include <utility>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common/baseBlob.h"
+#include "libpow/baseBlob.h"
 #include "common/serialize.h"
 #include "common/xvector.h"
 

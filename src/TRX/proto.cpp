@@ -1,6 +1,6 @@
 #include "proto.h"
 
-#include "crypto/sha256.h"
+#include "libpow/sha256.h"
 
 #include <string.h>
 

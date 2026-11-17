@@ -6,7 +6,7 @@
 #include "ltc.h"
 #include "BTC/policy.h"
 #include "BTC/scriptVerify.h"
-#include "crypto/scrypt.h"
+#include "libpow/scrypt.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
 
@@ -220,16 +220,11 @@ void checkPowMulti(const Proto::CBlockHeader *const *headers,
                    const UInt<256> &powLimit,
                    bool *results)
 {
-  for (size_t base = 0; base < count; base += SCRYPT_WAYS) {
-    size_t num = std::min<size_t>(SCRYPT_WAYS, count - base);
-    const void *inputs[SCRYPT_WAYS];
-    uint8_t hashes[SCRYPT_WAYS][32];
-
-    for (size_t i = 0; i < num; i++)
-      inputs[i] = headers[base + i];
-    scrypt_1024_1_1_256_multi(inputs, &hashes[0][0], num);
-    for (size_t i = 0; i < num; i++)
-      results[base + i] = powMatch(hashes[i], nBits[base + i], powLimit);
+  // Lane by lane until libpow has a multi-way scrypt
+  for (size_t i = 0; i < count; i++) {
+    uint8_t hash[32];
+    scrypt_1024_1_1_256(headers[i], hash);
+    results[i] = powMatch(hash, nBits[i], powLimit);
   }
 }
 

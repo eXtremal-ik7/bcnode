@@ -13,7 +13,7 @@
 // outgrown table misses only keys inserted after the swap, all above any
 // watermark it can hold.
 
-#include "common/baseBlob.h"
+#include "libpow/baseBlob.h"
 #include "dbengine/arena.h"
 #include "dbengine/swmrhashmap.h"
 

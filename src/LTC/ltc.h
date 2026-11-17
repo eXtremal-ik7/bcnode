@@ -86,6 +86,8 @@ namespace Common {
   bool checkPow(const Proto::CBlockHeader &header, uint32_t nBits, CheckConsensusCtx &, const UInt<256> &powLimit);
   // Group of headers at once: hashing is all a block check costs, and a multi-way kernel wants
   // its inputs collected. Targets come apart - auxpow hashes the parent against the child target
+  // Group size for the future kernel: eight 32 bit lanes of a 512 bit register
+  enum { SCRYPT_WAYS = 8 };
   void checkPowMulti(const Proto::CBlockHeader *const *headers,
                      const uint32_t *nBits,
                      size_t count,

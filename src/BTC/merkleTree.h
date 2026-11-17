@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "common/baseBlob.h"
+#include "libpow/baseBlob.h"
 #include <memory>
 
 namespace BTC {

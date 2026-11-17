@@ -6,9 +6,9 @@
 // on-disk structures (the block index, the linked-outputs file, utxodb values) because that is
 // what they were written in, not because a format is inherited from anywhere.
 
-#include "common/baseBlob.h"
+#include "libpow/baseBlob.h"
 #include "common/serialize.h"
-#include "common/uint.h"
+#include "libpow/uint.h"
 #include "common/xvector.h"
 #include "p2putils/xmstream.h"
 #include <array>

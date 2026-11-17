@@ -7,7 +7,7 @@
 #include "validation.h"
 #include "BTC/policy.h"
 #include "BTC/scriptVerify.h"
-#include "crypto/scrypt.h"
+#include "libpow/scrypt.h"
 #include "common/serializeUtils.h"
 #include "common/utils.h"
 

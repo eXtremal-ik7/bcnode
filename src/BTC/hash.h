@@ -5,9 +5,9 @@
 
 #pragma once
 
-#include "common/baseBlob.h"
-#include "common/uint.h"
-#include "crypto/sha256.h"
+#include "libpow/baseBlob.h"
+#include "libpow/uint.h"
+#include "libpow/sha256.h"
 
 #include <stddef.h>
 #include <stdint.h>

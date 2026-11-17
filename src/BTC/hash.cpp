@@ -4,7 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "hash.h"
-#include "crypto/ripemd160.h"
+#include "libpow/ripemd160.h"
 
 namespace BTC {
 

@@ -6,12 +6,12 @@
 #include <string.h>
 #include <string>
 #include "serialize.h"
-#include "common/baseBlob.h"
-#include "common/endiantools.h"
+#include "libpow/baseBlob.h"
+#include "libpow/endiantools.h"
 #include "hash.h"
 #include "common/blockLayout.h"
 #include "common/smallStream.h"
-#include "common/uint.h"
+#include "libpow/uint.h"
 #include <vector>
 #include "../loguru.hpp"
 
