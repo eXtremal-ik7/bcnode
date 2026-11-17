@@ -128,8 +128,6 @@ add_library(bcnodecommon STATIC
 
 target_link_libraries(bcnodecommon
   ${BIGNUM_LIBRARIES}
-  # BTC/hash.cpp needs the OpenSSL headers
-  OpenSSL::Crypto
 )
 
 option(LIBPOW_SSE2_ENABLED off)
@@ -156,6 +154,7 @@ if (LIBPOW_SCRYPT_SSE2_DISABLED)
 endif()
 
 add_library(bcnodecrypto STATIC
+  crypto/ripemd160.c
   crypto/scrypt.c
   crypto/sha256.c
   crypto/sha3.c

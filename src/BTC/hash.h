@@ -77,8 +77,7 @@ static inline uint32_t sha256dChecksum(const void *data, size_t size)
   return checksum;
 }
 
-// RIPEMD160(SHA256(x)) - address from a public key or a redeem script.
-// Defined in hash.cpp, ripemd160 comes from openssl
+// RIPEMD160(SHA256(x)) - address from a public key or a redeem script
 BaseBlob<160> sha256FollowRipemd160(const void *data, size_t size);
 
 }

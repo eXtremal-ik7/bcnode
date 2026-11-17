@@ -1,5 +1,6 @@
 #include "interpreter.h"
 #include "hash.h"
+#include "crypto/ripemd160.h"
 #include <openssl/evp.h>
 #include <secp256k1.h>
 #include <secp256k1_extrakeys.h>
@@ -111,19 +112,20 @@ int64_t binaryOp(uint8_t op, int64_t a, int64_t b)
   }
 }
 
-CItem evpDigest(const EVP_MD *md, const CItem &data)
-{
-  CItem hash(EVP_MD_size(md));
-  unsigned size = 0;
-  EVP_Digest(data.data(), data.size(), hash.data(), &size, md, nullptr);
-  return hash;
-}
-
 CItem hashItem(uint8_t op, const CItem &data)
 {
   switch (op) {
-    case OP_RIPEMD160 : return evpDigest(EVP_ripemd160(), data);
-    case OP_SHA1 : return evpDigest(EVP_sha1(), data);
+    case OP_RIPEMD160 : {
+      CItem hash(20);
+      ripemd160(data.data(), data.size(), hash.data());
+      return hash;
+    }
+    case OP_SHA1 : {
+      CItem hash(20);
+      unsigned size = 0;
+      EVP_Digest(data.data(), data.size(), hash.data(), &size, EVP_sha1(), nullptr);
+      return hash;
+    }
     case OP_SHA256 : {
       CItem hash(32);
       sha256(data.data(), data.size(), hash.data());
