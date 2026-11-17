@@ -55,6 +55,9 @@ EScriptError ecdsaChecksig(Script::CSpan sig,
                            CSigJob &job,
                            uint8_t &hashType);
 
+// The key and the signature of an ECDSA job, false when no digest could make it valid
+bool ecdsaJob(Script::CSpan sig, Script::CSpan key, CSigJob &job, uint8_t &hashType);
+
 // What becomes of a fast path signature; the interpreter always checks at once
 enum class ESigMode : uint8_t {
   // libsecp256k1 right away: the mempool

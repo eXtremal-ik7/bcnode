@@ -161,7 +161,7 @@ void checkScripts(const BC::Proto::CTransaction &tx, const CSpentRecords &record
   precheck.Refusal = BC::Common::checkPolicyScripts(tx, spent, precheck.Reason, count);
   if (precheck.Refusal == BTC::EScriptRefusal::None) {
     precheck.Scripts = CPrecheck::EPassed;
-    precheck.Unchecked = count.Interpreted != 0;
+    precheck.Unchecked = count.Unchecked != 0;
   } else {
     precheck.Scripts = CPrecheck::ERefused;
     precheck.Refused = true;
@@ -198,7 +198,7 @@ struct CMempool::CDecision {
   // Accept: what the entry is made of
   int64_t Fee = 0;
   BTC::CTxCost Cost;
-  // Accept: every input went through a script check, none through the interpreter's stub
+  // Accept: every input went through a script check; not so for a coin without them
   bool Verified = false;
   // Wait: the utxo change sequence the base has to reach
   uint64_t Seq = 0;

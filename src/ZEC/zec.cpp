@@ -332,7 +332,7 @@ BTC::EScriptRefusal ZEC::Common::checkPolicyScripts(const Proto::CTransaction &t
                                                     BTC::CScriptCount &count)
 {
   count.Inputs += tx.TxIn.size();
-  count.Interpreted += tx.TxIn.size();
+  count.Unchecked += tx.TxIn.size();
   return BTC::EScriptRefusal::None;
 }
 

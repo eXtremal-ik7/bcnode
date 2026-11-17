@@ -28,6 +28,7 @@ add_bc_unittest(BTC
   localSpendTest.cpp
   outputInfoTest.cpp
   spendBuilder.cpp
+  ${CMAKE_SOURCE_DIR}/BTC/interpreter.cpp
   ${CMAKE_SOURCE_DIR}/BTC/policy.cpp
   ${CMAKE_SOURCE_DIR}/BTC/proto.cpp
   ${CMAKE_SOURCE_DIR}/BTC/script.cpp

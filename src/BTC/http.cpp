@@ -613,8 +613,7 @@ void BC::Network::HttpApiConnection::onMempoolSummary(rapidjson::Document&)
       object.addInt("tx_count", view.get()->TxCount);
       object.addInt("size_bytes", view.get()->Bytes);
       object.addString("fees", FormatMoney(view.get()->Fees, BC::Configuration::RationalPartSize));
-      // With an input no script check went through: off the fast path, left to the interpreter,
-      // a stub so far
+      // With an input no script check went through: a coin without them
       object.addInt("unverified", view.get()->Unverified);
       object.addInt("published", view.get()->PublishedTime);
     }

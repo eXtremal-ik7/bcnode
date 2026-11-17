@@ -88,7 +88,7 @@ struct CPrecheck {
   bool Standalone = false;
   BTC::CTxCost Cost;
   EScripts Scripts = EUnknown;
-  // EPassed, but an input was left to the interpreter: a stub, nothing checked it
+  // EPassed, but nothing checked an input: a coin without script checks
   bool Unchecked = false;
   BTC::EScriptRefusal Refusal = BTC::EScriptRefusal::None;
   // A refusal no base changes, with Core's reason: the standalone checks or the scripts
@@ -309,7 +309,7 @@ private:
   ankerl::unordered_dense::map<COutpoint, TxId, COutpointHash> Spent_;
   uint64_t Bytes_ = 0;
   int64_t Fees_ = 0;
-  // Entries with an input no script check went through: the interpreter's, while it is a stub
+  // Entries with an input no script check went through: a coin without them
   uint64_t Unverified_ = 0;
 
   // Waiting for the base: in arrival order, and txid -> the sequence it waits for

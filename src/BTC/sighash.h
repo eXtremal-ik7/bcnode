@@ -219,16 +219,27 @@ BaseBlob<256> sighashWitnessV0(const TxTy &tx,
   return writer.sha256d();
 }
 
+// SHA256 of a BIP340 tag, what CSha256Writer::tagged starts with
+BaseBlob<256> tagHash(const char *tag);
 const BaseBlob<256> &tapSighashTag();
 
-// BIP341 for the key path: no annex, ext_flag 0. The hash type is one Core's SignatureHashSchnorr
-// takes (checkSchnorrSignature): defined, SIGHASH_SINGLE with its output
+// What a taproot signature commits to besides the transaction. Nothing for the key path without an
+// annex; tapscript (BIP342) adds its leaf and the position of the last OP_CODESEPARATOR run
+struct CTaprootSpend {
+  const BaseBlob<256> *AnnexHash = nullptr;
+  const BaseBlob<256> *LeafHash = nullptr;
+  uint32_t CodeSeparator = 0xFFFFFFFF;
+};
+
+// BIP341 and BIP342. The hash type is one Core's SignatureHashSchnorr takes
+// (checkSchnorrSignature): defined, SIGHASH_SINGLE with its output
 template<typename TxTy>
 BaseBlob<256> sighashTaproot(const TxTy &tx,
                              size_t input,
                              uint8_t hashType,
                              const CTxDigests &digests,
-                             const Script::CUnspentOutputInfo &spent)
+                             const Script::CUnspentOutputInfo &spent,
+                             const CTaprootSpend &spend = {})
 {
   const uint8_t outputType = hashType == ESighashDefault ? ESighashAll : (hashType & 0x03);
   const bool anyoneCanPay = (hashType & ESighashAnyoneCanPay) != 0;
@@ -247,8 +258,8 @@ BaseBlob<256> sighashTaproot(const TxTy &tx,
   }
   if (outputType == ESighashAll)
     writer.blob(digests.Outputs);
-  // Spend type: key path, no annex
-  writer.u8(0);
+  // Spend type: ext_flag 1 for tapscript, the low bit for the annex
+  writer.u8((spend.LeafHash ? 2 : 0) | (spend.AnnexHash ? 1 : 0));
   const auto &in = tx.TxIn[input];
   if (anyoneCanPay) {
     xvector<uint8_t> script;
@@ -260,10 +271,18 @@ BaseBlob<256> sighashTaproot(const TxTy &tx,
   } else {
     writer.le32(static_cast<uint32_t>(input));
   }
+  if (spend.AnnexHash)
+    writer.blob(*spend.AnnexHash);
   if (outputType == ESighashSingle) {
     CSha256Writer output;
     output.output(tx.TxOut[input]);
     writer.blob(output.sha256());
+  }
+  if (spend.LeafHash) {
+    writer.blob(*spend.LeafHash);
+    // key_version
+    writer.u8(0);
+    writer.le32(spend.CodeSeparator);
   }
   return writer.sha256();
 }

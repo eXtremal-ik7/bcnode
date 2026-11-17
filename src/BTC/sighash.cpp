@@ -29,13 +29,16 @@ void spentDigests(std::span<const Script::CUnspentOutputInfo* const> spent, CTxD
   digests.SpentScripts = scripts.sha256();
 }
 
+BaseBlob<256> tagHash(const char *tag)
+{
+  BaseBlob<256> hash;
+  ::sha256(tag, strlen(tag), hash.begin());
+  return hash;
+}
+
 const BaseBlob<256> &tapSighashTag()
 {
-  static const BaseBlob<256> tag = [] {
-    BaseBlob<256> result;
-    ::sha256("TapSighash", 10, result.begin());
-    return result;
-  }();
+  static const BaseBlob<256> tag = tagHash("TapSighash");
   return tag;
 }
 

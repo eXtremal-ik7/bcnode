@@ -51,8 +51,8 @@ struct CTxIdHash {
 };
 
 enum ERecordFlags : uint8_t {
-  // Own scripts checked under the policy flags, every input of them: none was left to the
-  // interpreter, a stub so far
+  // Own scripts checked under the policy flags, every input of them; never for a coin without
+  // script checks
   ERecordVerified = 1,
   // Verified, and so is every unconfirmed ancestor: what may be relayed, served and mined
   ERecordEligible = 2

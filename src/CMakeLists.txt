@@ -258,6 +258,7 @@ prepare_bc_env(BTC)
 
 # Script checks: every target with a coin's rules links them
 set(SCRIPT_SOURCES
+  BTC/interpreter.cpp
   BTC/scriptChecks.cpp
   BTC/scriptError.cpp
   BTC/sigCheck.cpp

@@ -52,7 +52,7 @@ TEST(FastPath, PayToPubKey)
   spend(P2PK(K1),  ScriptSig() << Bytes{0x05},                    EvalFalse | Bip66(SigDer) | Standard(MinimalData));
   spend(P2PK(K1),  ScriptSig() << Bytes{0x10},                    EvalFalse | Bip66(SigDer) | Standard(MinimalData));
   spend(P2PK(K1),  ScriptSig() << Bytes{0x11},                    EvalFalse | Bip66(SigDer));
-  spend(P2PK(K1),  ScriptSig() << Bytes{0x05} << Sig(),           Interpreter | Standard(MinimalData));
+  spend(P2PK(K1),  ScriptSig() << Bytes{0x05} << Sig(),           Interpreter(Ok) | Standard(MinimalData));
   // FindAndDelete: the signature is the push of the key in the script code
   spend(P2PK(K1),  ScriptSig() << K1,                             EvalFalse | Bip66(SigDer) | Standard(SigFindAndDelete));
   // SIGHASH_SINGLE without its output signs 1, valid by consensus
@@ -61,10 +61,10 @@ TEST(FastPath, PayToPubKey)
   spend(P2PK(K1),  ScriptSig() << Sig(), Witness() << Bytes{1},          Ok | Segwit(WitnessUnexpected));
   spend(P2PK(K1),  ScriptSig() << Sig().FlipR(), Witness() << Bytes{1},  EvalFalse | Segwit(WitnessUnexpected));
   // Off the template
-  spend(P2PK(K1),  ScriptSig() << Pushdata1(Sig()),               Interpreter);
-  spend(P2PK(K1),  ScriptSig() << OP_0 << Sig(),                  Interpreter);
-  spend(P2PK(K1),  ScriptSig() << Sig() << OP_NOP,                Interpreter);
-  spend(P2PK(K1),  ScriptSig(),                                   Interpreter);
+  spend(P2PK(K1),  ScriptSig() << Pushdata1(Sig()),               Interpreter(Ok | Standard(MinimalData)));
+  spend(P2PK(K1),  ScriptSig() << OP_0 << Sig(),                  Interpreter(Ok | Standard(CleanStack)));
+  spend(P2PK(K1),  ScriptSig() << Sig() << OP_NOP,                Interpreter(Ok));
+  spend(P2PK(K1),  ScriptSig(),                                   Interpreter(InvalidStackOperation));
 }
 
 // P2PKH: <sig> <key> | DUP HASH160 <hash> EQUALVERIFY CHECKSIG
@@ -95,12 +95,12 @@ TEST(FastPath, PayToPubKeyHash)
   spend(P2PKH(OffCurve),        ScriptSig() << Sig().By(K1) << OffCurve,        EvalFalse | Standard(SigNullFail));
   spend(P2PKH(K1),  ScriptSig() << Sig() << K1, Witness() << Bytes{1}, Ok | Segwit(WitnessUnexpected));
   // Off the template
-  spend(P2PKH(K1),  ScriptSig() << Pushdata1(Sig()) << K1,        Interpreter);
-  spend(P2PKH(K1),  ScriptSig() << Sig() << Pushdata1(K1),        Interpreter);
-  spend(P2PKH(K1),  ScriptSig() << OP_0 << Sig() << K1,           Interpreter);
-  spend(P2PKH(K1),  ScriptSig() << K1,                            Interpreter);
-  spend(P2PKH(K1),  ScriptSig() << OP_1 << K1,                    Interpreter);
-  spend(P2PKH(K1),  ScriptSig() << Raw({0x05, 0x01}),             Interpreter);
+  spend(P2PKH(K1),  ScriptSig() << Pushdata1(Sig()) << K1,        Interpreter(Ok | Standard(MinimalData)));
+  spend(P2PKH(K1),  ScriptSig() << Sig() << Pushdata1(K1),        Interpreter(Ok | Standard(MinimalData)));
+  spend(P2PKH(K1),  ScriptSig() << OP_0 << Sig() << K1,           Interpreter(Ok | Standard(CleanStack)));
+  spend(P2PKH(K1),  ScriptSig() << K1,                            Interpreter(InvalidStackOperation));
+  spend(P2PKH(K1),  ScriptSig() << OP_1 << K1,                    Interpreter(EvalFalse | Bip66(SigDer)));
+  spend(P2PKH(K1),  ScriptSig() << Raw({0x05, 0x01}),             Interpreter(BadOpcode));
 }
 
 // The DER of the signature: BIP66 refuses what the lax parser takes, the parser fails the rest
@@ -173,7 +173,7 @@ TEST(FastPath, PayToWitnessPubKeyHash)
   spend(P2WPKH(NegativeZero(20)), Witness() << Sig().By(K1) << K1, EvalFalse);
   spend(P2WPKH(Concat(Zeros(19), {0x01})), Witness() << Sig().By(K1) << K1, Ok | Segwit(EqualVerify));
   // Core runs a script sig ahead of the witness
-  spend(P2WPKH(K1),  ScriptSig() << OP_0, Witness() << Sig() << K1, Interpreter);
+  spend(P2WPKH(K1),  ScriptSig() << OP_0, Witness() << Sig() << K1, Interpreter(Ok | Segwit(WitnessMalleated)));
 }
 
 // P2SH-P2WPKH: <redeem> | HASH160 <hash> EQUAL, the redeem script OP_0 <hash> runs with the witness
@@ -190,17 +190,17 @@ TEST(FastPath, PayToScriptHashWitnessPubKeyHash)
   // A program CastToBool takes for false: P2SH runs the redeem script
   const COutput zeros = P2WPKH(Zeros(20));
   spend(P2SH(zeros), ScriptSig() << Redeem(zeros), Witness() << Sig().By(K1) << K1,   Ok | P2sh(EvalFalse));
-  spend(P2SH(key1),  ScriptSig() << Bytes{0x05} << Redeem(key1), Witness() << Sig() << K1, Interpreter | Standard(MinimalData));
+  spend(P2SH(key1),  ScriptSig() << Bytes{0x05} << Redeem(key1), Witness() << Sig() << K1, Interpreter(Ok | Segwit(WitnessMalleatedP2SH)) | Standard(MinimalData));
   // Off the template: a redeem script not of P2WPKH, not pushed directly, not alone, none
   const COutput p2wsh = P2WSH(Bytes(32, 0x22));
   const COutput v1 = WitnessProgram(1, Bytes(20, 0x01));
   const COutput push21 = Output(Concat({0x00, 0x15}, Bytes(20, 0x01)));
-  spend(P2SH(p2wsh),  ScriptSig() << Redeem(p2wsh),  Witness() << Bytes{0x51},       Interpreter);
-  spend(P2SH(v1),     ScriptSig() << Redeem(v1),     Witness(),                       Interpreter);
-  spend(P2SH(push21), ScriptSig() << Redeem(push21), Witness(),                       Interpreter);
-  spend(P2SH(key1),   ScriptSig() << Pushdata1(Redeem(key1)), Witness() << Sig() << K1, Interpreter);
-  spend(P2SH(key1),   ScriptSig() << OP_0 << Redeem(key1),   Witness() << Sig() << K1, Interpreter);
-  spend(P2SH(key1),   Witness() << Sig() << K1,                                       Interpreter);
+  spend(P2SH(p2wsh),  ScriptSig() << Redeem(p2wsh),  Witness() << Bytes{0x51},       Interpreter(Ok | Segwit(WitnessProgramMismatch)));
+  spend(P2SH(v1),     ScriptSig() << Redeem(v1),     Witness(),                       Interpreter(Ok | Standard(DiscourageUpgradableWitnessProgram)));
+  spend(P2SH(push21), ScriptSig() << Redeem(push21), Witness(),                       Interpreter(Ok | P2sh(BadOpcode)));
+  spend(P2SH(key1),   ScriptSig() << Pushdata1(Redeem(key1)), Witness() << Sig() << K1, Interpreter(Ok | Segwit(WitnessMalleatedP2SH) | Standard(MinimalData)));
+  spend(P2SH(key1),   ScriptSig() << OP_0 << Redeem(key1),   Witness() << Sig() << K1, Interpreter(Ok | Segwit(WitnessMalleatedP2SH)));
+  spend(P2SH(key1),   Witness() << Sig() << K1,                                       Interpreter(InvalidStackOperation));
 }
 
 // P2TR key path: OP_1 <key>, the witness <sig>; anyone can spend it before TAPROOT
@@ -231,9 +231,9 @@ TEST(FastPath, TaprootKeyPath)
   spend(P2TR(Zeros(32)),       Witness() << Schnorr().By(K1),     EvalFalse);
   spend(P2TR(Bytes(32, 0xff)), Witness() << Schnorr().By(K1),     Ok | Taproot(SchnorrSig));
   // The script path, an annex, a script sig: the interpreter's
-  spend(P2TR(K1), Witness() << Schnorr() << Bytes{0x01},          Ok | Taproot(Interpreter));
-  spend(P2TR(K1), Witness() << Schnorr() << Annex(),              Ok | Taproot(Interpreter));
-  spend(P2TR(K1), ScriptSig() << OP_0, Witness() << Schnorr(),    Interpreter);
+  spend(P2TR(K1), Witness() << Schnorr() << Bytes{0x01},          Ok | Taproot(Interpreter(TaprootWrongControlSize)));
+  spend(P2TR(K1), Witness() << Schnorr() << Annex(),              Ok | Taproot(Interpreter(SchnorrSig)));
+  spend(P2TR(K1), ScriptSig() << OP_0, Witness() << Schnorr(),    Interpreter(Ok | Segwit(WitnessMalleated)));
 }
 
 // Records off the five templates
@@ -241,11 +241,11 @@ TEST(FastPath, OtherOutputs)
 {
   // P2PK of a key prefix no key has
   const Bytes noKey = Concat(Concat({0x21, 0x05}, Bytes(32, 0x01)), {0xac});
-  spend(P2WSH(Bytes(32, 0x22)),             Witness() << Bytes{0x51},      Interpreter);
-  spend(WitnessProgram(2, Bytes(32, 0x01)), Witness() << Bytes{0x01},      Interpreter);
-  spend(Anchor(),                           Witness(),                     Interpreter);
-  spend(Output({0x51}),                     ScriptSig(),                   Interpreter);
-  spend(Output(noKey),                      ScriptSig() << Sig().By(K1),   Interpreter);
+  spend(P2WSH(Bytes(32, 0x22)),             Witness() << Bytes{0x51},      Interpreter(Ok | Segwit(WitnessProgramMismatch)));
+  spend(WitnessProgram(2, Bytes(32, 0x01)), Witness() << Bytes{0x01},      Interpreter(Ok | Standard(DiscourageUpgradableWitnessProgram)));
+  spend(Anchor(),                           Witness(),                     Interpreter(Ok));
+  spend(Output({0x51}),                     ScriptSig(),                   Interpreter(Ok));
+  spend(Output(noKey),                      ScriptSig() << Sig().By(K1),   Interpreter(EvalFalse | Standard(PubKeyType)));
 }
 
 // What a signature commits to: a change after it is made, 1 where the change breaks it. Two inputs

@@ -675,7 +675,7 @@ bool make(const CTx &shape, const COutput &output, const CScriptSig &scriptSig, 
 }
 
 // Now against the verdicts; Defer the same at once, or one job the batch decides the same; Trust is
-// Defer with every signature valid
+// Defer with every signature valid. The interpreter, run on the same spend, gives the same verdict
 void checkSpend(const CBuilt &b, const CVerdicts &verdicts, std::source_location where)
 {
   const Tx &tx = b.Transaction;
@@ -689,8 +689,14 @@ void checkSpend(const CBuilt &b, const CVerdicts &verdicts, std::source_location
 
   for (size_t i = 0; i < std::size(FlagSets); i++) {
     const auto &[name, flags] = FlagSets[i];
-    const CVerdict &expected = verdicts.At[i];
     testing::ScopedTrace flagsTrace(where.file_name(), static_cast<int>(where.line()), std::string("flags ") + name);
+    const CVerdict expected = verdicts.At[i];
+    const CVerdict interpreted(BTC::interpretInput(checker, input, flags), expected.Interpreted);
+    // The fast path names an unexpected witness first, Core names it only after the script succeeds
+    if (!expected.Interpreted && expected.Error == EScriptError::WitnessUnexpected)
+      EXPECT_NE(interpreted.Error, EScriptError::Ok) << "the interpreter";
+    else
+      EXPECT_EQ(interpreted, expected) << "the interpreter";
 
     // Now: libsecp256k1 at once
     EXPECT_EQ(verdictOf(BTC::verifyInput(checker, input, flags, ESigMode::Now, nullptr)), expected);

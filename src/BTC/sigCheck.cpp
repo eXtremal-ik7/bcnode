@@ -29,13 +29,19 @@ EScriptError ecdsaChecksig(Script::CSpan sig,
   // NULLFAIL refuses a failed non-empty signature at once, otherwise false is left on the stack
   job.Kind = ESigKind::Ecdsa;
   job.Error = (flags & EScriptNullFail) && sig.Size != 0 ? EScriptError::SigNullFail : EScriptError::EvalFalse;
+  return ecdsaJob(sig, key, job, hashType) ? EScriptError::Ok : job.Error;
+}
+
+bool ecdsaJob(Script::CSpan sig, Script::CSpan key, CSigJob &job, uint8_t &hashType)
+{
   // Fails whatever the digest: no signature, a key of no size libsecp256k1 parses, no DER
-  if (sig.Size == 0 || key.Size > sizeof(job.PubKey) || !ecdsaCompact({sig.Data, sig.Size - 1}, job.Signature))
-    return job.Error;
+  if (sig.Size == 0 || key.Size == 0 || key.Size > sizeof(job.PubKey) || !ecdsaCompact({sig.Data, sig.Size - 1}, job.Signature))
+    return false;
+  job.Kind = ESigKind::Ecdsa;
   job.PubKeySize = static_cast<uint8_t>(key.Size);
   memcpy(job.PubKey, key.Data, key.Size);
   hashType = sig.Data[sig.Size - 1];
-  return EScriptError::Ok;
+  return true;
 }
 
 bool verifySigJob(const CSigJob &job)

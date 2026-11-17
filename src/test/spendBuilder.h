@@ -391,9 +391,6 @@ struct CVerdict {
   bool operator==(const CVerdict&) const = default;
 };
 
-// Off the templates: the interpreter's. A stub for now, it passes every spend
-inline const CVerdict Interpreter{BTC::EScriptError::Ok, true};
-
 void PrintTo(const CVerdict &verdict, std::ostream *os);
 
 // The flag sets, each holding the one before it: none, P2SH, WITNESS, TAPROOT (a block before
@@ -424,6 +421,15 @@ struct CVerdicts {
   CVerdicts(BTC::EScriptError error) { At.fill(error); }
   CVerdicts(CVerdict verdict) { At.fill(verdict); }
 };
+
+// Off the templates: the fast path passes the spend on, the interpreter gives the verdict
+inline CVerdict Interpreter(BTC::EScriptError error) { return {error, true}; }
+inline CVerdicts Interpreter(CVerdicts verdicts)
+{
+  for (CVerdict &verdict: verdicts.At)
+    verdict.Interpreted = true;
+  return verdicts;
+}
 
 // verdicts, and from's verdict from its flag set on
 CVerdicts operator|(CVerdicts verdicts, const CFrom &from);

@@ -33,8 +33,8 @@ struct CScriptFailure {
 // What a check went through
 struct CScriptCount {
   uint64_t Inputs = 0;
-  // Left to the interpreter: unchecked while it is a stub
-  uint64_t Interpreted = 0;
+  // Taken as valid with nothing to check them: a coin without script checks (ZEC)
+  uint64_t Unchecked = 0;
 };
 
 // Every input under a block's flags. spent - the records of the outputs the inputs spend, one to
@@ -54,7 +54,6 @@ bool verifyTransaction(const TxTy &tx,
   for (size_t i = 0; i < tx.TxIn.size(); i++) {
     const CInputVerdict verdict = verifyInput(checker, i, flags, mode, batch);
     count.Inputs++;
-    count.Interpreted += verdict.Interpreted;
     if (verdict.Result == EVerdict::Invalid) {
       failure = {ordinal, static_cast<uint32_t>(i), verdict.Error};
       return false;
@@ -116,7 +115,6 @@ bool verifyBlockScripts(const BlockTy &block,
     flush();
 
   result.Inputs += count.Inputs;
-  result.Unchecked += count.Interpreted;
   if (!isValid) {
     result.Tx = failure.Tx;
     result.Input = failure.Input;
@@ -147,7 +145,6 @@ EScriptRefusal verifyTransactionPolicy(const TxTy &tx,
   for (size_t i = 0; i < tx.TxIn.size(); i++) {
     CInputVerdict verdict = verifyInput(checker, i, standardFlags, ESigMode::Now, nullptr);
     count.Inputs++;
-    count.Interpreted += verdict.Interpreted;
     if (verdict.Result == EVerdict::Valid)
       continue;
 
